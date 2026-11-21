@@ -74,6 +74,25 @@ impl TextPipeline {
         self.metrics
     }
 
+    /// Shape a short UI string and return its width in physical pixels.
+    pub fn measure_ui_text(&mut self, text: &str, font_size: f32, bold: bool) -> f32 {
+        let line_height = (font_size * 1.35).max(1.0);
+        let mut buffer = Buffer::new(&mut self.font_system, Metrics::new(font_size, line_height));
+        buffer.set_wrap(Wrap::None);
+        buffer.set_size(Some(10_000.0), Some(line_height));
+
+        let attrs = Attrs::new()
+            .family(Family::Name(&self.ui_family))
+            .weight(if bold { Weight::BOLD } else { Weight::NORMAL });
+        buffer.set_text(text, &attrs, Shaping::Basic, None);
+        buffer.shape_until_scroll(&mut self.font_system, false);
+
+        buffer
+            .layout_runs()
+            .map(|run| run.line_w)
+            .fold(0.0, f32::max)
+    }
+
     pub fn update_viewport(&mut self, queue: &wgpu::Queue, width: u32, height: u32) {
         self.viewport.update(
             queue,

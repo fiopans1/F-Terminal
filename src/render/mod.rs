@@ -130,6 +130,11 @@ impl Renderer {
         self.text.cell_metrics()
     }
 
+    /// Measure a short UI string in physical pixels.
+    pub fn measure_ui_text(&mut self, text: &str, font_size: f32, bold: bool) -> f32 {
+        self.text.measure_ui_text(text, font_size, bold)
+    }
+
     pub fn scale_factor(&self) -> f64 {
         self.scale_factor
     }

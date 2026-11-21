@@ -135,7 +135,8 @@ gráfica.
 ## Rama y cambios por terminal
 
 - Cada pane muestra dos burbujas agrupadas abajo a la izquierda: una con la
-  rama actual y otra con los cambios `+N -N` (añadidas/eliminadas).
+  rama actual y otra con los cambios `+N -N` (añadidas/eliminadas), con la
+  mitad verde para las adiciones y la mitad roja para las eliminaciones.
 - Las estadísticas salen de `git diff --numstat HEAD` (cambios tracked, staged
   y unstaged) y se actualizan al cambiar el cwd y cada 2 segundos.
 - La inspección corre en un hilo de background por pane, así que un repo grande

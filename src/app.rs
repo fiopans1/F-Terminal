@@ -2332,21 +2332,27 @@ impl WindowState {
             push_cursor_quads(&mut quads, *content, frame, metrics, theme);
         }
 
-        for pane_layout in &self.view.panes {
-            let Some(pane) = self.workspace.pane(pane_layout.id) else {
-                continue;
-            };
-            build_pane_footer(
-                pane,
-                pane_layout.footer,
-                PaneFooterStyle {
-                    scale,
-                    ui_font_size,
-                    theme,
-                },
-                &mut quads,
-                &mut labels,
-            );
+        {
+            let view = &self.view;
+            let workspace = &self.workspace;
+            let renderer = &mut self.renderer;
+            for pane_layout in &view.panes {
+                let Some(pane) = workspace.pane(pane_layout.id) else {
+                    continue;
+                };
+                build_pane_footer(
+                    pane,
+                    pane_layout.footer,
+                    PaneFooterStyle {
+                        scale,
+                        ui_font_size,
+                        theme,
+                    },
+                    renderer,
+                    &mut quads,
+                    &mut labels,
+                );
+            }
         }
 
         if let (Some(editor), Some(layout)) = (&self.editor, self.view.editor) {
@@ -2794,6 +2800,7 @@ fn build_pane_footer(
     pane: &Pane,
     footer: Rect,
     style: PaneFooterStyle<'_>,
+    renderer: &mut Renderer,
     quads: &mut Vec<Quad>,
     labels: &mut Vec<Label>,
 ) {
@@ -2826,8 +2833,8 @@ fn build_pane_footer(
 
     let additions = format!("+{}", status.additions);
     let deletions = format!("-{}", status.deletions);
-    let additions_width = text_width(&additions, font);
-    let deletions_width = text_width(&deletions, font);
+    let additions_width = renderer.measure_ui_text(&additions, font, false);
+    let deletions_width = renderer.measure_ui_text(&deletions, font, false);
     let changes_width = padding * 2.0 + additions_width + gap + deletions_width;
 
     let can_show_changes = footer.width >= changes_width + edge * 2.0 + 60.0 * scale;
@@ -2841,11 +2848,12 @@ fn build_pane_footer(
     let dot = (4.0 * scale).max(2.0);
     let dot_gap = 5.0 * scale;
     let branch_text_max = (branch_max - padding * 2.0 - dot - dot_gap).max(0.0);
-    let branch = truncate_to_width(&status.branch, branch_text_max, font);
+    let branch = truncate_to_width(&status.branch, branch_text_max, font, true, renderer);
 
     let mut branch_width = 0.0;
     if !branch.is_empty() && branch_max > dot + dot_gap + padding {
-        let width = (pill_width(&branch, font, padding) + dot + dot_gap).min(branch_max);
+        let branch_text_width = renderer.measure_ui_text(&branch, font, true);
+        let width = (branch_text_width + padding * 2.0 + dot + dot_gap).min(branch_max);
         let x = footer.x + edge;
         quads.push(Quad::rounded(
             x,
@@ -2895,6 +2903,35 @@ fn build_pane_footer(
         to_linear(theme.sidebar_active, 1.0),
     ));
 
+    let additions_background = if status.additions > 0 {
+        theme.diff_add_background
+    } else {
+        theme.sidebar_hover
+    };
+    let deletions_background = if status.deletions > 0 {
+        theme.diff_remove_background
+    } else {
+        theme.sidebar_hover
+    };
+    let green_width = padding + additions_width + gap * 0.5;
+    let red_width = (changes_width - green_width).max(0.0);
+    quads.push(Quad::rounded_corners(
+        changes_x,
+        y,
+        green_width,
+        pill_height,
+        [radius, 0.0, 0.0, radius],
+        to_linear(additions_background, 1.0),
+    ));
+    quads.push(Quad::rounded_corners(
+        changes_x + green_width,
+        y,
+        red_width,
+        pill_height,
+        [0.0, radius, radius, 0.0],
+        to_linear(deletions_background, 1.0),
+    ));
+
     let additions_color = if status.additions > 0 {
         theme.diff_add_text
     } else {
@@ -2926,26 +2963,31 @@ fn build_pane_footer(
     });
 }
 
-fn text_width(text: &str, font_size: f32) -> f32 {
-    text.chars().count() as f32 * font_size * 0.62
-}
-
-fn pill_width(text: &str, font_size: f32, padding: f32) -> f32 {
-    text_width(text, font_size) + padding * 2.0
-}
-
-fn truncate_to_width(text: &str, max_width: f32, font_size: f32) -> String {
-    let max_chars = (max_width / (font_size * 0.62)).floor().max(0.0) as usize;
-    if text.chars().count() <= max_chars {
-        return text.to_owned();
-    }
-    if max_chars == 0 {
+fn truncate_to_width(
+    text: &str,
+    max_width: f32,
+    font_size: f32,
+    bold: bool,
+    renderer: &mut Renderer,
+) -> String {
+    if max_width <= 0.0 {
         return String::new();
     }
+    if renderer.measure_ui_text(text, font_size, bold) <= max_width {
+        return text.to_owned();
+    }
 
-    let mut truncated: String = text.chars().take(max_chars.saturating_sub(1)).collect();
-    truncated.push('…');
-    truncated
+    let mut chars: Vec<char> = text.chars().collect();
+    while !chars.is_empty() {
+        chars.pop();
+        let mut candidate: String = chars.iter().collect();
+        candidate.push('…');
+        if renderer.measure_ui_text(&candidate, font_size, bold) <= max_width {
+            return candidate;
+        }
+    }
+
+    String::new()
 }
 
 fn push_cursor_quads(
