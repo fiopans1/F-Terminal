@@ -105,16 +105,29 @@ gráfica.
 - `Cmd+Shift+R` / `Ctrl+Shift+R` o el ítem **Code Review** del menú de macOS.
 - Abre una **ventana nativa separada**; la terminal principal sigue funcionando.
 - Toma el repositorio Git del cwd del pane enfocado.
-- Tres columnas: reviews, selector de archivos y diff.
-- Entradas: **Working changes**, **Branch vs main/master** y los últimos 15
-  commits.
-- En la lista de reviews: `↑↓`, `Enter` o clic para abrir; `R` refresca.
+- Tres columnas (reviews, selector de archivos y diff) y dos pestañas:
+  - **LOCAL**: working changes, rama contra `main`/`master` y los últimos 15
+    commits.
+  - **PULL REQUESTS**: todas las PRs abiertas del remoto de GitHub, con buscador.
+- En **LOCAL**, `↑↓`/`Enter` o clic abren una review y `R` refresca.
+- En **PULL REQUESTS**, `/` o `Cmd+F`/`Ctrl+F` enfocan el buscador; filtra por
+  número, título, autor o rama (varios términos separados por espacios).
+  `↑↓` mueve, `Enter` carga el diff y `R` recarga la lista. `Esc` sale del
+  buscador sin cerrar la ventana.
 - En el selector de archivos: `↑↓` mueve, `Espacio`/`M` marca el archivo como
   revisado (solo durante la sesión), `Enter` pasa al diff.
 - En el diff: `↑↓`/PgUp/PgDn desplazan, `←→` horizontal.
 - `Tab` cambia de panel; `Esc` o `×` cierran la ventana.
-- La carga del diff ocurre en un hilo aparte.
-- Limitaciones: solo Git local (no PRs de GitHub), sin comentarios inline ni
+- La lista de PRs y el diff se cargan en hilos aparte.
+- Autenticación de GitHub: los repos públicos funcionan sin token (con el límite
+  de peticiones de la API). Para repos privados, en orden de prioridad:
+  1. `GITHUB_TOKEN` o `GH_TOKEN` en el entorno.
+  2. `~/.config/f-terminal/github-token` (o `%APPDATA%\f-terminal\github-token`
+     en Windows), con el token en la primera línea.
+  3. `gh auth token`, si `gh` está instalado y autenticado.
+  El token necesita permiso de lectura sobre *Pull requests* (y *Contents* si
+  usas un token fine-grained).
+- Limitaciones: solo GitHub local (no GitLab), sin comentarios inline, sin
   revisión por IA, sin resaltado de sintaxis dentro del diff, corte a 50.000
   líneas y las marcas de revisado no se persisten.
 
@@ -136,9 +149,10 @@ gráfica.
 - Colapsar la sidebar con `«` y recuperarla con el rail `»`; también con atajo.
 - Menú nativo en macOS: Abrir explorador, Abrir en VS Code, Code Review,
   Ajustes (placeholder) y Salir.
-- Modal de **Code Review** en una **ventana independiente** sobre el repositorio
-  del pane enfocado: cambios locales, rama contra `main`/`master` y últimos 15
-  commits. La terminal sigue usable mientras la review está abierta.
+- Ventana **Code Review** independiente sobre el repositorio del pane enfocado:
+  cambios locales, rama contra `main`/`master`, últimos commits y todas las
+  **pull requests abiertas** de GitHub con buscador. La terminal sigue usable
+  mientras la review está abierta.
 - Selector de archivos al lado del diff, con estado (M/A/D/R), líneas añadidas
   y eliminadas, y marca de revisado por archivo durante la sesión.
 - Al seleccionar una review, el diff por archivo se carga en background con

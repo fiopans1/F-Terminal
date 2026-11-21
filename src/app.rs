@@ -186,6 +186,18 @@ impl ApplicationHandler<UserEvent> for App {
                 }
                 return;
             }
+            UserEvent::PullRequestsLoaded {
+                window_id,
+                request_id,
+                result,
+            } => {
+                if let Some(review) = &mut self.review
+                    && review.window_id() == window_id
+                {
+                    review.apply_pull_requests(request_id, result);
+                }
+                return;
+            }
             UserEvent::Menu(menu::Action::CodeReview) => {
                 let cwd = self
                     .window
@@ -216,7 +228,9 @@ impl ApplicationHandler<UserEvent> for App {
                 revision,
                 spans,
             } => state.on_highlight(generation, revision, spans),
-            UserEvent::OpenCodeReview { .. } | UserEvent::ReviewLoaded { .. } => {}
+            UserEvent::OpenCodeReview { .. }
+            | UserEvent::ReviewLoaded { .. }
+            | UserEvent::PullRequestsLoaded { .. } => {}
         }
     }
 

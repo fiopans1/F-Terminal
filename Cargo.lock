@@ -689,6 +689,7 @@ dependencies = [
  "pollster",
  "portable-pty",
  "serde",
+ "serde_json",
  "syntect",
  "sysinfo",
  "vte",

@@ -5,7 +5,7 @@ use winit::window::WindowId;
 
 use crate::highlight::StyledSpan;
 use crate::menu::Action;
-use crate::review::ReviewDetail;
+use crate::review::{PullRequestSummary, ReviewDetail};
 use crate::workspace::PaneId;
 
 /// Events sent from background threads (PTY readers, terminal event proxy)
@@ -34,5 +34,11 @@ pub enum UserEvent {
         window_id: WindowId,
         request_id: u64,
         result: Result<ReviewDetail, String>,
+    },
+    /// Open pull requests loaded from GitHub in the background.
+    PullRequestsLoaded {
+        window_id: WindowId,
+        request_id: u64,
+        result: Result<Vec<PullRequestSummary>, String>,
     },
 }

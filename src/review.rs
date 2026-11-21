@@ -1,6 +1,8 @@
 use std::fs;
+use std::io::Write;
 use std::path::{Path, PathBuf};
-use std::process::Command;
+use std::process::{Command, Stdio};
+use std::sync::OnceLock;
 
 use anyhow::{Context, Result, bail};
 
@@ -12,6 +14,7 @@ pub enum ReviewKind {
     Working,
     Branch { base: String },
     Commit { hash: String },
+    PullRequest { number: u64 },
 }
 
 #[derive(Clone, Debug)]
@@ -19,6 +22,29 @@ pub struct ReviewSummary {
     pub title: String,
     pub subtitle: String,
     pub kind: ReviewKind,
+}
+
+#[derive(Clone, Debug)]
+pub struct PullRequestSummary {
+    pub number: u64,
+    pub title: String,
+    pub author: String,
+    pub head: String,
+    pub base: String,
+    pub draft: bool,
+}
+
+impl PullRequestSummary {
+    pub fn to_review(&self) -> ReviewSummary {
+        let draft = if self.draft { " · draft" } else { "" };
+        ReviewSummary {
+            title: format!("#{} {}", self.number, self.title),
+            subtitle: format!("@{} · {} → {}{}", self.author, self.head, self.base, draft),
+            kind: ReviewKind::PullRequest {
+                number: self.number,
+            },
+        }
+    }
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -66,7 +92,7 @@ pub struct ReviewDetail {
     pub deletions: usize,
 }
 
-/// State for the Code Review modal.
+/// State for the Code Review window.
 pub struct CodeReview {
     pub repo: PathBuf,
     pub reviews: Vec<ReviewSummary>,
@@ -78,6 +104,10 @@ pub struct CodeReview {
     pub scroll_col: usize,
     pub error: Option<String>,
     pub generation: u64,
+    pub pull_requests: Vec<PullRequestSummary>,
+    pub prs_loading: bool,
+    pub prs_loaded: bool,
+    pub prs_error: Option<String>,
 }
 
 impl CodeReview {
@@ -100,6 +130,10 @@ impl CodeReview {
                     scroll_col: 0,
                     error,
                     generation: 0,
+                    pull_requests: Vec::new(),
+                    prs_loading: false,
+                    prs_loaded: false,
+                    prs_error: None,
                 }
             }
             Err(error) => Self {
@@ -113,6 +147,10 @@ impl CodeReview {
                 scroll_col: 0,
                 error: Some(format!("{error:#}")),
                 generation: 0,
+                pull_requests: Vec::new(),
+                prs_loading: false,
+                prs_loaded: false,
+                prs_error: None,
             },
         }
     }
@@ -121,15 +159,33 @@ impl CodeReview {
         self.reviews.get(self.selected)
     }
 
-    pub fn start_loading(&mut self, generation: u64) -> Option<(PathBuf, ReviewSummary)> {
-        let summary = self.reviews.get(self.selected)?.clone();
+    pub fn start_loading_summary(
+        &mut self,
+        generation: u64,
+        summary: ReviewSummary,
+    ) -> (PathBuf, ReviewSummary) {
         self.generation = generation;
         self.loading = true;
         self.detail = None;
         self.scroll_row = 0;
         self.scroll_col = 0;
         self.error = None;
-        Some((self.repo.clone(), summary))
+        (self.repo.clone(), summary)
+    }
+
+    pub fn apply_pull_requests(
+        &mut self,
+        result: std::result::Result<Vec<PullRequestSummary>, String>,
+    ) {
+        self.prs_loading = false;
+        self.prs_loaded = true;
+        match result {
+            Ok(pull_requests) => {
+                self.pull_requests = pull_requests;
+                self.prs_error = None;
+            }
+            Err(error) => self.prs_error = Some(error),
+        }
     }
 
     pub fn apply_detail(
@@ -211,6 +267,7 @@ pub fn load_detail(repo: &Path, summary: &ReviewSummary) -> Result<ReviewDetail>
                 hash,
             ],
         )?,
+        ReviewKind::PullRequest { number } => load_pull_request_diff(repo, *number)?,
     };
 
     if diff.lines().count() > MAX_DIFF_LINES {
@@ -225,6 +282,233 @@ pub fn load_detail(repo: &Path, summary: &ReviewSummary) -> Result<ReviewDetail>
 
     let detail = parse_diff(&diff, summary.clone());
     Ok(detail)
+}
+
+pub fn load_pull_requests(repo: &Path) -> Result<Vec<PullRequestSummary>> {
+    let slug = github_slug(repo)?;
+    let mut pull_requests = Vec::new();
+
+    for page in 1..=10 {
+        let url = format!(
+            "https://api.github.com/repos/{slug}/pulls?state=open&per_page=100&page={page}&sort=updated&direction=desc"
+        );
+        let body = github_get(&url, "application/vnd.github+json")?;
+        let pulls = parse_pull_requests(&body)?;
+        let count = pulls.len();
+        pull_requests.extend(pulls);
+        if count < 100 {
+            break;
+        }
+    }
+
+    Ok(pull_requests)
+}
+
+fn parse_pull_requests(body: &str) -> Result<Vec<PullRequestSummary>> {
+    let pulls: Vec<GithubPull> =
+        serde_json::from_str(body).context("failed to parse the GitHub pull request list")?;
+    Ok(pulls.into_iter().map(PullRequestSummary::from).collect())
+}
+
+fn load_pull_request_diff(repo: &Path, number: u64) -> Result<String> {
+    let slug = github_slug(repo)?;
+    let url = format!("https://api.github.com/repos/{slug}/pulls/{number}");
+    github_get(&url, "application/vnd.github.v3.diff")
+}
+
+#[derive(serde::Deserialize)]
+struct GithubPull {
+    number: u64,
+    title: String,
+    user: Option<GithubUser>,
+    head: GithubRef,
+    base: GithubRef,
+    #[serde(default)]
+    draft: bool,
+}
+
+#[derive(serde::Deserialize)]
+struct GithubUser {
+    login: String,
+}
+
+#[derive(serde::Deserialize)]
+struct GithubRef {
+    #[serde(rename = "ref")]
+    name: String,
+}
+
+impl From<GithubPull> for PullRequestSummary {
+    fn from(pull: GithubPull) -> Self {
+        Self {
+            number: pull.number,
+            title: pull.title,
+            author: pull
+                .user
+                .map(|user| user.login)
+                .unwrap_or_else(|| "ghost".to_owned()),
+            head: pull.head.name,
+            base: pull.base.name,
+            draft: pull.draft,
+        }
+    }
+}
+
+fn github_slug(repo: &Path) -> Result<String> {
+    let url = git(repo, &["remote", "get-url", "origin"])
+        .ok()
+        .or_else(|| {
+            let remotes = git(repo, &["remote"]).ok()?;
+            let name = remotes.lines().next()?;
+            git(repo, &["remote", "get-url", name]).ok()
+        })
+        .context("this repository has no Git remote")?;
+    let url = url.trim();
+
+    parse_github_slug(url).with_context(|| format!("remote is not a GitHub repository: {url}"))
+}
+
+fn parse_github_slug(url: &str) -> Option<String> {
+    let url = url.trim().trim_end_matches('/');
+    let rest = url
+        .strip_prefix("git@github.com:")
+        .or_else(|| url.strip_prefix("ssh://git@github.com/"))
+        .or_else(|| url.strip_prefix("https://github.com/"))
+        .or_else(|| url.strip_prefix("http://github.com/"))
+        .or_else(|| url.strip_prefix("https://www.github.com/"))
+        .or_else(|| url.strip_prefix("git://github.com/"))?;
+    let rest = rest.strip_suffix(".git").unwrap_or(rest);
+
+    let mut parts = rest.split('/');
+    let owner = parts.next().filter(|part| !part.is_empty())?;
+    let name = parts.next().filter(|part| !part.is_empty())?;
+    if parts.next().is_some() {
+        return None;
+    }
+
+    Some(format!("{owner}/{name}"))
+}
+
+fn github_get(url: &str, accept: &str) -> Result<String> {
+    let mut command = Command::new("curl");
+    command.args([
+        "-sS",
+        "-L",
+        "--max-time",
+        "30",
+        "--connect-timeout",
+        "10",
+        "-H",
+        "User-Agent: f-terminal",
+        "-H",
+        &format!("Accept: {accept}"),
+        "-w",
+        "\n%{http_code}",
+    ]);
+
+    let token = github_token();
+    if token.is_some() {
+        command.args(["-H", "@-"]).stdin(Stdio::piped());
+    }
+    command.stdout(Stdio::piped()).stderr(Stdio::piped());
+
+    let mut child = command
+        .arg(url)
+        .spawn()
+        .context("failed to run curl; install curl to list pull requests")?;
+
+    if let Some(token) = token
+        && let Some(mut stdin) = child.stdin.take()
+    {
+        let _ = writeln!(stdin, "Authorization: Bearer {token}");
+    }
+
+    let output = child
+        .wait_with_output()
+        .context("failed to wait for the GitHub request")?;
+
+    if !output.status.success() {
+        bail!(
+            "GitHub request failed: {}",
+            String::from_utf8_lossy(&output.stderr).trim()
+        );
+    }
+
+    let response = String::from_utf8_lossy(&output.stdout);
+    let Some((body, status)) = response.rsplit_once('\n') else {
+        bail!("unexpected response from the GitHub API");
+    };
+    let status = status.trim();
+
+    if status != "200" {
+        let hint = match status {
+            "401" | "403" | "404" => {
+                " (private repository or missing token? set GITHUB_TOKEN, GH_TOKEN or ~/.config/f-terminal/github-token)"
+            }
+            _ => "",
+        };
+        bail!("GitHub API returned HTTP {status}{hint}: {}", body.trim());
+    }
+
+    Ok(body.to_owned())
+}
+
+fn github_token() -> Option<String> {
+    for key in ["GITHUB_TOKEN", "GH_TOKEN"] {
+        if let Ok(value) = std::env::var(key) {
+            let value = value.trim();
+            if !value.is_empty() {
+                return Some(value.to_owned());
+            }
+        }
+    }
+
+    if let Some(path) = github_token_file()
+        && let Ok(value) = fs::read_to_string(path)
+    {
+        let value = value.trim();
+        if !value.is_empty() {
+            return Some(value.to_owned());
+        }
+    }
+
+    static GH_TOKEN: OnceLock<Option<String>> = OnceLock::new();
+    GH_TOKEN
+        .get_or_init(|| {
+            let output = Command::new("gh").args(["auth", "token"]).output().ok()?;
+            if output.status.success() {
+                let token = String::from_utf8_lossy(&output.stdout).trim().to_owned();
+                if !token.is_empty() {
+                    return Some(token);
+                }
+            }
+            None
+        })
+        .clone()
+}
+
+fn github_token_file() -> Option<PathBuf> {
+    #[cfg(windows)]
+    {
+        let base = std::env::var_os("APPDATA")?;
+        return Some(PathBuf::from(base).join("f-terminal").join("github-token"));
+    }
+
+    #[cfg(not(windows))]
+    {
+        if let Some(base) = std::env::var_os("XDG_CONFIG_HOME") {
+            return Some(PathBuf::from(base).join("f-terminal").join("github-token"));
+        }
+        if let Some(base) = std::env::var_os("HOME") {
+            return Some(
+                PathBuf::from(base)
+                    .join(".config")
+                    .join("f-terminal")
+                    .join("github-token"),
+            );
+        }
+        None
+    }
 }
 
 fn repository_root(start: &Path) -> Result<PathBuf> {
@@ -596,6 +880,61 @@ fn git_at(repo: &Path, args: &[&str]) -> Result<String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn parses_github_pull_requests() {
+        let body = r#"[
+            {
+                "number": 42,
+                "title": "Add search",
+                "user": { "login": "octocat" },
+                "head": { "ref": "feat/search" },
+                "base": { "ref": "main" },
+                "draft": false
+            },
+            {
+                "number": 7,
+                "title": "Draft work",
+                "user": null,
+                "head": { "ref": "wip" },
+                "base": { "ref": "main" },
+                "draft": true
+            }
+        ]"#;
+
+        let pulls = parse_pull_requests(body).unwrap();
+        assert_eq!(pulls.len(), 2);
+        assert_eq!(pulls[0].number, 42);
+        assert_eq!(pulls[0].author, "octocat");
+        assert_eq!(pulls[0].head, "feat/search");
+        assert_eq!(pulls[1].author, "ghost");
+        assert!(pulls[1].draft);
+        assert_eq!(pulls[0].to_review().title, "#42 Add search");
+    }
+
+    #[test]
+    fn parses_github_remotes() {
+        for url in [
+            "git@github.com:fiopans1/F-Terminal.git",
+            "ssh://git@github.com/fiopans1/F-Terminal.git",
+            "https://github.com/fiopans1/F-Terminal.git",
+            "https://github.com/fiopans1/F-Terminal",
+            "https://www.github.com/fiopans1/F-Terminal/",
+            "git://github.com/fiopans1/F-Terminal.git",
+        ] {
+            assert_eq!(
+                parse_github_slug(url).as_deref(),
+                Some("fiopans1/F-Terminal"),
+                "{url}"
+            );
+        }
+
+        assert_eq!(
+            parse_github_slug("https://gitlab.com/fiopans1/F-Terminal.git"),
+            None
+        );
+        assert_eq!(parse_github_slug("https://github.com/fiopans1"), None);
+    }
 
     #[test]
     fn parses_a_unified_diff() {

@@ -2,7 +2,7 @@ use std::collections::HashSet;
 use std::sync::Arc;
 
 use winit::dpi::PhysicalPosition;
-use winit::event::{ElementState, KeyEvent, MouseButton, MouseScrollDelta, WindowEvent};
+use winit::event::{ElementState, Ime, KeyEvent, MouseButton, MouseScrollDelta, WindowEvent};
 use winit::event_loop::EventLoopProxy;
 use winit::keyboard::{Key, KeyCode, ModifiersState, NamedKey, PhysicalKey};
 use winit::window::{Window, WindowId};
@@ -13,7 +13,10 @@ use crate::layout::Rect;
 use crate::render::quads::Quad;
 use crate::render::scene::{Label, PaneLayer, Scene};
 use crate::render::{CellMetrics, Renderer};
-use crate::review::{self, CodeReview, DiffLineKind, FileDiff, FileStatus, ReviewDetail};
+use crate::review::{
+    self, CodeReview, DiffLineKind, FileDiff, FileStatus, PullRequestSummary, ReviewDetail,
+    ReviewSummary,
+};
 use crate::term::color::{Theme, to_linear};
 use crate::term::frame::{Frame, Row, Run};
 
@@ -24,11 +27,20 @@ enum Focus {
     Diff,
 }
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum ListMode {
+    Local,
+    PullRequests,
+}
+
 struct Layout {
     header: Rect,
     footer: Rect,
     close: Rect,
     reviews: Rect,
+    tabs: [Rect; 2],
+    search: Option<Rect>,
+    list_area: Rect,
     files: Option<Rect>,
     diff: Option<Rect>,
     diff_title: Option<Rect>,
@@ -50,10 +62,16 @@ pub struct ReviewWindow {
     modifiers: ModifiersState,
     cursor: PhysicalPosition<f64>,
     focus: Focus,
+    mode: ListMode,
+    search: String,
+    search_focused: bool,
     selected_file: usize,
     file_offset: usize,
+    pr_selected: usize,
+    pr_offset: usize,
     reviewed: HashSet<String>,
     request_id: u64,
+    prs_request_id: u64,
     close_requested: bool,
 }
 
@@ -64,7 +82,7 @@ impl ReviewWindow {
         directory: std::path::PathBuf,
         proxy: EventLoopProxy<UserEvent>,
     ) -> Self {
-        Self {
+        let mut window = Self {
             window,
             renderer,
             review: CodeReview::open(directory),
@@ -72,12 +90,20 @@ impl ReviewWindow {
             modifiers: ModifiersState::empty(),
             cursor: PhysicalPosition::new(0.0, 0.0),
             focus: Focus::Reviews,
+            mode: ListMode::Local,
+            search: String::new(),
+            search_focused: false,
             selected_file: 0,
             file_offset: 0,
+            pr_selected: 0,
+            pr_offset: 0,
             reviewed: HashSet::new(),
             request_id: 0,
+            prs_request_id: 0,
             close_requested: false,
-        }
+        };
+        window.start_prs_load();
+        window
     }
 
     pub fn window_id(&self) -> WindowId {
@@ -111,6 +137,7 @@ impl ReviewWindow {
                 self.modifiers = modifiers.state();
             }
             WindowEvent::KeyboardInput { event, .. } => self.on_key(event, config),
+            WindowEvent::Ime(Ime::Commit(text)) => self.on_ime(&text),
             WindowEvent::CursorMoved { position, .. } => {
                 self.cursor = position;
             }
@@ -149,13 +176,183 @@ impl ReviewWindow {
         self.window.request_redraw();
     }
 
-    fn start_detail(&mut self) {
-        self.request_id = self.request_id.wrapping_add(1);
-        let request_id = self.request_id;
+    pub fn apply_pull_requests(
+        &mut self,
+        request_id: u64,
+        result: std::result::Result<Vec<PullRequestSummary>, String>,
+    ) {
+        if request_id != self.prs_request_id {
+            return;
+        }
 
-        let Some((repo, summary)) = self.review.start_loading(request_id) else {
+        if let Ok(pull_requests) = &result {
+            log::info!("loaded {} open pull request(s)", pull_requests.len());
+        }
+
+        self.review.apply_pull_requests(result);
+        self.pr_selected = 0;
+        self.pr_offset = 0;
+        self.window.request_redraw();
+    }
+
+    fn start_prs_load(&mut self) {
+        if self.review.prs_loading {
+            return;
+        }
+
+        self.prs_request_id = self.prs_request_id.wrapping_add(1);
+        let request_id = self.prs_request_id;
+        self.review.prs_loading = true;
+        self.review.prs_error = None;
+
+        let repo = self.review.repo.clone();
+        let proxy = self.proxy.clone();
+        let window_id = self.window.id();
+        let spawned = std::thread::Builder::new()
+            .name("pull-requests".into())
+            .spawn(move || {
+                let result =
+                    review::load_pull_requests(&repo).map_err(|error| format!("{error:#}"));
+                let _ = proxy.send_event(UserEvent::PullRequestsLoaded {
+                    window_id,
+                    request_id,
+                    result,
+                });
+            });
+
+        if let Err(error) = spawned {
+            self.review.prs_loading = false;
+            self.review.prs_error = Some(format!("failed to start pull request loading: {error}"));
+        }
+
+        self.window.request_redraw();
+    }
+
+    fn filtered_prs(&self) -> Vec<usize> {
+        let terms: Vec<String> = self
+            .search
+            .split_whitespace()
+            .map(|term| term.to_lowercase())
+            .collect();
+
+        self.review
+            .pull_requests
+            .iter()
+            .enumerate()
+            .filter(|(_, pull)| {
+                if terms.is_empty() {
+                    return true;
+                }
+                let haystack = format!(
+                    "#{} {} {} {} {}",
+                    pull.number, pull.title, pull.author, pull.head, pull.base
+                )
+                .to_lowercase();
+                terms.iter().all(|term| haystack.contains(term))
+            })
+            .map(|(index, _)| index)
+            .collect()
+    }
+
+    fn item_count(&self) -> usize {
+        match self.mode {
+            ListMode::Local => self.review.reviews.len(),
+            ListMode::PullRequests => self.filtered_prs().len(),
+        }
+    }
+
+    fn selected_index(&self) -> usize {
+        match self.mode {
+            ListMode::Local => self.review.selected,
+            ListMode::PullRequests => self.pr_selected,
+        }
+    }
+
+    fn set_mode(&mut self, mode: ListMode) {
+        if self.mode == mode {
+            if mode == ListMode::PullRequests {
+                self.focus = Focus::Reviews;
+                self.search_focused = true;
+                self.window.request_redraw();
+            }
+            return;
+        }
+
+        self.mode = mode;
+        self.search_focused = false;
+        self.review.back_to_list();
+        self.reviewed.clear();
+        self.selected_file = 0;
+        self.file_offset = 0;
+
+        if mode == ListMode::PullRequests {
+            if !self.review.prs_loaded && !self.review.prs_loading {
+                self.start_prs_load();
+            }
+            self.search_focused = true;
+            self.pr_selected = 0;
+            self.pr_offset = 0;
+        }
+
+        self.window.request_redraw();
+    }
+
+    fn reset_selection(&mut self) {
+        self.review.back_to_list();
+        self.reviewed.clear();
+        self.selected_file = 0;
+        self.file_offset = 0;
+    }
+
+    fn reset_pr_selection(&mut self) {
+        self.pr_selected = 0;
+        self.pr_offset = 0;
+        self.reset_selection();
+    }
+
+    fn set_selected(&mut self, index: usize) {
+        match self.mode {
+            ListMode::Local => self.review.selected = index,
+            ListMode::PullRequests => self.pr_selected = index,
+        }
+        self.reset_selection();
+    }
+
+    fn select_relative(&mut self, delta: isize) {
+        let count = self.item_count();
+        if count == 0 {
+            return;
+        }
+
+        let current = self.selected_index().min(count - 1);
+        let next = (current as isize + delta).clamp(0, count as isize - 1) as usize;
+        self.set_selected(next);
+    }
+
+    fn selected_summary(&self) -> Option<ReviewSummary> {
+        match self.mode {
+            ListMode::Local => self.review.reviews.get(self.review.selected).cloned(),
+            ListMode::PullRequests => {
+                let filtered = self.filtered_prs();
+                filtered
+                    .get(self.pr_selected)
+                    .and_then(|index| self.review.pull_requests.get(*index))
+                    .map(PullRequestSummary::to_review)
+            }
+        }
+    }
+
+    fn start_selected(&mut self) {
+        let Some(summary) = self.selected_summary() else {
             return;
         };
+        self.start_detail(summary);
+    }
+
+    fn start_detail(&mut self, summary: ReviewSummary) {
+        self.request_id = self.request_id.wrapping_add(1);
+        let request_id = self.request_id;
+        let (repo, summary) = self.review.start_loading_summary(request_id, summary);
 
         let proxy = self.proxy.clone();
         let window_id = self.window.id();
@@ -200,30 +397,58 @@ impl ReviewWindow {
         self.reviewed.contains(&file.path)
     }
 
+    fn on_ime(&mut self, text: &str) {
+        if !self.search_focused || self.focus != Focus::Reviews {
+            return;
+        }
+        if text.chars().any(char::is_control) {
+            return;
+        }
+
+        self.search.push_str(text);
+        self.reset_pr_selection();
+        self.window.request_redraw();
+    }
+
     fn on_key(&mut self, event: KeyEvent, config: &Config) {
         if event.state != ElementState::Pressed {
             return;
         }
 
+        let command = self.modifiers.super_key() || self.modifiers.control_key();
         let focusable_files = self
             .review
             .detail
             .as_ref()
             .is_some_and(|detail| !detail.files.is_empty());
 
-        if matches!(event.physical_key, PhysicalKey::Code(KeyCode::KeyW))
-            && (self.modifiers.super_key() || self.modifiers.control_key())
-        {
+        if matches!(event.physical_key, PhysicalKey::Code(KeyCode::KeyW)) && command {
             self.close_requested = true;
+            return;
+        }
+
+        if matches!(event.physical_key, PhysicalKey::Code(KeyCode::KeyF)) && command {
+            if self.mode != ListMode::PullRequests {
+                self.set_mode(ListMode::PullRequests);
+            }
+            self.focus = Focus::Reviews;
+            self.search_focused = true;
+            self.window.request_redraw();
             return;
         }
 
         if matches!(event.logical_key, Key::Named(NamedKey::Escape)) {
-            self.close_requested = true;
+            if self.search_focused {
+                self.search_focused = false;
+                self.window.request_redraw();
+            } else {
+                self.close_requested = true;
+            }
             return;
         }
 
         if matches!(event.logical_key, Key::Named(NamedKey::Tab)) {
+            self.search_focused = false;
             self.focus = match self.focus {
                 Focus::Reviews if focusable_files => Focus::Files,
                 Focus::Reviews => Focus::Reviews,
@@ -235,55 +460,101 @@ impl ReviewWindow {
         }
 
         let layout = self.layout(config);
+
+        if self.search_focused && self.focus == Focus::Reviews {
+            match &event.logical_key {
+                Key::Named(NamedKey::Backspace) => {
+                    self.search.pop();
+                    self.reset_pr_selection();
+                }
+                Key::Named(NamedKey::Enter) => {
+                    self.search_focused = false;
+                    self.start_selected();
+                }
+                Key::Named(NamedKey::ArrowUp) => self.select_relative(-1),
+                Key::Named(NamedKey::ArrowDown) => self.select_relative(1),
+                Key::Named(NamedKey::PageUp) => {
+                    self.select_relative(-(layout.reviews_visible as isize));
+                }
+                Key::Named(NamedKey::PageDown) => {
+                    self.select_relative(layout.reviews_visible as isize);
+                }
+                Key::Named(NamedKey::Home) => {
+                    if self.item_count() > 0 {
+                        self.set_selected(0);
+                    }
+                }
+                Key::Named(NamedKey::End) => {
+                    let count = self.item_count();
+                    if count > 0 {
+                        self.set_selected(count - 1);
+                    }
+                }
+                Key::Named(NamedKey::Space) => {
+                    self.search.push(' ');
+                    self.reset_pr_selection();
+                }
+                Key::Character(character) if !command && !self.modifiers.alt_key() => {
+                    let text = character.as_str();
+                    if !text.is_empty() && text.chars().all(|ch| !ch.is_control()) {
+                        self.search.push_str(text);
+                        self.reset_pr_selection();
+                    }
+                }
+                _ => {}
+            }
+
+            self.window.request_redraw();
+            return;
+        }
+
         let mut start_detail = false;
 
         match self.focus {
             Focus::Reviews => match &event.logical_key {
-                Key::Named(NamedKey::ArrowUp) => {
-                    self.review.selected = self.review.selected.saturating_sub(1);
-                    self.review.back_to_list();
-                    self.reviewed.clear();
-                }
-                Key::Named(NamedKey::ArrowDown) => {
-                    if !self.review.reviews.is_empty() {
-                        self.review.selected =
-                            (self.review.selected + 1).min(self.review.reviews.len() - 1);
-                        self.review.back_to_list();
-                        self.reviewed.clear();
-                    }
-                }
+                Key::Named(NamedKey::ArrowUp) => self.select_relative(-1),
+                Key::Named(NamedKey::ArrowDown) => self.select_relative(1),
                 Key::Named(NamedKey::PageUp) => {
-                    self.review.selected =
-                        self.review.selected.saturating_sub(layout.reviews_visible);
-                    self.review.back_to_list();
-                    self.reviewed.clear();
+                    self.select_relative(-(layout.reviews_visible as isize));
                 }
                 Key::Named(NamedKey::PageDown) => {
-                    if !self.review.reviews.is_empty() {
-                        self.review.selected = (self.review.selected + layout.reviews_visible)
-                            .min(self.review.reviews.len() - 1);
-                        self.review.back_to_list();
-                        self.reviewed.clear();
-                    }
+                    self.select_relative(layout.reviews_visible as isize);
                 }
                 Key::Named(NamedKey::Home) => {
-                    self.review.selected = 0;
-                    self.review.back_to_list();
-                    self.reviewed.clear();
+                    if self.item_count() > 0 {
+                        self.set_selected(0);
+                    }
                 }
                 Key::Named(NamedKey::End) => {
-                    self.review.selected = self.review.reviews.len().saturating_sub(1);
-                    self.review.back_to_list();
-                    self.reviewed.clear();
+                    let count = self.item_count();
+                    if count > 0 {
+                        self.set_selected(count - 1);
+                    }
                 }
                 Key::Named(NamedKey::Enter) if !self.review.loading => {
                     start_detail = true;
                 }
-                Key::Character(character) if character.as_str() == "r" => {
-                    self.review.refresh();
-                    self.reviewed.clear();
-                    self.selected_file = 0;
-                    self.file_offset = 0;
+                Key::Character(character) if character.as_str() == "r" && !command => {
+                    match self.mode {
+                        ListMode::Local => {
+                            self.review.refresh();
+                            self.reviewed.clear();
+                            self.selected_file = 0;
+                            self.file_offset = 0;
+                        }
+                        ListMode::PullRequests => {
+                            self.review.prs_loaded = false;
+                            self.start_prs_load();
+                            self.pr_selected = 0;
+                            self.pr_offset = 0;
+                        }
+                    }
+                }
+                Key::Character(character) if character.as_str() == "/" && !command => {
+                    if self.mode != ListMode::PullRequests {
+                        self.set_mode(ListMode::PullRequests);
+                    }
+                    self.search_focused = true;
                 }
                 _ => {}
             },
@@ -373,7 +644,7 @@ impl ReviewWindow {
         }
 
         if start_detail {
-            self.start_detail();
+            self.start_selected();
         }
 
         self.window.request_redraw();
@@ -393,19 +664,35 @@ impl ReviewWindow {
             return;
         }
 
+        if layout.tabs[0].contains(x, y) {
+            self.set_mode(ListMode::Local);
+            return;
+        }
+
+        if layout.tabs[1].contains(x, y) {
+            self.set_mode(ListMode::PullRequests);
+            return;
+        }
+
+        if let Some(search) = layout.search
+            && search.contains(x, y)
+        {
+            self.focus = Focus::Reviews;
+            self.search_focused = true;
+            self.window.request_redraw();
+            return;
+        }
+
         if layout.reviews.contains(x, y) {
             self.focus = Focus::Reviews;
+            self.search_focused = false;
             if let Some((index, _)) = layout
                 .review_rows
                 .iter()
                 .find(|(_, rect)| rect.contains(x, y))
             {
-                self.review.selected = *index;
-                self.review.back_to_list();
-                self.reviewed.clear();
-                self.selected_file = 0;
-                self.file_offset = 0;
-                self.start_detail();
+                self.set_selected(*index);
+                self.start_selected();
             }
             self.window.request_redraw();
             return;
@@ -454,14 +741,8 @@ impl ReviewWindow {
             return;
         }
 
-        if layout.reviews.contains(x, y) {
-            if !self.review.reviews.is_empty() {
-                self.review.selected = (self.review.selected as i32 - steps)
-                    .clamp(0, self.review.reviews.len() as i32 - 1)
-                    as usize;
-                self.review.back_to_list();
-                self.reviewed.clear();
-            }
+        if layout.list_area.contains(x, y) {
+            self.select_relative(-(steps as isize));
         } else if let Some(files) = layout.files
             && files.contains(x, y)
         {
@@ -533,6 +814,82 @@ impl ReviewWindow {
             body.height,
         );
 
+        let tabs_height = (34.0 * scale).round();
+        let half = reviews.width / 2.0;
+        let tabs = [
+            Rect::new(reviews.x, reviews.y, half, tabs_height),
+            Rect::new(
+                reviews.x + half,
+                reviews.y,
+                (reviews.width - half).max(1.0),
+                tabs_height,
+            ),
+        ];
+        let search = (self.mode == ListMode::PullRequests).then(|| {
+            Rect::new(
+                reviews.x + 8.0 * scale,
+                reviews.y + tabs_height + 6.0 * scale,
+                (reviews.width - 16.0 * scale).max(1.0),
+                (28.0 * scale).round(),
+            )
+        });
+        let list_top = reviews.y
+            + tabs_height
+            + if self.mode == ListMode::PullRequests {
+                (6.0 + 28.0 + 6.0) * scale
+            } else {
+                0.0
+            };
+        let list_area = Rect::new(
+            reviews.x,
+            list_top,
+            reviews.width,
+            (reviews.bottom() - list_top).max(1.0),
+        );
+        let reviews_visible = (list_area.height / (50.0 * scale).max(1.0))
+            .floor()
+            .max(1.0) as usize;
+
+        let count = self.item_count();
+        let selected = self.selected_index();
+        if count > 0 {
+            let offset = match self.mode {
+                ListMode::Local => &mut self.review.list_offset,
+                ListMode::PullRequests => &mut self.pr_offset,
+            };
+            if selected < *offset {
+                *offset = selected;
+            }
+            if selected >= *offset + reviews_visible {
+                *offset = selected + 1 - reviews_visible;
+            }
+            *offset = (*offset).min(count.saturating_sub(reviews_visible));
+        } else {
+            match self.mode {
+                ListMode::Local => self.review.list_offset = 0,
+                ListMode::PullRequests => self.pr_offset = 0,
+            }
+        }
+
+        let start = match self.mode {
+            ListMode::Local => self.review.list_offset,
+            ListMode::PullRequests => self.pr_offset,
+        };
+        let mut review_rows = Vec::new();
+        let end = (start + reviews_visible).min(count);
+        for position in start..end {
+            let y = list_area.y + (position - start) as f32 * (50.0 * scale);
+            review_rows.push((
+                position,
+                Rect::new(
+                    reviews.x + 6.0 * scale,
+                    y,
+                    (reviews.width - 12.0 * scale).max(1.0),
+                    (50.0 * scale - 4.0).max(1.0),
+                ),
+            ));
+        }
+
         let detail = self.review.detail.as_ref();
         let files_width = (280.0 * scale).min(content.width * 0.4).max(160.0 * scale);
         let files = detail.map(|_| Rect::new(content.x, content.y, files_width, content.height));
@@ -563,43 +920,12 @@ impl ReviewWindow {
             .unwrap_or((None, None));
 
         let pane_title_height = (30.0 * scale).round();
-        let reviews_visible = (((body.height - pane_title_height) / (50.0 * scale).max(1.0))
-            .floor()
-            .max(1.0)) as usize;
         let file_visible = (((body.height - pane_title_height) / (38.0 * scale).max(1.0))
             .floor()
             .max(1.0)) as usize;
         let diff_visible = diff_text
             .map(|area| (area.height / metrics.height).floor().max(1.0) as usize)
             .unwrap_or(1);
-
-        let count = self.review.reviews.len();
-        if count > 0 {
-            if self.review.selected < self.review.list_offset {
-                self.review.list_offset = self.review.selected;
-            }
-            if self.review.selected >= self.review.list_offset + reviews_visible {
-                self.review.list_offset = self.review.selected + 1 - reviews_visible;
-            }
-            let max_offset = count.saturating_sub(reviews_visible);
-            self.review.list_offset = self.review.list_offset.min(max_offset);
-        }
-
-        let mut review_rows = Vec::new();
-        let start = self.review.list_offset;
-        let end = (start + reviews_visible).min(count);
-        for index in start..end {
-            let y = reviews.y + pane_title_height + (index - start) as f32 * (50.0 * scale);
-            review_rows.push((
-                index,
-                Rect::new(
-                    reviews.x + 6.0 * scale,
-                    y,
-                    (reviews.width - 12.0 * scale).max(1.0),
-                    (50.0 * scale - 4.0).max(1.0),
-                ),
-            ));
-        }
 
         let file_count = detail.map(|detail| detail.files.len()).unwrap_or(0);
         if file_count > 0 {
@@ -637,6 +963,9 @@ impl ReviewWindow {
             footer,
             close,
             reviews,
+            tabs,
+            search,
+            list_area,
             files,
             diff,
             diff_title,
@@ -733,7 +1062,7 @@ impl ReviewWindow {
             bold: false,
         });
 
-        // Panes.
+        // Reviews pane: tabs, search and list.
         quads.push(Quad::new(
             layout.reviews.x,
             layout.reviews.y,
@@ -749,22 +1078,135 @@ impl ReviewWindow {
             to_linear(theme.border, 1.0),
         ));
 
-        let review_title = "REVIEWS";
-        labels.push(Label {
-            text: review_title.into(),
-            x: layout.reviews.x + layout.padding,
-            y: layout.reviews.y + 8.0 * scale,
-            width: (layout.reviews.width - layout.padding * 2.0).max(1.0),
-            font_size: ui_font * 0.82,
-            color: theme.sidebar_text_dim,
-            bold: true,
-        });
+        let tab_labels = [
+            format!("LOCAL {}", self.review.reviews.len()),
+            if self.review.prs_error.is_some() {
+                "PULL REQUESTS !".to_owned()
+            } else {
+                format!("PULL REQUESTS {}", self.review.pull_requests.len())
+            },
+        ];
+        for (index, rect) in layout.tabs.iter().enumerate() {
+            let active = (index == 0 && self.mode == ListMode::Local)
+                || (index == 1 && self.mode == ListMode::PullRequests);
+            quads.push(Quad::new(
+                rect.x,
+                rect.y,
+                rect.width,
+                rect.height,
+                to_linear(
+                    if active {
+                        theme.sidebar_active
+                    } else {
+                        theme.sidebar_background
+                    },
+                    1.0,
+                ),
+            ));
+            quads.push(Quad::new(
+                rect.x,
+                rect.bottom() - 1.0,
+                rect.width,
+                1.0,
+                to_linear(theme.border, 1.0),
+            ));
+            if active {
+                quads.push(Quad::new(
+                    rect.x,
+                    rect.bottom() - (2.0 * scale).max(1.0),
+                    rect.width,
+                    (2.0 * scale).max(1.0),
+                    to_linear(theme.accent, 1.0),
+                ));
+            }
+            labels.push(Label {
+                text: tab_labels[index].clone(),
+                x: rect.x + 10.0 * scale,
+                y: rect.y + 8.0 * scale,
+                width: (rect.width - 14.0 * scale).max(1.0),
+                font_size: ui_font * 0.76,
+                color: if active {
+                    theme.sidebar_text
+                } else {
+                    theme.sidebar_text_dim
+                },
+                bold: active,
+            });
+        }
 
-        for (index, rect) in &layout.review_rows {
-            let Some(summary) = self.review.reviews.get(*index) else {
-                continue;
+        if let Some(search) = layout.search {
+            quads.push(Quad::new(
+                search.x,
+                search.y,
+                search.width,
+                search.height,
+                to_linear(theme.background, 1.0),
+            ));
+            push_outline(
+                &mut quads,
+                search,
+                1.0,
+                to_linear(
+                    if self.search_focused {
+                        theme.accent
+                    } else {
+                        theme.border
+                    },
+                    1.0,
+                ),
+            );
+
+            let text = match (self.search.is_empty(), self.search_focused) {
+                (true, true) => "Buscar PRs…▌".to_owned(),
+                (true, false) => "Buscar PRs…".to_owned(),
+                (false, true) => format!("{}▌", self.search),
+                (false, false) => self.search.clone(),
             };
-            let selected = *index == self.review.selected;
+            labels.push(Label {
+                text,
+                x: search.x + 8.0 * scale,
+                y: search.y + 5.0 * scale,
+                width: (search.width - 14.0 * scale).max(1.0),
+                font_size: ui_font * 0.82,
+                color: if self.search.is_empty() {
+                    theme.sidebar_text_dim
+                } else {
+                    theme.sidebar_text
+                },
+                bold: false,
+            });
+        }
+
+        let filtered = if self.mode == ListMode::PullRequests {
+            self.filtered_prs()
+        } else {
+            Vec::new()
+        };
+
+        for (position, rect) in &layout.review_rows {
+            let (title, subtitle) = match self.mode {
+                ListMode::Local => {
+                    let Some(summary) = self.review.reviews.get(*position) else {
+                        continue;
+                    };
+                    (summary.title.clone(), summary.subtitle.clone())
+                }
+                ListMode::PullRequests => {
+                    let Some(pull) = filtered
+                        .get(*position)
+                        .and_then(|index| self.review.pull_requests.get(*index))
+                    else {
+                        continue;
+                    };
+                    let draft = if pull.draft { " · draft" } else { "" };
+                    (
+                        format!("#{} {}", pull.number, pull.title),
+                        format!("@{} · {} → {}{}", pull.author, pull.head, pull.base, draft),
+                    )
+                }
+            };
+
+            let selected = *position == self.selected_index();
             if selected {
                 quads.push(Quad::new(
                     rect.x,
@@ -783,7 +1225,7 @@ impl ReviewWindow {
             }
 
             labels.push(Label {
-                text: summary.title.clone(),
+                text: title,
                 x: rect.x + 8.0 * scale,
                 y: rect.y + 5.0 * scale,
                 width: (rect.width - 14.0 * scale).max(1.0),
@@ -796,12 +1238,39 @@ impl ReviewWindow {
                 bold: selected,
             });
             labels.push(Label {
-                text: summary.subtitle.clone(),
+                text: subtitle,
                 x: rect.x + 8.0 * scale,
                 y: rect.y + 26.0 * scale,
                 width: (rect.width - 14.0 * scale).max(1.0),
                 font_size: ui_font * 0.74,
                 color: theme.sidebar_text_dim,
+                bold: false,
+            });
+        }
+
+        if self.mode == ListMode::PullRequests && layout.review_rows.is_empty() {
+            let (message, color) = if self.review.prs_loading {
+                (
+                    "Loading open pull requests…".to_owned(),
+                    theme.sidebar_text_dim,
+                )
+            } else if let Some(error) = &self.review.prs_error {
+                (error.clone(), theme.diff_remove_text)
+            } else if self.review.pull_requests.is_empty() {
+                ("No open pull requests.".to_owned(), theme.sidebar_text_dim)
+            } else {
+                (
+                    "No matches for this search.".to_owned(),
+                    theme.sidebar_text_dim,
+                )
+            };
+            labels.push(Label {
+                text: message,
+                x: layout.list_area.x + layout.padding,
+                y: layout.list_area.y + layout.padding,
+                width: (layout.list_area.width - layout.padding * 2.0).max(1.0),
+                font_size: ui_font * 0.82,
+                color,
                 bold: false,
             });
         }
@@ -1015,11 +1484,7 @@ impl ReviewWindow {
                 );
             }
 
-            let hint = match focus {
-                Focus::Reviews => "↑↓ revisar   Enter abrir   Tab panel   R refrescar   Esc cerrar",
-                Focus::Files => "↑↓ archivo   Espacio marcar   Enter diff   Tab panel   Esc cerrar",
-                Focus::Diff => "↑↓ scroll   ←→ horizontal   PgUp/PgDn   Tab panel   Esc cerrar",
-            };
+            let hint = self.hint(focus);
             labels.push(Label {
                 text: hint.into(),
                 x: layout.footer.x + layout.padding,
@@ -1042,14 +1507,41 @@ impl ReviewWindow {
         }
 
         // No detail: loading/error/welcome.
-        let message = if self.review.loading {
-            "Loading review…".to_owned()
-        } else if let Some(error) = &self.review.error {
-            error.clone()
-        } else if self.review.reviews.is_empty() {
-            "No changes or commits found in this repository.".to_owned()
-        } else {
-            "Selecciona una review de la izquierda y pulsa Enter.".to_owned()
+        let (message, is_error) = match self.mode {
+            ListMode::PullRequests => {
+                if self.review.prs_loading {
+                    ("Loading open pull requests…".to_owned(), false)
+                } else if let Some(error) = &self.review.prs_error {
+                    (error.clone(), true)
+                } else if self.review.pull_requests.is_empty() {
+                    (
+                        "No open pull requests found in this repository.".to_owned(),
+                        false,
+                    )
+                } else {
+                    (
+                        "Selecciona una pull request de la izquierda y pulsa Enter.".to_owned(),
+                        false,
+                    )
+                }
+            }
+            ListMode::Local => {
+                if self.review.loading {
+                    ("Loading review…".to_owned(), false)
+                } else if let Some(error) = &self.review.error {
+                    (error.clone(), true)
+                } else if self.review.reviews.is_empty() {
+                    (
+                        "No changes or commits found in this repository.".to_owned(),
+                        false,
+                    )
+                } else {
+                    (
+                        "Selecciona una review de la izquierda y pulsa Enter.".to_owned(),
+                        false,
+                    )
+                }
+            }
         };
         labels.push(Label {
             text: message,
@@ -1057,7 +1549,7 @@ impl ReviewWindow {
             y: layout.content.y + 24.0 * scale,
             width: (layout.content.width - layout.padding * 2.0).max(1.0),
             font_size: ui_font,
-            color: if self.review.error.is_some() {
+            color: if is_error {
                 theme.diff_remove_text
             } else {
                 theme.sidebar_text_dim
@@ -1065,8 +1557,9 @@ impl ReviewWindow {
             bold: false,
         });
 
+        let hint = self.hint(Focus::Reviews);
         labels.push(Label {
-            text: "↑↓ revisar   Enter abrir   R refrescar   Esc cerrar".into(),
+            text: hint.into(),
             x: layout.footer.x + layout.padding,
             y: layout.footer.y + 5.0 * scale,
             width: (layout.footer.width - layout.padding * 2.0).max(1.0),
@@ -1082,6 +1575,23 @@ impl ReviewWindow {
         };
         if let Err(error) = self.renderer.render(&scene, theme) {
             log::error!("review window render failed: {error:#}");
+        }
+    }
+
+    fn hint(&self, focus: Focus) -> &'static str {
+        if self.search_focused && self.mode == ListMode::PullRequests {
+            return "Escribe para filtrar   Enter abrir   ↑↓ mover   Esc salir de búsqueda";
+        }
+
+        match focus {
+            Focus::Reviews if self.mode == ListMode::PullRequests => {
+                "↑↓ PR   Enter revisar   / o Ctrl+F buscar   R refrescar   Tab panel   Esc cerrar"
+            }
+            Focus::Reviews => {
+                "↑↓ revisar   Enter abrir   / buscar PRs   R refrescar   Tab panel   Esc cerrar"
+            }
+            Focus::Files => "↑↓ archivo   Espacio marcar   Enter diff   Tab panel   Esc cerrar",
+            Focus::Diff => "↑↓ scroll   ←→ horizontal   PgUp/PgDn   Tab panel   Esc cerrar",
         }
     }
 }
