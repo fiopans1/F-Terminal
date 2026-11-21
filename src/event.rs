@@ -3,6 +3,7 @@ use std::path::PathBuf;
 use alacritty_terminal::event::Event;
 use winit::window::WindowId;
 
+use crate::git::{Snapshot, StatusSnapshot};
 use crate::git_status::GitStatus;
 use crate::highlight::StyledSpan;
 use crate::menu::Action;
@@ -30,6 +31,8 @@ pub enum UserEvent {
     },
     /// Request to open the Code Review window for a directory.
     OpenCodeReview { cwd: PathBuf },
+    /// Request to open the Git manager window for a directory.
+    OpenGitManager { cwd: PathBuf },
     /// Code review diff loaded in the background.
     ReviewLoaded {
         window_id: WindowId,
@@ -47,5 +50,29 @@ pub enum UserEvent {
         pane: PaneId,
         cwd: PathBuf,
         status: Option<GitStatus>,
+    },
+    /// Full repository snapshot for the Git manager window.
+    GitSnapshotLoaded {
+        window_id: WindowId,
+        request_id: u64,
+        result: Result<Snapshot, String>,
+    },
+    /// Lightweight working-tree status refresh for the Git manager.
+    GitStatusLoaded {
+        window_id: WindowId,
+        request_id: u64,
+        result: Result<StatusSnapshot, String>,
+    },
+    /// Diff for the selected commit or working tree.
+    GitDetailLoaded {
+        window_id: WindowId,
+        request_id: u64,
+        result: Result<ReviewDetail, String>,
+    },
+    /// A mutating Git operation finished.
+    GitOperationFinished {
+        window_id: WindowId,
+        request_id: u64,
+        result: Result<String, String>,
     },
 }

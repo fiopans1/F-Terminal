@@ -13,6 +13,7 @@ pub enum Action {
     Explorer,
     OpenCode,
     CodeReview,
+    GitManager,
     Settings,
 }
 
@@ -22,6 +23,7 @@ impl Action {
             "open-explorer" => Some(Self::Explorer),
             "open-code" => Some(Self::OpenCode),
             "code-review" => Some(Self::CodeReview),
+            "git-manager" => Some(Self::GitManager),
             "open-settings" => Some(Self::Settings),
             _ => None,
         }
@@ -107,16 +109,18 @@ impl MenuState {
         let explorer = MenuItem::with_id("open-explorer", "Abrir explorador", true, None);
         let code = MenuItem::with_id("open-code", "Abrir en VS Code", true, None);
         let review = MenuItem::with_id("code-review", "Code Review", true, None);
+        let git = MenuItem::with_id("git-manager", "Git", true, None);
         let settings = MenuItem::with_id("open-settings", "Ajustes…", true, None);
 
         let separator_one = PredefinedMenuItem::separator();
         let separator_two = PredefinedMenuItem::separator();
         let quit = PredefinedMenuItem::quit(Some("Salir"));
 
-        let items: [&dyn IsMenuItem; 7] = [
+        let items: [&dyn IsMenuItem; 8] = [
             &explorer,
             &code,
             &review,
+            &git,
             &separator_one,
             &settings,
             &separator_two,
@@ -167,6 +171,10 @@ mod tests {
         assert_eq!(
             Action::from_menu_id("code-review"),
             Some(Action::CodeReview)
+        );
+        assert_eq!(
+            Action::from_menu_id("git-manager"),
+            Some(Action::GitManager)
         );
         assert_eq!(
             Action::from_menu_id("open-settings"),

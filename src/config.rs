@@ -1,5 +1,3 @@
-use std::path::Path;
-
 use crate::term::color::Theme;
 
 /// Static configuration for the first iteration.
@@ -21,7 +19,7 @@ pub struct Config {
     pub sidebar_width: f32,
     /// Sidebar label size in logical points.
     pub ui_font_size: f32,
-    /// Shell program override. `None` uses `$SHELL` / platform default.
+    /// Optional shell override (path or name). `None` auto-detects profiles.
     pub shell: Option<String>,
     /// Treat Option/Alt as Meta (prefixed with ESC) instead of composing text.
     pub option_as_meta: bool,
@@ -43,46 +41,6 @@ impl Default for Config {
             // non-US layouts, so keep composition enabled by default there.
             option_as_meta: cfg!(not(target_os = "macos")),
             theme: Theme::tokyo_night(),
-        }
-    }
-}
-
-impl Config {
-    /// Resolve the shell to spawn.
-    pub fn shell(&self) -> String {
-        if let Some(shell) = &self.shell {
-            return shell.clone();
-        }
-
-        #[cfg(windows)]
-        {
-            if let Ok(comspec) = std::env::var("COMSPEC") {
-                return comspec;
-            }
-            return "powershell.exe".into();
-        }
-
-        #[cfg(not(windows))]
-        {
-            std::env::var("SHELL").unwrap_or_else(|_| "/bin/sh".into())
-        }
-    }
-
-    /// Whether the resolved shell accepts a `-l` (login) flag.
-    pub fn shell_accepts_login_flag(&self) -> bool {
-        #[cfg(windows)]
-        {
-            false
-        }
-
-        #[cfg(not(windows))]
-        {
-            let shell = self.shell();
-            let name = Path::new(&shell)
-                .file_name()
-                .and_then(|name| name.to_str())
-                .unwrap_or_default();
-            matches!(name, "zsh" | "bash" | "fish")
         }
     }
 }

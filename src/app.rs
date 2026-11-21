@@ -21,6 +21,7 @@ use crate::editor::Editor;
 use crate::event::UserEvent;
 use crate::explorer::FileExplorer;
 use crate::git_status::{self, GitStatus};
+use crate::git_window::GitWindow;
 use crate::highlight::{self, HighlightRequest, StyledSpan};
 use crate::input;
 use crate::layout::{DividerLayout, PaneLayout, Rect, compute_layout};
@@ -29,6 +30,7 @@ use crate::render::quads::Quad;
 use crate::render::scene::{Label, PaneLayer, Scene};
 use crate::render::{CellMetrics, Renderer, grid_size_for};
 use crate::review_window::ReviewWindow;
+use crate::shell::ShellCatalog;
 use crate::sidebar::{
     self, LayoutSpec, Sidebar, SidebarHit, SidebarLayout, SidebarMode, TabSummary,
 };
@@ -41,6 +43,7 @@ pub struct App {
     config: Config,
     window: Option<WindowState>,
     review: Option<ReviewWindow>,
+    git: Option<GitWindow>,
     _menu: Option<menu::MenuState>,
 }
 
@@ -51,6 +54,7 @@ impl App {
             config,
             window: None,
             review: None,
+            git: None,
             _menu: None,
         }
     }
@@ -88,6 +92,41 @@ impl App {
         review.request_redraw();
         log::info!("opened code review window");
         self.review = Some(review);
+    }
+
+    fn open_git_window(&mut self, event_loop: &ActiveEventLoop, cwd: PathBuf) {
+        if let Some(git) = &self.git {
+            git.focus();
+            return;
+        }
+
+        let attributes = Window::default_attributes()
+            .with_title("Git — F-Terminal")
+            .with_inner_size(LogicalSize::new(1280.0, 820.0))
+            .with_min_inner_size(LogicalSize::new(900.0, 560.0));
+
+        let window = match event_loop.create_window(attributes) {
+            Ok(window) => Arc::new(window),
+            Err(error) => {
+                log::error!("failed to create the git window: {error}");
+                return;
+            }
+        };
+
+        let renderer =
+            match pollster::block_on(Renderer::new(window.clone(), event_loop, &self.config)) {
+                Ok(renderer) => renderer,
+                Err(error) => {
+                    log::error!("failed to initialize the git window renderer: {error:#}");
+                    return;
+                }
+            };
+
+        let git = GitWindow::new(window, renderer, cwd, self.proxy.clone());
+        git.focus();
+        git.request_redraw();
+        log::info!("opened git manager window");
+        self.git = Some(git);
     }
 
     fn focus_main(&self) {
@@ -141,6 +180,32 @@ impl ApplicationHandler<UserEvent> for App {
             return;
         }
 
+        if self
+            .git
+            .as_ref()
+            .is_some_and(|git| git.window_id() == window_id)
+        {
+            if matches!(event, WindowEvent::CloseRequested) {
+                self.git = None;
+                self.focus_main();
+                return;
+            }
+
+            let close_requested = {
+                let Some(git) = &mut self.git else {
+                    return;
+                };
+                git.on_window_event(event, &self.config);
+                git.close_requested()
+            };
+
+            if close_requested {
+                self.git = None;
+                self.focus_main();
+            }
+            return;
+        }
+
         if !self
             .review
             .as_ref()
@@ -175,6 +240,10 @@ impl ApplicationHandler<UserEvent> for App {
                 self.open_review_window(event_loop, cwd);
                 return;
             }
+            UserEvent::OpenGitManager { cwd } => {
+                self.open_git_window(event_loop, cwd);
+                return;
+            }
             UserEvent::ReviewLoaded {
                 window_id,
                 request_id,
@@ -199,6 +268,54 @@ impl ApplicationHandler<UserEvent> for App {
                 }
                 return;
             }
+            UserEvent::GitSnapshotLoaded {
+                window_id,
+                request_id,
+                result,
+            } => {
+                if let Some(git) = &mut self.git
+                    && git.window_id() == window_id
+                {
+                    git.apply_snapshot(request_id, result);
+                }
+                return;
+            }
+            UserEvent::GitStatusLoaded {
+                window_id,
+                request_id,
+                result,
+            } => {
+                if let Some(git) = &mut self.git
+                    && git.window_id() == window_id
+                {
+                    git.apply_status(request_id, result);
+                }
+                return;
+            }
+            UserEvent::GitDetailLoaded {
+                window_id,
+                request_id,
+                result,
+            } => {
+                if let Some(git) = &mut self.git
+                    && git.window_id() == window_id
+                {
+                    git.apply_detail(request_id, result);
+                }
+                return;
+            }
+            UserEvent::GitOperationFinished {
+                window_id,
+                request_id,
+                result,
+            } => {
+                if let Some(git) = &mut self.git
+                    && git.window_id() == window_id
+                {
+                    git.apply_operation(request_id, result);
+                }
+                return;
+            }
             UserEvent::Menu(menu::Action::CodeReview) => {
                 let cwd = self
                     .window
@@ -206,6 +323,15 @@ impl ApplicationHandler<UserEvent> for App {
                     .map(|window| window.focused_cwd())
                     .unwrap_or_else(default_directory);
                 self.open_review_window(event_loop, cwd);
+                return;
+            }
+            UserEvent::Menu(menu::Action::GitManager) => {
+                let cwd = self
+                    .window
+                    .as_ref()
+                    .map(|window| window.focused_cwd())
+                    .unwrap_or_else(default_directory);
+                self.open_git_window(event_loop, cwd);
                 return;
             }
             _ => {}
@@ -233,8 +359,13 @@ impl ApplicationHandler<UserEvent> for App {
                 state.on_git_status(pane, cwd, status);
             }
             UserEvent::OpenCodeReview { .. }
+            | UserEvent::OpenGitManager { .. }
             | UserEvent::ReviewLoaded { .. }
-            | UserEvent::PullRequestsLoaded { .. } => {}
+            | UserEvent::PullRequestsLoaded { .. }
+            | UserEvent::GitSnapshotLoaded { .. }
+            | UserEvent::GitStatusLoaded { .. }
+            | UserEvent::GitDetailLoaded { .. }
+            | UserEvent::GitOperationFinished { .. } => {}
         }
     }
 
@@ -244,6 +375,11 @@ impl ApplicationHandler<UserEvent> for App {
         if let Some(state) = &mut self.window {
             state.poll_background(&self.config);
             wait = state.next_wake();
+        }
+
+        if let Some(git) = &mut self.git {
+            git.poll();
+            wait = wait.min(git.next_wake());
         }
 
         event_loop.set_control_flow(ControlFlow::WaitUntil(Instant::now() + wait));
@@ -327,8 +463,15 @@ struct WindowState {
     last_git_poll: Instant,
     git_in_flight: HashSet<PaneId>,
     editor_ratio: f32,
-    pending_cwds: HashMap<PaneId, PathBuf>,
+    pending_spawns: HashMap<PaneId, PendingSpawn>,
+    shells: ShellCatalog,
     focus: Focus,
+}
+
+#[derive(Clone, Debug)]
+struct PendingSpawn {
+    cwd: PathBuf,
+    profile_id: String,
 }
 
 impl WindowState {
@@ -353,6 +496,21 @@ impl WindowState {
         workspace.create_terminal();
         let working_directory = std::env::current_dir().unwrap_or_else(|_| PathBuf::from("."));
         let highlight_tx = highlight::spawn_worker(proxy.clone());
+        let shells = ShellCatalog::detect(config.shell.as_deref());
+        log::info!(
+            "detected {} shell profile(s), default: {}",
+            shells.profiles.len(),
+            shells.default_profile().name
+        );
+        log::debug!(
+            "shell profiles: {}",
+            shells
+                .profiles
+                .iter()
+                .map(|profile| profile.name.as_str())
+                .collect::<Vec<_>>()
+                .join(", ")
+        );
 
         let mut state = Self {
             window,
@@ -382,7 +540,8 @@ impl WindowState {
             last_git_poll: Instant::now(),
             git_in_flight: HashSet::new(),
             editor_ratio: 0.42,
-            pending_cwds: HashMap::new(),
+            pending_spawns: HashMap::new(),
+            shells,
             focus: Focus::Terminal,
         };
 
@@ -501,6 +660,7 @@ impl WindowState {
                 scale,
                 width_logical: config.sidebar_width,
                 file_count: self.explorer.rows.len(),
+                profile_count: self.shells.profiles.len(),
             },
         );
 
@@ -598,11 +758,19 @@ impl WindowState {
                     self.dirty_panes.insert(*pane_id);
                 }
             } else {
-                let cwd = self
-                    .pending_cwds
+                let spawn = self
+                    .pending_spawns
                     .remove(pane_id)
-                    .unwrap_or_else(default_directory);
-                let pane = Pane::new(*pane_id, grid, self.proxy.clone(), config, cwd)?;
+                    .unwrap_or_else(|| PendingSpawn {
+                        cwd: default_directory(),
+                        profile_id: self.shells.default_id.clone(),
+                    });
+                let profile = self
+                    .shells
+                    .get(&spawn.profile_id)
+                    .cloned()
+                    .unwrap_or_else(|| self.shells.default_profile().clone());
+                let pane = Pane::new(*pane_id, grid, self.proxy.clone(), &profile, spawn.cwd)?;
                 self.workspace.insert_pane(pane);
             }
         }
@@ -640,16 +808,29 @@ impl WindowState {
     // ------------------------------------------------------------------
 
     fn new_terminal(&mut self, config: &Config) {
+        let profile_id = self.shells.default_id.clone();
+        self.new_terminal_with(&profile_id, config);
+    }
+
+    fn new_terminal_with(&mut self, profile_id: &str, config: &Config) {
         let cwd = self.focused_cwd();
         let (tab_id, pane_id) = self.workspace.create_terminal();
-        self.pending_cwds.insert(pane_id, cwd);
+        self.pending_spawns.insert(
+            pane_id,
+            PendingSpawn {
+                cwd,
+                profile_id: profile_id.to_owned(),
+            },
+        );
+        self.sidebar.profile_menu = false;
+        self.sidebar.hovered_profile = None;
         self.focus = Focus::Terminal;
         // New terminals are appended to the sidebar; reveal the newest one.
         self.sidebar.scroll = f32::MAX;
 
         if let Err(error) = self.sync_layout(config) {
             log::error!("failed to create terminal: {error:#}");
-            self.pending_cwds.remove(&pane_id);
+            self.pending_spawns.remove(&pane_id);
             self.workspace.close_tab(tab_id);
             let _ = self.sync_layout(config);
         }
@@ -660,15 +841,22 @@ impl WindowState {
 
     fn split_focused(&mut self, direction: SplitDirection, config: &Config) {
         let cwd = self.focused_cwd();
+        let profile_id = self
+            .workspace
+            .focused_pane()
+            .and_then(|id| self.workspace.pane(id))
+            .map(|pane| pane.profile_id.clone())
+            .unwrap_or_else(|| self.shells.default_id.clone());
         let Some(new_pane) = self.workspace.split_focused(direction) else {
             return;
         };
-        self.pending_cwds.insert(new_pane, cwd);
+        self.pending_spawns
+            .insert(new_pane, PendingSpawn { cwd, profile_id });
         self.focus = Focus::Terminal;
 
         if let Err(error) = self.sync_layout(config) {
             log::error!("failed to split pane: {error:#}");
-            self.pending_cwds.remove(&new_pane);
+            self.pending_spawns.remove(&new_pane);
             self.workspace.close_pane(new_pane);
             let _ = self.sync_layout(config);
         }
@@ -688,7 +876,7 @@ impl WindowState {
             CloseOutcome::NotFound => {}
             CloseOutcome::WorkspaceEmpty => event_loop.exit(),
             CloseOutcome::PaneClosed | CloseOutcome::TabClosed => {
-                self.pending_cwds.remove(&pane);
+                self.pending_spawns.remove(&pane);
                 self.scroll_accumulators.remove(&pane);
                 self.git_in_flight.remove(&pane);
                 self.selecting = None;
@@ -738,6 +926,9 @@ impl WindowState {
             menu::Action::OpenCode => menu::open_in_code(&cwd),
             menu::Action::CodeReview => {
                 let _ = self.proxy.send_event(UserEvent::OpenCodeReview { cwd });
+            }
+            menu::Action::GitManager => {
+                let _ = self.proxy.send_event(UserEvent::OpenGitManager { cwd });
             }
             menu::Action::Settings => menu::open_settings(),
         }
@@ -908,6 +1099,8 @@ impl WindowState {
         self.sidebar.scroll = 0.0;
         self.sidebar.hovered = None;
         self.sidebar.hovered_file = None;
+        self.sidebar.profile_menu = false;
+        self.sidebar.hovered_profile = None;
 
         if self.sidebar.mode == SidebarMode::Files {
             self.explorer.set_root(self.focused_cwd());
@@ -915,6 +1108,29 @@ impl WindowState {
         }
 
         self.relayout(config);
+    }
+
+    fn toggle_profile_menu(&mut self, config: &Config) {
+        if self.sidebar.mode != SidebarMode::Terminals {
+            self.sidebar.mode = SidebarMode::Terminals;
+        }
+        self.sidebar.profile_menu = !self.sidebar.profile_menu;
+        self.sidebar.profile_selected = self.shells.index_of(&self.shells.default_id).unwrap_or(0);
+        self.sidebar.hovered = None;
+        self.sidebar.hovered_file = None;
+        self.sidebar.hovered_profile = None;
+        self.sidebar.scroll = 0.0;
+        self.relayout(config);
+    }
+
+    fn select_profile(&mut self, index: usize, config: &Config) {
+        let Some(profile) = self.shells.profiles.get(index) else {
+            return;
+        };
+        let id = profile.id.clone();
+        self.sidebar.profile_menu = false;
+        self.sidebar.hovered_profile = None;
+        self.new_terminal_with(&id, config);
     }
 
     fn refresh_files(&mut self, config: &Config) {
@@ -1443,6 +1659,11 @@ impl WindowState {
             return;
         }
 
+        if self.sidebar.profile_menu {
+            self.on_profile_menu_key(&event, config);
+            return;
+        }
+
         if self.focus == Focus::Editor && self.editor.is_some() {
             if self.handle_editor_key(&event, config) {
                 self.editor_dirty = true;
@@ -1491,6 +1712,39 @@ impl WindowState {
                 self.window.request_redraw();
             }
             pane.session.write(&bytes);
+        }
+    }
+
+    fn on_profile_menu_key(&mut self, event: &winit::event::KeyEvent, config: &Config) {
+        match &event.logical_key {
+            Key::Named(NamedKey::Escape) => {
+                self.sidebar.profile_menu = false;
+                self.sidebar.hovered_profile = None;
+                self.relayout(config);
+            }
+            Key::Named(NamedKey::ArrowUp) => {
+                self.sidebar.profile_selected = self.sidebar.profile_selected.saturating_sub(1);
+                self.window.request_redraw();
+            }
+            Key::Named(NamedKey::ArrowDown) => {
+                if !self.shells.profiles.is_empty() {
+                    self.sidebar.profile_selected =
+                        (self.sidebar.profile_selected + 1).min(self.shells.profiles.len() - 1);
+                }
+                self.window.request_redraw();
+            }
+            Key::Named(NamedKey::Home) => {
+                self.sidebar.profile_selected = 0;
+                self.window.request_redraw();
+            }
+            Key::Named(NamedKey::End) => {
+                self.sidebar.profile_selected = self.shells.profiles.len().saturating_sub(1);
+                self.window.request_redraw();
+            }
+            Key::Named(NamedKey::Enter) => {
+                self.select_profile(self.sidebar.profile_selected, config);
+            }
+            _ => {}
         }
     }
 
@@ -1547,6 +1801,12 @@ impl WindowState {
                 });
                 true
             }
+            KeyCode::KeyG if shift => {
+                let _ = self.proxy.send_event(UserEvent::OpenGitManager {
+                    cwd: self.focused_cwd(),
+                });
+                true
+            }
             KeyCode::KeyC => {
                 self.copy();
                 true
@@ -1561,6 +1821,10 @@ impl WindowState {
             }
             KeyCode::KeyT => {
                 self.new_terminal(config);
+                true
+            }
+            KeyCode::KeyN if shift => {
+                self.toggle_profile_menu(config);
                 true
             }
             KeyCode::KeyW => {
@@ -1733,19 +1997,25 @@ impl WindowState {
 
         let mut hovered_tab = None;
         let mut hovered_file = None;
+        let mut hovered_profile = None;
         if self.view.sidebar.rect.width > 0.0 {
             match sidebar::hit_test(&self.view.sidebar, position.x as f32, position.y as f32) {
                 Some(SidebarHit::Select(tab)) | Some(SidebarHit::Close(tab)) => {
                     hovered_tab = Some(tab);
                 }
                 Some(SidebarHit::File(row)) => hovered_file = Some(row),
+                Some(SidebarHit::Profile(index)) => hovered_profile = Some(index),
                 _ => {}
             }
         }
 
-        if hovered_tab != self.sidebar.hovered || hovered_file != self.sidebar.hovered_file {
+        if hovered_tab != self.sidebar.hovered
+            || hovered_file != self.sidebar.hovered_file
+            || hovered_profile != self.sidebar.hovered_profile
+        {
             self.sidebar.hovered = hovered_tab;
             self.sidebar.hovered_file = hovered_file;
+            self.sidebar.hovered_profile = hovered_profile;
             self.window.request_redraw();
         }
     }
@@ -1761,16 +2031,25 @@ impl WindowState {
         let y = self.cursor_position.y as f32;
 
         if state == ElementState::Pressed && button == MouseButton::Left {
+            if self.sidebar.profile_menu && !self.view.sidebar.rect.contains(x, y) {
+                self.sidebar.profile_menu = false;
+                self.sidebar.hovered_profile = None;
+                self.relayout(config);
+                return;
+            }
+
             if self.view.sidebar.rect.width > 0.0 {
                 if let Some(hit) = sidebar::hit_test(&self.view.sidebar, x, y) {
                     match hit {
                         SidebarHit::ToggleSidebar => self.toggle_sidebar(config),
                         SidebarHit::ToggleMode => self.toggle_sidebar_mode(config),
+                        SidebarHit::ToggleProfiles => self.toggle_profile_menu(config),
                         SidebarHit::NewTerminal => self.new_terminal(config),
                         SidebarHit::RefreshFiles => self.refresh_files(config),
                         SidebarHit::Select(tab) => self.select_tab(tab, config),
                         SidebarHit::Close(tab) => self.close_tab(tab, event_loop, config),
                         SidebarHit::File(row) => self.activate_file_row(row, config),
+                        SidebarHit::Profile(index) => self.select_profile(index, config),
                     }
                     return;
                 }
@@ -2548,9 +2827,13 @@ impl WindowState {
         }
 
         let header_line_height = header_font_size * 1.35;
-        let title = match layout.mode {
-            SidebarMode::Terminals => "TERMINALS",
-            SidebarMode::Files => "FILES",
+        let title = if layout.profile_menu {
+            "NEW TERMINAL"
+        } else {
+            match layout.mode {
+                SidebarMode::Terminals => "TERMINALS",
+                SidebarMode::Files => "FILES",
+            }
         };
         labels.push(Label {
             text: title.into(),
@@ -2611,6 +2894,102 @@ impl WindowState {
             color: theme.accent,
             bold: false,
         });
+
+        if layout.mode == SidebarMode::Terminals {
+            let chevron_size = ui_font_size * 0.9;
+            labels.push(Label {
+                text: "▾".into(),
+                x: layout.profile_button.x
+                    + (layout.profile_button.width - chevron_size * 0.55) / 2.0,
+                y: layout.profile_button.y
+                    + (layout.profile_button.height - chevron_size * 1.35) / 2.0,
+                width: layout.profile_button.width,
+                font_size: chevron_size,
+                color: if layout.profile_menu {
+                    theme.accent
+                } else {
+                    theme.sidebar_text_dim
+                },
+                bold: layout.profile_menu,
+            });
+        }
+
+        if layout.profile_menu {
+            let default_index = self.shells.index_of(&self.shells.default_id);
+            for item in &layout.profile_items {
+                let Some(profile) = self.shells.profiles.get(item.index) else {
+                    continue;
+                };
+                let hovered = self.sidebar.hovered_profile == Some(item.index);
+                let selected = self.sidebar.profile_selected == item.index;
+                if hovered || selected {
+                    quads.push(Quad::new(
+                        item.rect.x,
+                        item.rect.y,
+                        item.rect.width,
+                        item.rect.height,
+                        to_linear(
+                            if selected {
+                                theme.sidebar_active
+                            } else {
+                                theme.sidebar_hover
+                            },
+                            1.0,
+                        ),
+                    ));
+                }
+                if selected {
+                    quads.push(Quad::new(
+                        item.rect.x,
+                        item.rect.y,
+                        2.0 * scale,
+                        item.rect.height,
+                        to_linear(theme.accent, 1.0),
+                    ));
+                }
+
+                let is_default = Some(item.index) == default_index;
+                labels.push(Label {
+                    text: profile.name.clone(),
+                    x: item.rect.x + 10.0 * scale,
+                    y: item.rect.y + (item.rect.height - ui_font_size * 1.35) / 2.0,
+                    width: (item.rect.width - 68.0 * scale).max(1.0),
+                    font_size: ui_font_size * 0.88,
+                    color: if selected || is_default {
+                        theme.sidebar_text
+                    } else {
+                        theme.sidebar_text_dim
+                    },
+                    bold: selected || is_default,
+                });
+                labels.push(Label {
+                    text: profile.short.clone(),
+                    x: item.rect.right() - 52.0 * scale,
+                    y: item.rect.y + (item.rect.height - ui_font_size * 1.35) / 2.0,
+                    width: 42.0 * scale,
+                    font_size: ui_font_size * 0.7,
+                    color: if is_default {
+                        theme.accent
+                    } else {
+                        theme.sidebar_text_dim
+                    },
+                    bold: false,
+                });
+            }
+
+            if self.shells.profiles.is_empty() {
+                labels.push(Label {
+                    text: "No shells detected".into(),
+                    x: layout.list.x + layout.padding,
+                    y: layout.list.y + layout.padding,
+                    width: (layout.list.width - layout.padding * 2.0).max(1.0),
+                    font_size: ui_font_size * 0.85,
+                    color: theme.sidebar_text_dim,
+                    bold: false,
+                });
+            }
+            return;
+        }
 
         if layout.mode == SidebarMode::Files {
             let path_font = ui_font_size * 0.82;

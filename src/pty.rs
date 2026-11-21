@@ -5,8 +5,8 @@ use anyhow::{Context, Result};
 use portable_pty::{Child, CommandBuilder, MasterPty, PtySize, native_pty_system};
 use winit::event_loop::EventLoopProxy;
 
-use crate::config::Config;
 use crate::event::UserEvent;
+use crate::shell::{CwdMode, TerminalProfile, wsl_directory};
 use crate::workspace::PaneId;
 
 /// A PTY and the child process attached to it.
@@ -23,7 +23,7 @@ impl Session {
         rows: usize,
         cols: usize,
         proxy: EventLoopProxy<UserEvent>,
-        config: &Config,
+        profile: &TerminalProfile,
         cwd: &Path,
     ) -> Result<Self> {
         let pty_system = native_pty_system();
@@ -35,16 +35,35 @@ impl Session {
         };
         let pair = pty_system.openpty(size).context("failed to open a PTY")?;
 
-        let mut command = CommandBuilder::new(config.shell());
-        if config.shell_accepts_login_flag() {
-            command.arg("-l");
+        let mut command = CommandBuilder::new(&profile.program);
+        for arg in &profile.args {
+            command.arg(arg);
         }
-        command.cwd(cwd);
+
+        match profile.cwd_mode {
+            CwdMode::Native => {
+                command.cwd(cwd);
+            }
+            CwdMode::Wsl { .. } => {
+                if let Some(directory) = wsl_directory(cwd) {
+                    command.arg("--cd");
+                    command.arg(directory);
+                }
+                if cwd.is_dir() {
+                    command.cwd(cwd);
+                }
+            }
+        }
+
         // Make sure the child does not inherit a TERM value from whatever
         // terminal launched us, and advertise 24-bit color.
         command.env("TERM", "xterm-256color");
         command.env("COLORTERM", "truecolor");
         command.env("TERM_PROGRAM", "f-terminal");
+
+        for (key, value) in &profile.env {
+            command.env(key, value);
+        }
 
         let child = pair
             .slave

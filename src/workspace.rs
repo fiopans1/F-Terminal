@@ -4,10 +4,10 @@ use std::path::PathBuf;
 use anyhow::{Context, Result};
 use winit::event_loop::EventLoopProxy;
 
-use crate::config::Config;
 use crate::event::UserEvent;
 use crate::git_status::GitStatus;
 use crate::pty::Session;
+use crate::shell::TerminalProfile;
 use crate::term::{EventProxy, GridSize, Terminal};
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, PartialOrd, Ord)]
@@ -162,6 +162,7 @@ pub struct Pane {
     pub title: Option<String>,
     pub cwd: Option<PathBuf>,
     pub git_status: Option<GitStatus>,
+    pub profile_id: String,
 }
 
 impl Pane {
@@ -169,11 +170,11 @@ impl Pane {
         id: PaneId,
         grid: GridSize,
         proxy: EventLoopProxy<UserEvent>,
-        config: &Config,
+        profile: &TerminalProfile,
         cwd: PathBuf,
     ) -> Result<Self> {
         let terminal = Terminal::new(grid, EventProxy::new(id, proxy.clone()));
-        let session = Session::spawn(id, grid.lines, grid.cols, proxy, config, &cwd)
+        let session = Session::spawn(id, grid.lines, grid.cols, proxy, profile, &cwd)
             .with_context(|| format!("failed to spawn shell for pane {}", id.0))?;
 
         Ok(Self {
@@ -184,6 +185,7 @@ impl Pane {
             title: None,
             cwd: Some(cwd),
             git_status: None,
+            profile_id: profile.id.clone(),
         })
     }
 

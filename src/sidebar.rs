@@ -22,6 +22,9 @@ pub struct Sidebar {
     pub scroll: f32,
     pub hovered: Option<TabId>,
     pub hovered_file: Option<usize>,
+    pub profile_menu: bool,
+    pub profile_selected: usize,
+    pub hovered_profile: Option<usize>,
 }
 
 impl Default for Sidebar {
@@ -32,6 +35,9 @@ impl Default for Sidebar {
             scroll: 0.0,
             hovered: None,
             hovered_file: None,
+            profile_menu: false,
+            profile_selected: 0,
+            hovered_profile: None,
         }
     }
 }
@@ -53,12 +59,20 @@ pub struct FileItem {
     pub label: Rect,
 }
 
+#[derive(Clone, Copy, Debug)]
+pub struct ProfileItem {
+    /// Index into `ShellCatalog::profiles`.
+    pub index: usize,
+    pub rect: Rect,
+}
+
 #[derive(Clone, Debug, Default)]
 pub struct SidebarLayout {
     pub rect: Rect,
     pub list: Rect,
     pub header: Rect,
     pub new_button: Rect,
+    pub profile_button: Rect,
     pub collapse_button: Rect,
     pub reveal_button: Rect,
     pub mode_button: Rect,
@@ -66,6 +80,8 @@ pub struct SidebarLayout {
     pub path_rect: Rect,
     pub items: Vec<SidebarItem>,
     pub file_items: Vec<FileItem>,
+    pub profile_items: Vec<ProfileItem>,
+    pub profile_menu: bool,
     /// X coordinate where the terminal area starts.
     pub content_x: f32,
     pub max_scroll: f32,
@@ -85,11 +101,13 @@ impl SidebarLayout {
 pub enum SidebarHit {
     ToggleSidebar,
     ToggleMode,
+    ToggleProfiles,
     NewTerminal,
     RefreshFiles,
     Select(TabId),
     Close(TabId),
     File(usize),
+    Profile(usize),
 }
 
 #[derive(Clone, Copy, Debug)]
@@ -99,6 +117,7 @@ pub struct LayoutSpec {
     pub scale: f32,
     pub width_logical: f32,
     pub file_count: usize,
+    pub profile_count: usize,
 }
 
 /// Lay out the sidebar and its clickable regions. All inputs and outputs are
@@ -115,6 +134,7 @@ pub fn layout(
         scale,
         width_logical,
         file_count,
+        profile_count,
     } = spec;
     if !state.visible {
         let padding = (8.0 * scale).round();
@@ -167,6 +187,13 @@ pub fn layout(
         button_size,
         button_size,
     );
+    let profile_size = (16.0 * scale).round();
+    let profile_button = Rect::new(
+        (new_button.x - 2.0 * scale - profile_size).max(0.0),
+        ((header_height - profile_size) / 2.0).max(0.0),
+        profile_size,
+        profile_size,
+    );
     let collapse_button = Rect::new(
         padding,
         ((header_height - collapse_size) / 2.0).max(0.0),
@@ -176,7 +203,7 @@ pub fn layout(
     let header_label = Rect::new(
         collapse_button.right() + 8.0 * scale,
         0.0,
-        (new_button.x - collapse_button.right() - 8.0 * scale - padding).max(1.0),
+        (profile_button.x - collapse_button.right() - 8.0 * scale - padding).max(1.0),
         header_height,
     );
     let path_rect = Rect::new(
@@ -188,9 +215,14 @@ pub fn layout(
     let list_top = header_height + path_height;
     let list = Rect::new(0.0, list_top, width, (window_height - list_top).max(0.0));
 
-    let row_count = match state.mode {
-        SidebarMode::Terminals => tabs.len(),
-        SidebarMode::Files => file_count,
+    let profile_menu = state.profile_menu && state.mode == SidebarMode::Terminals;
+    let row_count = if profile_menu {
+        profile_count
+    } else {
+        match state.mode {
+            SidebarMode::Terminals => tabs.len(),
+            SidebarMode::Files => file_count,
+        }
     };
     let content_height = row_count as f32 * item_height + padding * 2.0;
     let max_scroll = (content_height - list.height).max(0.0);
@@ -199,6 +231,7 @@ pub fn layout(
 
     let mut items = Vec::with_capacity(tabs.len());
     let mut file_items = Vec::with_capacity(file_count);
+    let mut profile_items = Vec::with_capacity(profile_count);
 
     let row_rect = |index: usize| {
         let y = start_y + index as f32 * item_height;
@@ -210,57 +243,70 @@ pub fn layout(
         )
     };
 
-    match state.mode {
-        SidebarMode::Terminals => {
-            for (index, tab) in tabs.iter().enumerate() {
-                let item_rect = row_rect(index);
-
-                // Fully clipped rows are skipped so quads never leave the list.
-                if item_rect.y < list.y || item_rect.bottom() > list.bottom() {
-                    continue;
-                }
-
-                let close = Rect::new(
-                    (item_rect.right() - close_size - 6.0 * scale).max(item_rect.x),
-                    item_rect.y + (item_rect.height - close_size) / 2.0,
-                    close_size,
-                    close_size,
-                );
-                let label = Rect::new(
-                    item_rect.x + 10.0 * scale,
-                    item_rect.y,
-                    (close.x - item_rect.x - 14.0 * scale).max(1.0),
-                    item_rect.height,
-                );
-
-                items.push(SidebarItem {
-                    tab: tab.id,
-                    rect: item_rect,
-                    label,
-                    close,
-                    is_active: active == Some(tab.id),
-                });
+    if profile_menu {
+        for index in 0..profile_count {
+            let item_rect = row_rect(index);
+            if item_rect.y < list.y || item_rect.bottom() > list.bottom() {
+                continue;
             }
+            profile_items.push(ProfileItem {
+                index,
+                rect: item_rect,
+            });
         }
-        SidebarMode::Files => {
-            for index in 0..file_count {
-                let item_rect = row_rect(index);
+    } else {
+        match state.mode {
+            SidebarMode::Terminals => {
+                for (index, tab) in tabs.iter().enumerate() {
+                    let item_rect = row_rect(index);
 
-                if item_rect.y < list.y || item_rect.bottom() > list.bottom() {
-                    continue;
+                    // Fully clipped rows are skipped so quads never leave the list.
+                    if item_rect.y < list.y || item_rect.bottom() > list.bottom() {
+                        continue;
+                    }
+
+                    let close = Rect::new(
+                        (item_rect.right() - close_size - 6.0 * scale).max(item_rect.x),
+                        item_rect.y + (item_rect.height - close_size) / 2.0,
+                        close_size,
+                        close_size,
+                    );
+                    let label = Rect::new(
+                        item_rect.x + 10.0 * scale,
+                        item_rect.y,
+                        (close.x - item_rect.x - 14.0 * scale).max(1.0),
+                        item_rect.height,
+                    );
+
+                    items.push(SidebarItem {
+                        tab: tab.id,
+                        rect: item_rect,
+                        label,
+                        close,
+                        is_active: active == Some(tab.id),
+                    });
                 }
+            }
+            SidebarMode::Files => {
+                for index in 0..file_count {
+                    let item_rect = row_rect(index);
 
-                let label = Rect::new(
-                    item_rect.x + 8.0 * scale,
-                    item_rect.y,
-                    (item_rect.width - 12.0 * scale).max(1.0),
-                    item_rect.height,
-                );
-                file_items.push(FileItem {
-                    row: index,
-                    rect: item_rect,
-                    label,
-                });
+                    if item_rect.y < list.y || item_rect.bottom() > list.bottom() {
+                        continue;
+                    }
+
+                    let label = Rect::new(
+                        item_rect.x + 8.0 * scale,
+                        item_rect.y,
+                        (item_rect.width - 12.0 * scale).max(1.0),
+                        item_rect.height,
+                    );
+                    file_items.push(FileItem {
+                        row: index,
+                        rect: item_rect,
+                        label,
+                    });
+                }
             }
         }
     }
@@ -270,6 +316,7 @@ pub fn layout(
         list,
         header,
         new_button,
+        profile_button,
         collapse_button,
         reveal_button: Rect::default(),
         mode_button,
@@ -277,6 +324,8 @@ pub fn layout(
         path_rect,
         items,
         file_items,
+        profile_items,
+        profile_menu,
         content_x: width,
         max_scroll,
         item_height,
@@ -306,6 +355,10 @@ pub fn hit_test(layout: &SidebarLayout, x: f32, y: f32) -> Option<SidebarHit> {
         return Some(SidebarHit::ToggleMode);
     }
 
+    if layout.mode == SidebarMode::Terminals && layout.profile_button.contains(x, y) {
+        return Some(SidebarHit::ToggleProfiles);
+    }
+
     if layout.new_button.contains(x, y) {
         return Some(match layout.mode {
             SidebarMode::Terminals => SidebarHit::NewTerminal,
@@ -314,6 +367,15 @@ pub fn hit_test(layout: &SidebarLayout, x: f32, y: f32) -> Option<SidebarHit> {
     }
 
     if !layout.list.contains(x, y) {
+        return None;
+    }
+
+    if layout.profile_menu {
+        for item in &layout.profile_items {
+            if item.rect.contains(x, y) {
+                return Some(SidebarHit::Profile(item.index));
+            }
+        }
         return None;
     }
 
@@ -351,6 +413,14 @@ mod tests {
             scale: 1.0,
             width_logical: 200.0,
             file_count,
+            profile_count: 0,
+        }
+    }
+
+    fn profile_spec(profile_count: usize) -> LayoutSpec {
+        LayoutSpec {
+            profile_count,
+            ..spec(0)
         }
     }
 
@@ -406,6 +476,33 @@ mod tests {
         assert_eq!(
             hit_test(&hidden, hidden.rect.x + 2.0, hidden.rect.y + 2.0),
             Some(SidebarHit::ToggleSidebar)
+        );
+    }
+
+    #[test]
+    fn profile_menu_builds_shell_rows() {
+        let state = Sidebar {
+            profile_menu: true,
+            ..Sidebar::default()
+        };
+        let layout = layout(&state, &[], None, profile_spec(3));
+
+        assert!(layout.profile_menu);
+        assert_eq!(layout.profile_items.len(), 3);
+        assert!(layout.items.is_empty());
+
+        let row = layout.profile_items[1];
+        assert_eq!(
+            hit_test(&layout, row.rect.x + 4.0, row.rect.y + 4.0),
+            Some(SidebarHit::Profile(1))
+        );
+        assert_eq!(
+            hit_test(
+                &layout,
+                layout.profile_button.x + 2.0,
+                layout.profile_button.y + 2.0
+            ),
+            Some(SidebarHit::ToggleProfiles)
         );
     }
 
