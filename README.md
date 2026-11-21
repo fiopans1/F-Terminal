@@ -44,6 +44,7 @@ src/
   editor.rs        Editor de texto mínimo (editar, guardar, cursor)
   event.rs         Eventos internos PTY -> UI (etiquetados por pane)
   explorer.rs      Árbol de archivos del cwd del pane enfocado
+  git_status.rs    Rama y estadísticas del working tree por pane
   highlight.rs     Resaltado TextMate con syntect
   input.rs         Encoder xterm de teclado y ratón
   layout.rs        Geometría de panes, splits y divisores
@@ -131,6 +132,16 @@ gráfica.
   revisión por IA, sin resaltado de sintaxis dentro del diff, corte a 50.000
   líneas y las marcas de revisado no se persisten.
 
+## Rama y cambios por terminal
+
+- Cada pane muestra dos burbujas agrupadas abajo a la izquierda: una con la
+  rama actual y otra con los cambios `+N -N` (añadidas/eliminadas).
+- Las estadísticas salen de `git diff --numstat HEAD` (cambios tracked, staged
+  y unstaged) y se actualizan al cambiar el cwd y cada 2 segundos.
+- La inspección corre en un hilo de background por pane, así que un repo grande
+  no bloquea la terminal.
+- Si el pane no está dentro de un repositorio Git, no se dibujan las burbujas.
+
 ## Incluido en esta iteración
 
 - Ventana nativa con superficie wgpu (Metal en macOS).
@@ -157,6 +168,8 @@ gráfica.
   y eliminadas, y marca de revisado por archivo durante la sesión.
 - Al seleccionar una review, el diff por archivo se carga en background con
   numeración, altas/bajas coloreadas y navegación por teclado o ratón.
+- Footer de Git en cada terminal con dos burbujas: rama y líneas
+  añadidas/eliminadas del working tree, actualizado en background.
 - Varias terminales abiertas a la vez, cada una con su propio shell y estado.
 - Splits dentro de una terminal: derecha/abajo, con foco por clic, borde de
   foco y divisores arrastrables.

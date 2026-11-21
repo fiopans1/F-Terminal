@@ -20,6 +20,7 @@ use crate::config::Config;
 use crate::editor::Editor;
 use crate::event::UserEvent;
 use crate::explorer::FileExplorer;
+use crate::git_status::{self, GitStatus};
 use crate::highlight::{self, HighlightRequest, StyledSpan};
 use crate::input;
 use crate::layout::{DividerLayout, PaneLayout, Rect, compute_layout};
@@ -228,6 +229,9 @@ impl ApplicationHandler<UserEvent> for App {
                 revision,
                 spans,
             } => state.on_highlight(generation, revision, spans),
+            UserEvent::GitStatus { pane, cwd, status } => {
+                state.on_git_status(pane, cwd, status);
+            }
             UserEvent::OpenCodeReview { .. }
             | UserEvent::ReviewLoaded { .. }
             | UserEvent::PullRequestsLoaded { .. } => {}
@@ -320,6 +324,8 @@ struct WindowState {
     dirty_panes: HashSet<PaneId>,
     editor_dirty: bool,
     last_cwd_poll: Instant,
+    last_git_poll: Instant,
+    git_in_flight: HashSet<PaneId>,
     editor_ratio: f32,
     pending_cwds: HashMap<PaneId, PathBuf>,
     focus: Focus,
@@ -373,12 +379,15 @@ impl WindowState {
             dirty_panes: HashSet::new(),
             editor_dirty: false,
             last_cwd_poll: Instant::now(),
+            last_git_poll: Instant::now(),
+            git_in_flight: HashSet::new(),
             editor_ratio: 0.42,
             pending_cwds: HashMap::new(),
             focus: Focus::Terminal,
         };
 
         state.sync_layout(config)?;
+        state.refresh_git_statuses();
         state.update_window_title();
         state.window.request_redraw();
 
@@ -569,7 +578,13 @@ impl WindowState {
             });
         }
 
-        let layout = compute_layout(&tab.layout, terminal_area, gap, padding);
+        let layout = compute_layout(
+            &tab.layout,
+            terminal_area,
+            gap,
+            padding,
+            (26.0 * scale).round().max(18.0),
+        );
         let pane_specs: Vec<(PaneId, Rect)> = layout
             .panes
             .iter()
@@ -675,6 +690,7 @@ impl WindowState {
             CloseOutcome::PaneClosed | CloseOutcome::TabClosed => {
                 self.pending_cwds.remove(&pane);
                 self.scroll_accumulators.remove(&pane);
+                self.git_in_flight.remove(&pane);
                 self.selecting = None;
                 self.sidebar.hovered = None;
                 self.relayout(config);
@@ -779,11 +795,13 @@ impl WindowState {
 
         let focused = self.workspace.focused_pane();
         let mut focused_cwd = None;
+        let mut cwd_changed = Vec::new();
         for (pane_id, cwd) in updates {
             if let Some(pane) = self.workspace.pane_mut(pane_id)
                 && pane.cwd.as_ref() != Some(&cwd)
             {
                 pane.cwd = Some(cwd.clone());
+                cwd_changed.push(pane_id);
                 if Some(pane_id) == focused {
                     focused_cwd = Some(cwd);
                 }
@@ -796,6 +814,82 @@ impl WindowState {
             if self.sidebar.mode == SidebarMode::Files {
                 self.relayout(config);
             }
+        }
+
+        for pane_id in cwd_changed {
+            self.request_git_status(pane_id);
+        }
+    }
+
+    fn request_git_status(&mut self, pane_id: PaneId) {
+        if self.git_in_flight.contains(&pane_id) {
+            return;
+        }
+
+        let Some(pane) = self.workspace.pane(pane_id) else {
+            return;
+        };
+        let cwd = pane.cwd.clone().unwrap_or_else(default_directory);
+
+        self.git_in_flight.insert(pane_id);
+        let proxy = self.proxy.clone();
+        let spawned = std::thread::Builder::new()
+            .name("git-status".into())
+            .spawn(move || {
+                let status = git_status::inspect(&cwd);
+                let _ = proxy.send_event(UserEvent::GitStatus {
+                    pane: pane_id,
+                    cwd,
+                    status,
+                });
+            });
+
+        if spawned.is_err() {
+            self.git_in_flight.remove(&pane_id);
+        }
+    }
+
+    fn refresh_git_statuses(&mut self) {
+        self.git_in_flight
+            .retain(|pane_id| self.workspace.pane(*pane_id).is_some());
+
+        let panes: Vec<PaneId> = self.view.panes.iter().map(|pane| pane.id).collect();
+        for pane_id in panes {
+            self.request_git_status(pane_id);
+        }
+    }
+
+    fn on_git_status(&mut self, pane_id: PaneId, cwd: PathBuf, status: Option<GitStatus>) {
+        self.git_in_flight.remove(&pane_id);
+
+        let Some(pane) = self.workspace.pane(pane_id) else {
+            return;
+        };
+        if pane.cwd.as_ref() != Some(&cwd) {
+            // The shell moved while the request was running; try the new cwd.
+            self.request_git_status(pane_id);
+            return;
+        }
+
+        let changed = pane.git_status != status;
+        if changed {
+            match &status {
+                Some(status) => log::debug!(
+                    "pane {} git: {} +{} -{}",
+                    pane_id.0,
+                    status.branch,
+                    status.additions,
+                    status.deletions
+                ),
+                None => log::debug!("pane {} is not in a git repository", pane_id.0),
+            }
+        }
+        if let Some(pane) = self.workspace.pane_mut(pane_id) {
+            pane.git_status = status;
+        }
+
+        if changed && self.view.panes.iter().any(|pane| pane.id == pane_id) {
+            self.window.request_redraw();
         }
     }
 
@@ -864,6 +958,11 @@ impl WindowState {
         if now.duration_since(self.last_cwd_poll) >= Duration::from_millis(750) {
             self.last_cwd_poll = now;
             self.refresh_cwds(config);
+        }
+
+        if now.duration_since(self.last_git_poll) >= Duration::from_millis(2000) {
+            self.last_git_poll = now;
+            self.refresh_git_statuses();
         }
 
         if let Some(editor) = &self.editor
@@ -1726,6 +1825,16 @@ impl WindowState {
             self.window.request_redraw();
         }
 
+        if self
+            .view
+            .panes
+            .iter()
+            .find(|pane| pane.id == pane_id)
+            .is_some_and(|pane| pane.footer.contains(x, y))
+        {
+            return;
+        }
+
         let mouse_mode = self
             .workspace
             .pane(pane_id)
@@ -1829,6 +1938,17 @@ impl WindowState {
         let Some(pane_id) = self.pane_at(x, y) else {
             return;
         };
+
+        if self
+            .view
+            .panes
+            .iter()
+            .find(|pane| pane.id == pane_id)
+            .is_some_and(|pane| pane.footer.contains(x, y))
+        {
+            return;
+        }
+
         let metrics = self.renderer.cell_metrics();
         let (rows, wheel_notches) = match delta {
             MouseScrollDelta::LineDelta(_, y) => (y * 3.0, y),
@@ -2210,6 +2330,23 @@ impl WindowState {
         }
         if let Some((content, frame)) = &editor_frame {
             push_cursor_quads(&mut quads, *content, frame, metrics, theme);
+        }
+
+        for pane_layout in &self.view.panes {
+            let Some(pane) = self.workspace.pane(pane_layout.id) else {
+                continue;
+            };
+            build_pane_footer(
+                pane,
+                pane_layout.footer,
+                PaneFooterStyle {
+                    scale,
+                    ui_font_size,
+                    theme,
+                },
+                &mut quads,
+                &mut labels,
+            );
         }
 
         if let (Some(editor), Some(layout)) = (&self.editor, self.view.editor) {
@@ -2645,6 +2782,170 @@ fn default_directory() -> PathBuf {
         return PathBuf::from(home);
     }
     PathBuf::from(".")
+}
+
+struct PaneFooterStyle<'a> {
+    scale: f32,
+    ui_font_size: f32,
+    theme: &'a Theme,
+}
+
+fn build_pane_footer(
+    pane: &Pane,
+    footer: Rect,
+    style: PaneFooterStyle<'_>,
+    quads: &mut Vec<Quad>,
+    labels: &mut Vec<Label>,
+) {
+    let PaneFooterStyle {
+        scale,
+        ui_font_size,
+        theme,
+    } = style;
+
+    if footer.width <= 1.0 || footer.height <= 1.0 {
+        return;
+    }
+
+    let Some(status) = &pane.git_status else {
+        return;
+    };
+    if footer.height < 12.0 * scale {
+        return;
+    }
+
+    let font = (ui_font_size * 0.86).max(10.0);
+    let line = font * 1.35;
+    let pill_height = (footer.height - 6.0 * scale).clamp(16.0 * scale, 34.0 * scale);
+    let radius = pill_height / 2.0;
+    let padding = 9.0 * scale;
+    let gap = 6.0 * scale;
+    let edge = 4.0 * scale;
+    let y = footer.y + (footer.height - pill_height) / 2.0;
+    let text_y = y + (pill_height - line) / 2.0;
+
+    let additions = format!("+{}", status.additions);
+    let deletions = format!("-{}", status.deletions);
+    let additions_width = text_width(&additions, font);
+    let deletions_width = text_width(&deletions, font);
+    let changes_width = padding * 2.0 + additions_width + gap + deletions_width;
+
+    let can_show_changes = footer.width >= changes_width + edge * 2.0 + 60.0 * scale;
+    let branch_max = if can_show_changes {
+        footer.width - edge * 2.0 - changes_width - gap
+    } else {
+        footer.width - edge * 2.0
+    }
+    .max(0.0);
+
+    let dot = (4.0 * scale).max(2.0);
+    let dot_gap = 5.0 * scale;
+    let branch_text_max = (branch_max - padding * 2.0 - dot - dot_gap).max(0.0);
+    let branch = truncate_to_width(&status.branch, branch_text_max, font);
+
+    let mut branch_width = 0.0;
+    if !branch.is_empty() && branch_max > dot + dot_gap + padding {
+        let width = (pill_width(&branch, font, padding) + dot + dot_gap).min(branch_max);
+        let x = footer.x + edge;
+        quads.push(Quad::rounded(
+            x,
+            y,
+            width,
+            pill_height,
+            radius,
+            to_linear(theme.sidebar_active, 1.0),
+        ));
+        quads.push(Quad::rounded(
+            x + padding,
+            y + (pill_height - dot) / 2.0,
+            dot,
+            dot,
+            dot / 2.0,
+            to_linear(theme.accent, 1.0),
+        ));
+        labels.push(Label {
+            text: branch,
+            x: x + padding + dot + dot_gap,
+            y: text_y,
+            width: (width - padding * 2.0 - dot - dot_gap).max(1.0),
+            font_size: font,
+            color: theme.sidebar_text,
+            bold: true,
+        });
+        branch_width = width;
+    }
+
+    if !can_show_changes {
+        return;
+    }
+
+    let changes_x = footer.x
+        + edge
+        + if branch_width > 0.0 {
+            branch_width + gap
+        } else {
+            0.0
+        };
+    quads.push(Quad::rounded(
+        changes_x,
+        y,
+        changes_width,
+        pill_height,
+        radius,
+        to_linear(theme.sidebar_active, 1.0),
+    ));
+
+    let additions_color = if status.additions > 0 {
+        theme.diff_add_text
+    } else {
+        theme.sidebar_text_dim
+    };
+    labels.push(Label {
+        text: additions,
+        x: changes_x + padding,
+        y: text_y,
+        width: (additions_width + 2.0 * scale).max(1.0),
+        font_size: font,
+        color: additions_color,
+        bold: false,
+    });
+
+    let deletions_color = if status.deletions > 0 {
+        theme.diff_remove_text
+    } else {
+        theme.sidebar_text_dim
+    };
+    labels.push(Label {
+        text: deletions,
+        x: changes_x + padding + additions_width + gap,
+        y: text_y,
+        width: (deletions_width + 2.0 * scale).max(1.0),
+        font_size: font,
+        color: deletions_color,
+        bold: false,
+    });
+}
+
+fn text_width(text: &str, font_size: f32) -> f32 {
+    text.chars().count() as f32 * font_size * 0.62
+}
+
+fn pill_width(text: &str, font_size: f32, padding: f32) -> f32 {
+    text_width(text, font_size) + padding * 2.0
+}
+
+fn truncate_to_width(text: &str, max_width: f32, font_size: f32) -> String {
+    let max_chars = (max_width / (font_size * 0.62)).floor().max(0.0) as usize;
+    if text.chars().count() <= max_chars {
+        return text.to_owned();
+    }
+    if max_chars == 0 {
+        return String::new();
+    }
+
+    let mut truncated: String = text.chars().take(max_chars.saturating_sub(1)).collect();
+    truncated.push('…');
+    truncated
 }
 
 fn push_cursor_quads(

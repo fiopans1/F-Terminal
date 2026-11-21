@@ -6,6 +6,7 @@ use winit::event_loop::EventLoopProxy;
 
 use crate::config::Config;
 use crate::event::UserEvent;
+use crate::git_status::GitStatus;
 use crate::pty::Session;
 use crate::term::{EventProxy, GridSize, Terminal};
 
@@ -160,6 +161,7 @@ pub struct Pane {
     pub grid: GridSize,
     pub title: Option<String>,
     pub cwd: Option<PathBuf>,
+    pub git_status: Option<GitStatus>,
 }
 
 impl Pane {
@@ -181,6 +183,7 @@ impl Pane {
             grid,
             title: None,
             cwd: Some(cwd),
+            git_status: None,
         })
     }
 

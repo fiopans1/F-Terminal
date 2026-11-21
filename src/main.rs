@@ -3,6 +3,7 @@ mod config;
 mod editor;
 mod event;
 mod explorer;
+mod git_status;
 mod highlight;
 mod input;
 mod layout;

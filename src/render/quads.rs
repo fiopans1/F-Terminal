@@ -9,6 +9,8 @@ pub struct Quad {
     pub y: f32,
     pub width: f32,
     pub height: f32,
+    /// Corner radius in physical pixels. `0.0` draws a sharp rectangle.
+    pub radius: f32,
     /// Linear RGBA.
     pub color: [f32; 4],
 }
@@ -20,6 +22,18 @@ impl Quad {
             y,
             width,
             height,
+            radius: 0.0,
+            color,
+        }
+    }
+
+    pub fn rounded(x: f32, y: f32, width: f32, height: f32, radius: f32, color: [f32; 4]) -> Self {
+        Self {
+            x,
+            y,
+            width,
+            height,
+            radius,
             color,
         }
     }
@@ -31,6 +45,8 @@ struct Instance {
     position: [f32; 2],
     size: [f32; 2],
     color: [f32; 4],
+    radius: f32,
+    _padding: [f32; 3],
 }
 
 #[repr(C)]
@@ -111,6 +127,7 @@ impl QuadRenderer {
             0 => Float32x2,
             1 => Float32x2,
             2 => Float32x4,
+            3 => Float32,
         ];
         let vertex_layout = wgpu::VertexBufferLayout {
             array_stride: size_of::<Instance>() as u64,
@@ -178,6 +195,8 @@ impl QuadRenderer {
             position: [quad.x, quad.y],
             size: [quad.width, quad.height],
             color: quad.color,
+            radius: quad.radius,
+            _padding: [0.0; 3],
         });
     }
 

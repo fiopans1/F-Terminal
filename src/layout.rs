@@ -53,6 +53,8 @@ pub struct PaneLayout {
     pub outer: Rect,
     /// Area available for the terminal grid.
     pub content: Rect,
+    /// Status bar shown below the terminal grid.
+    pub footer: Rect,
 }
 
 /// A draggable split divider.
@@ -73,19 +75,50 @@ pub struct LayoutResult {
 }
 
 /// Compute pane rectangles for a tab's split tree.
-pub fn compute_layout(root: &LayoutNode, area: Rect, gap: f32, padding: f32) -> LayoutResult {
+pub fn compute_layout(
+    root: &LayoutNode,
+    area: Rect,
+    gap: f32,
+    padding: f32,
+    footer_height: f32,
+) -> LayoutResult {
     let mut result = LayoutResult::default();
-    walk(root, area, gap.max(1.0), padding, &mut result);
+    walk(
+        root,
+        area,
+        gap.max(1.0),
+        padding,
+        footer_height.max(0.0),
+        &mut result,
+    );
     result
 }
 
-fn walk(node: &LayoutNode, area: Rect, gap: f32, padding: f32, result: &mut LayoutResult) {
+fn walk(
+    node: &LayoutNode,
+    area: Rect,
+    gap: f32,
+    padding: f32,
+    footer_height: f32,
+    result: &mut LayoutResult,
+) {
     match node {
         LayoutNode::Leaf(id) => {
+            let padded = area.inset(padding);
+            let footer_height = footer_height
+                .min(padded.height * 0.3)
+                .min((padded.height - 1.0).max(0.0));
+            let content_height = (padded.height - footer_height).max(1.0);
             result.panes.push(PaneLayout {
                 id: *id,
                 outer: area,
-                content: area.inset(padding),
+                content: Rect::new(padded.x, padded.y, padded.width, content_height),
+                footer: Rect::new(
+                    padded.x,
+                    padded.y + content_height,
+                    padded.width,
+                    (padded.height - content_height).max(0.0),
+                ),
             });
         }
         LayoutNode::Split(split) => {
@@ -99,8 +132,22 @@ fn walk(node: &LayoutNode, area: Rect, gap: f32, padding: f32, result: &mut Layo
                 line,
             });
 
-            walk(&split.first, first_area, gap, padding, result);
-            walk(&split.second, second_area, gap, padding, result);
+            walk(
+                &split.first,
+                first_area,
+                gap,
+                padding,
+                footer_height,
+                result,
+            );
+            walk(
+                &split.second,
+                second_area,
+                gap,
+                padding,
+                footer_height,
+                result,
+            );
         }
     }
 }
@@ -159,7 +206,7 @@ mod tests {
             second: Box::new(LayoutNode::Leaf(PaneId(2))),
         }));
 
-        let layout = compute_layout(&tree, Rect::new(0.0, 0.0, 100.0, 50.0), 2.0, 4.0);
+        let layout = compute_layout(&tree, Rect::new(0.0, 0.0, 100.0, 50.0), 2.0, 4.0, 0.0);
 
         assert_eq!(layout.panes.len(), 2);
         assert_eq!(layout.dividers.len(), 1);
@@ -169,6 +216,18 @@ mod tests {
         assert!((layout.panes[1].outer.x - 51.0).abs() < 0.01);
         assert_eq!(layout.dividers[0].line.width, 2.0);
         assert_eq!(layout.panes[0].content.width, 41.0);
+        assert_eq!(layout.panes[0].footer.height, 0.0);
+    }
+
+    #[test]
+    fn reserves_space_for_the_pane_footer() {
+        let tree = LayoutNode::Leaf(PaneId(1));
+        let layout = compute_layout(&tree, Rect::new(0.0, 0.0, 100.0, 80.0), 2.0, 4.0, 12.0);
+
+        let pane = layout.panes[0];
+        assert_eq!(pane.content.height, 60.0);
+        assert_eq!(pane.footer.y, 64.0);
+        assert_eq!(pane.footer.height, 12.0);
     }
 
     #[test]
@@ -181,7 +240,7 @@ mod tests {
             second: Box::new(LayoutNode::Leaf(PaneId(2))),
         }));
 
-        let layout = compute_layout(&tree, Rect::new(0.0, 0.0, 80.0, 100.0), 2.0, 0.0);
+        let layout = compute_layout(&tree, Rect::new(0.0, 0.0, 80.0, 100.0), 2.0, 0.0, 0.0);
 
         assert_eq!(layout.panes[0].outer.height, 24.5);
         assert_eq!(layout.panes[1].outer.y, 26.5);

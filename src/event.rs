@@ -3,6 +3,7 @@ use std::path::PathBuf;
 use alacritty_terminal::event::Event;
 use winit::window::WindowId;
 
+use crate::git_status::GitStatus;
 use crate::highlight::StyledSpan;
 use crate::menu::Action;
 use crate::review::{PullRequestSummary, ReviewDetail};
@@ -40,5 +41,11 @@ pub enum UserEvent {
         window_id: WindowId,
         request_id: u64,
         result: Result<Vec<PullRequestSummary>, String>,
+    },
+    /// Git branch and diff stats for a terminal pane.
+    GitStatus {
+        pane: PaneId,
+        cwd: PathBuf,
+        status: Option<GitStatus>,
     },
 }
