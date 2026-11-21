@@ -1,0 +1,32 @@
+[package]
+name = "f-terminal"
+version = "0.1.0"
+edition = "2024"
+
+[dependencies]
+alacritty_terminal = "0.26"
+anyhow = "1"
+arboard = "3.6"
+bytemuck = { version = "1", features = ["derive"] }
+cosmic-text = "0.19"
+env_logger = "0.11"
+glyphon = "0.12"
+log = "0.4"
+pollster = "0.4"
+portable-pty = "0.9"
+serde = { version = "1", features = ["derive"] }
+syntect = { version = "5.3", default-features = false, features = ["default-fancy"] }
+sysinfo = "0.40"
+vte = "0.15"
+wgpu = "30"
+winit = "0.30"
+
+[target.'cfg(target_os = "macos")'.dependencies]
+muda = { version = "0.21", default-features = false }
+
+[profile.dev.package."*"]
+opt-level = 1
+
+[profile.release]
+lto = "thin"
+strip = true
