@@ -12,6 +12,7 @@ use crate::event::UserEvent;
 pub enum Action {
     Explorer,
     OpenCode,
+    CodeReview,
     Settings,
 }
 
@@ -20,6 +21,7 @@ impl Action {
         match id {
             "open-explorer" => Some(Self::Explorer),
             "open-code" => Some(Self::OpenCode),
+            "code-review" => Some(Self::CodeReview),
             "open-settings" => Some(Self::Settings),
             _ => None,
         }
@@ -104,15 +106,17 @@ impl MenuState {
 
         let explorer = MenuItem::with_id("open-explorer", "Abrir explorador", true, None);
         let code = MenuItem::with_id("open-code", "Abrir en VS Code", true, None);
+        let review = MenuItem::with_id("code-review", "Code Review", true, None);
         let settings = MenuItem::with_id("open-settings", "Ajustes…", true, None);
 
         let separator_one = PredefinedMenuItem::separator();
         let separator_two = PredefinedMenuItem::separator();
         let quit = PredefinedMenuItem::quit(Some("Salir"));
 
-        let items: [&dyn IsMenuItem; 6] = [
+        let items: [&dyn IsMenuItem; 7] = [
             &explorer,
             &code,
+            &review,
             &separator_one,
             &settings,
             &separator_two,
@@ -160,6 +164,10 @@ mod tests {
             Some(Action::Explorer)
         );
         assert_eq!(Action::from_menu_id("open-code"), Some(Action::OpenCode));
+        assert_eq!(
+            Action::from_menu_id("code-review"),
+            Some(Action::CodeReview)
+        );
         assert_eq!(
             Action::from_menu_id("open-settings"),
             Some(Action::Settings)

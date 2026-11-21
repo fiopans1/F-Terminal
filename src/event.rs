@@ -1,7 +1,11 @@
+use std::path::PathBuf;
+
 use alacritty_terminal::event::Event;
+use winit::window::WindowId;
 
 use crate::highlight::StyledSpan;
 use crate::menu::Action;
+use crate::review::ReviewDetail;
 use crate::workspace::PaneId;
 
 /// Events sent from background threads (PTY readers, terminal event proxy)
@@ -22,5 +26,13 @@ pub enum UserEvent {
         generation: u64,
         revision: u64,
         spans: Vec<Vec<StyledSpan>>,
+    },
+    /// Request to open the Code Review window for a directory.
+    OpenCodeReview { cwd: PathBuf },
+    /// Code review diff loaded in the background.
+    ReviewLoaded {
+        window_id: WindowId,
+        request_id: u64,
+        result: Result<ReviewDetail, String>,
     },
 }

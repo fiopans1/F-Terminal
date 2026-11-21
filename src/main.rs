@@ -9,6 +9,8 @@ mod layout;
 mod menu;
 mod pty;
 mod render;
+mod review;
+mod review_window;
 mod sidebar;
 mod term;
 mod workspace;

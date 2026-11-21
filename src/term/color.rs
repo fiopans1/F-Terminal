@@ -19,6 +19,13 @@ pub struct Theme {
     pub sidebar_text_dim: Rgb,
     pub accent: Rgb,
     pub border: Rgb,
+    // Diff / code review colors.
+    pub diff_add_background: Rgb,
+    pub diff_remove_background: Rgb,
+    pub diff_add_text: Rgb,
+    pub diff_remove_text: Rgb,
+    pub diff_hunk_text: Rgb,
+    pub diff_meta_text: Rgb,
 }
 
 impl Theme {
@@ -58,6 +65,12 @@ impl Theme {
             sidebar_text_dim: rgb(0x56, 0x5f, 0x89),
             accent: rgb(0x7a, 0xa2, 0xf7),
             border: rgb(0x2a, 0x2e, 0x3f),
+            diff_add_background: rgb(0x1b, 0x2b, 0x1f),
+            diff_remove_background: rgb(0x2b, 0x1b, 0x1f),
+            diff_add_text: rgb(0x9e, 0xce, 0x6a),
+            diff_remove_text: rgb(0xf7, 0x76, 0x8e),
+            diff_hunk_text: rgb(0x7a, 0xa2, 0xf7),
+            diff_meta_text: rgb(0x56, 0x5f, 0x89),
         }
     }
 

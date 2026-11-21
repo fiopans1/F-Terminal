@@ -27,6 +27,7 @@ use crate::menu;
 use crate::render::quads::Quad;
 use crate::render::scene::{Label, PaneLayer, Scene};
 use crate::render::{CellMetrics, Renderer, grid_size_for};
+use crate::review_window::ReviewWindow;
 use crate::sidebar::{
     self, LayoutSpec, Sidebar, SidebarHit, SidebarLayout, SidebarMode, TabSummary,
 };
@@ -38,6 +39,7 @@ pub struct App {
     proxy: EventLoopProxy<UserEvent>,
     config: Config,
     window: Option<WindowState>,
+    review: Option<ReviewWindow>,
     _menu: Option<menu::MenuState>,
 }
 
@@ -47,7 +49,49 @@ impl App {
             proxy,
             config,
             window: None,
+            review: None,
             _menu: None,
+        }
+    }
+
+    fn open_review_window(&mut self, event_loop: &ActiveEventLoop, cwd: PathBuf) {
+        if let Some(review) = &self.review {
+            review.focus();
+            return;
+        }
+
+        let attributes = Window::default_attributes()
+            .with_title("Code Review — F-Terminal")
+            .with_inner_size(LogicalSize::new(1280.0, 820.0))
+            .with_min_inner_size(LogicalSize::new(800.0, 500.0));
+
+        let window = match event_loop.create_window(attributes) {
+            Ok(window) => Arc::new(window),
+            Err(error) => {
+                log::error!("failed to create the code review window: {error}");
+                return;
+            }
+        };
+
+        let renderer =
+            match pollster::block_on(Renderer::new(window.clone(), event_loop, &self.config)) {
+                Ok(renderer) => renderer,
+                Err(error) => {
+                    log::error!("failed to initialize the code review renderer: {error:#}");
+                    return;
+                }
+            };
+
+        let review = ReviewWindow::new(window, renderer, cwd, self.proxy.clone());
+        review.focus();
+        review.request_redraw();
+        log::info!("opened code review window");
+        self.review = Some(review);
+    }
+
+    fn focus_main(&self) {
+        if let Some(window) = &self.window {
+            window.window.focus_window();
         }
     }
 }
@@ -77,22 +121,83 @@ impl ApplicationHandler<UserEvent> for App {
     fn window_event(
         &mut self,
         event_loop: &ActiveEventLoop,
-        _window_id: WindowId,
+        window_id: WindowId,
         event: WindowEvent,
     ) {
-        let Some(state) = &mut self.window else {
-            return;
-        };
+        let main_id = self.window.as_ref().map(|window| window.window_id());
 
-        if matches!(event, WindowEvent::CloseRequested) {
-            event_loop.exit();
+        if Some(window_id) == main_id {
+            let Some(state) = &mut self.window else {
+                return;
+            };
+
+            if matches!(event, WindowEvent::CloseRequested) {
+                event_loop.exit();
+                return;
+            }
+
+            state.on_window_event(event, event_loop, &self.config);
             return;
         }
 
-        state.on_window_event(event, event_loop, &self.config);
+        if !self
+            .review
+            .as_ref()
+            .is_some_and(|review| review.window_id() == window_id)
+        {
+            return;
+        }
+
+        if matches!(event, WindowEvent::CloseRequested) {
+            self.review = None;
+            self.focus_main();
+            return;
+        }
+
+        let close_requested = {
+            let Some(review) = &mut self.review else {
+                return;
+            };
+            review.on_window_event(event, &self.config);
+            review.close_requested()
+        };
+
+        if close_requested {
+            self.review = None;
+            self.focus_main();
+        }
     }
 
     fn user_event(&mut self, event_loop: &ActiveEventLoop, event: UserEvent) {
+        match event {
+            UserEvent::OpenCodeReview { cwd } => {
+                self.open_review_window(event_loop, cwd);
+                return;
+            }
+            UserEvent::ReviewLoaded {
+                window_id,
+                request_id,
+                result,
+            } => {
+                if let Some(review) = &mut self.review
+                    && review.window_id() == window_id
+                {
+                    review.apply_detail(request_id, result);
+                }
+                return;
+            }
+            UserEvent::Menu(menu::Action::CodeReview) => {
+                let cwd = self
+                    .window
+                    .as_ref()
+                    .map(|window| window.focused_cwd())
+                    .unwrap_or_else(default_directory);
+                self.open_review_window(event_loop, cwd);
+                return;
+            }
+            _ => {}
+        }
+
         let Some(state) = &mut self.window else {
             return;
         };
@@ -111,6 +216,7 @@ impl ApplicationHandler<UserEvent> for App {
                 revision,
                 spans,
             } => state.on_highlight(generation, revision, spans),
+            UserEvent::OpenCodeReview { .. } | UserEvent::ReviewLoaded { .. } => {}
         }
     }
 
@@ -206,6 +312,10 @@ struct WindowState {
 }
 
 impl WindowState {
+    pub fn window_id(&self) -> WindowId {
+        self.window.id()
+    }
+
     fn new(
         event_loop: &ActiveEventLoop,
         config: &Config,
@@ -318,6 +428,7 @@ impl WindowState {
                 // TODO: draw the preedit overlay at the cursor position.
             }
             WindowEvent::CursorMoved { position, .. } => {
+                self.cursor_position = position;
                 self.on_cursor_moved(position, config);
             }
             WindowEvent::MouseInput { state, button, .. } => {
@@ -595,11 +706,14 @@ impl WindowState {
         match action {
             menu::Action::Explorer => menu::open_explorer(&cwd),
             menu::Action::OpenCode => menu::open_in_code(&cwd),
+            menu::Action::CodeReview => {
+                let _ = self.proxy.send_event(UserEvent::OpenCodeReview { cwd });
+            }
             menu::Action::Settings => menu::open_settings(),
         }
     }
 
-    fn focused_cwd(&self) -> PathBuf {
+    pub(crate) fn focused_cwd(&self) -> PathBuf {
         self.workspace
             .focused_pane()
             .and_then(|id| self.workspace.pane(id))
@@ -1314,6 +1428,12 @@ impl WindowState {
                 menu::open_explorer(&self.focused_cwd());
                 true
             }
+            KeyCode::KeyR if shift => {
+                let _ = self.proxy.send_event(UserEvent::OpenCodeReview {
+                    cwd: self.focused_cwd(),
+                });
+                true
+            }
             KeyCode::KeyC => {
                 self.copy();
                 true
@@ -1955,10 +2075,6 @@ impl WindowState {
 
         self.window.request_redraw();
     }
-
-    // ------------------------------------------------------------------
-    // Rendering
-    // ------------------------------------------------------------------
 
     fn on_redraw(&mut self, config: &Config) {
         let theme = &config.theme;

@@ -49,6 +49,8 @@ src/
   layout.rs        Geometría de panes, splits y divisores
   menu.rs          Menú nativo macOS + acciones de explorador/VS Code
   pty.rs           Sesión PTY + hilo lector
+  review.rs        Code Review: Git, parser de diffs y estado
+  review_window.rs Ventana independiente de Code Review
   sidebar.rs       Layout y hit-testing de la sidebar
   workspace.rs     Tabs, panes, árbol de splits y sesiones PTY
   term/
@@ -98,6 +100,24 @@ gráfica.
   los cambios no guardados. Solo UTF-8 y archivos de hasta 2 MB. Los tabs se
   expanden a 4 espacios al cargar.
 
+## Code Review
+
+- `Cmd+Shift+R` / `Ctrl+Shift+R` o el ítem **Code Review** del menú de macOS.
+- Abre una **ventana nativa separada**; la terminal principal sigue funcionando.
+- Toma el repositorio Git del cwd del pane enfocado.
+- Tres columnas: reviews, selector de archivos y diff.
+- Entradas: **Working changes**, **Branch vs main/master** y los últimos 15
+  commits.
+- En la lista de reviews: `↑↓`, `Enter` o clic para abrir; `R` refresca.
+- En el selector de archivos: `↑↓` mueve, `Espacio`/`M` marca el archivo como
+  revisado (solo durante la sesión), `Enter` pasa al diff.
+- En el diff: `↑↓`/PgUp/PgDn desplazan, `←→` horizontal.
+- `Tab` cambia de panel; `Esc` o `×` cierran la ventana.
+- La carga del diff ocurre en un hilo aparte.
+- Limitaciones: solo Git local (no PRs de GitHub), sin comentarios inline ni
+  revisión por IA, sin resaltado de sintaxis dentro del diff, corte a 50.000
+  líneas y las marcas de revisado no se persisten.
+
 ## Incluido en esta iteración
 
 - Ventana nativa con superficie wgpu (Metal en macOS).
@@ -114,8 +134,15 @@ gráfica.
   real del shell enfocado (se actualiza al hacer `cd`).
 - Las terminales nuevas y los splits heredan el cwd del pane enfocado.
 - Colapsar la sidebar con `«` y recuperarla con el rail `»`; también con atajo.
-- Menú nativo en macOS: Abrir explorador, Abrir en VS Code, Ajustes
-  (placeholder) y Salir.
+- Menú nativo en macOS: Abrir explorador, Abrir en VS Code, Code Review,
+  Ajustes (placeholder) y Salir.
+- Modal de **Code Review** en una **ventana independiente** sobre el repositorio
+  del pane enfocado: cambios locales, rama contra `main`/`master` y últimos 15
+  commits. La terminal sigue usable mientras la review está abierta.
+- Selector de archivos al lado del diff, con estado (M/A/D/R), líneas añadidas
+  y eliminadas, y marca de revisado por archivo durante la sesión.
+- Al seleccionar una review, el diff por archivo se carga en background con
+  numeración, altas/bajas coloreadas y navegación por teclado o ratón.
 - Varias terminales abiertas a la vez, cada una con su propio shell y estado.
 - Splits dentro de una terminal: derecha/abajo, con foco por clic, borde de
   foco y divisores arrastrables.
@@ -142,6 +169,7 @@ macOS:
 | Mover foco entre panes | `Cmd+Alt+flechas`, `Cmd+\`` |
 | Mostrar/ocultar sidebar | `Cmd+B` |
 | Cambiar Terminals / Files | `Cmd+Shift+F` |
+| Abrir Code Review | `Cmd+Shift+R` |
 | Abrir explorador | `Cmd+Shift+O` |
 | Guardar en el editor | `Cmd+S` |
 | Cerrar editor | `Esc` o `Cmd+W` |
@@ -159,6 +187,7 @@ Linux / Windows:
 | Mover foco entre panes | `Ctrl+Alt+flechas`, `Ctrl+Shift+\`` |
 | Mostrar/ocultar sidebar | `Ctrl+Shift+B` |
 | Cambiar Terminals / Files | `Ctrl+Shift+F` |
+| Abrir Code Review | `Ctrl+Shift+R` |
 | Abrir explorador | `Ctrl+Shift+O` |
 | Guardar en el editor | `Ctrl+S` |
 | Cerrar editor | `Esc` o `Ctrl+W` |
@@ -184,6 +213,9 @@ Linux / Windows:
 - Pantalla de ajustes real (hoy el ítem del menú es un placeholder).
 - Menú nativo en Windows (Win32) si se decide; Linux usará controles propios.
 - Editor: undo/redo, selección, resaltado de sintaxis y file watching.
+- Code Review: PRs de GitHub, comentarios inline, resaltado en el diff,
+  revisión asistida por IA y persistencia de archivos revisados.
+- Más modos sobre el mismo sistema de modal.
 - `modifyOtherKeys` / CSI-u (Shift+Enter y teclas modificadas).
 - Overlay de preedit IME y cursor parpadeante.
 - Render incremental por filas sucias y límite de parseo por frame.
@@ -200,8 +232,9 @@ cargo test
 Incluye tests del encoder de teclado, del pipeline VT → `Frame` (texto,
 colores, fondos, cursor), del árbol de splits y geometría de panes, de la
 sidebar (colapsar/revelar y modo Files), del explorador de archivos, del editor
-mínimo, del resaltado de sintaxis, del mapeo de acciones del menú y un smoke
-test offscreen de GPU que renderiza dos panes y una etiqueta de UI.
+mínimo, del resaltado de sintaxis, del parser de diffs de Code Review, del
+mapeo de acciones del menú y un smoke test offscreen de GPU que renderiza dos
+panes y una etiqueta de UI.
 
 ## Estado
 
