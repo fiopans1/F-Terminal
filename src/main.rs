@@ -4,6 +4,7 @@ mod diff_view;
 mod editor;
 mod event;
 mod explorer;
+mod forge;
 mod git;
 mod git_status;
 mod git_window;

@@ -3,11 +3,12 @@ use std::path::PathBuf;
 use alacritty_terminal::event::Event;
 use winit::window::WindowId;
 
+use crate::forge::RemoteChange;
 use crate::git::{Snapshot, StatusSnapshot};
 use crate::git_status::GitStatus;
 use crate::highlight::StyledSpan;
 use crate::menu::Action;
-use crate::review::{PullRequestSummary, ReviewDetail};
+use crate::review::ReviewDetail;
 use crate::workspace::PaneId;
 
 /// Events sent from background threads (PTY readers, terminal event proxy)
@@ -39,11 +40,11 @@ pub enum UserEvent {
         request_id: u64,
         result: Result<ReviewDetail, String>,
     },
-    /// Open pull requests loaded from GitHub in the background.
+    /// Open pull requests / merge requests loaded from the forge.
     PullRequestsLoaded {
         window_id: WindowId,
         request_id: u64,
-        result: Result<Vec<PullRequestSummary>, String>,
+        result: Result<Vec<RemoteChange>, String>,
     },
     /// Git branch and diff stats for a terminal pane.
     GitStatus {

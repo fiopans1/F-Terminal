@@ -44,7 +44,7 @@ runtime web, manteniendo el binario y el consumo de memoria bajos.
 - Colores ANSI de 16/256/truecolor, OSC 4/10/11 y consultas DA/DSR.
 - Editor integrado con resaltado TextMate en background.
 - **Code Review** en ventana separada: cambios locales, rama contra base,
-  commits y **pull requests abiertas de GitHub** con buscador.
+  commits y **pull requests de GitHub o merge requests de GitLab** con buscador.
 - **Gestor Git** en ventana separada: stage/unstage, commit/amend, ramas,
   fetch/pull/push, merge, stash e historial con diff.
 - Footer Git por terminal con dos burbujas: rama y `+N/-N`.
@@ -69,11 +69,11 @@ runtime web, manteniendo el binario y el consumo de memoria bajos.
 | `muda` | Menú nativo de macOS |
 | `sysinfo` | cwd del proceso hijo para seguir el `cd` |
 | `syntect` | Resaltado con gramáticas TextMate |
-| `serde_json` | Lista de pull requests de GitHub |
-| `curl` (externo) | Peticiones a la API de GitHub |
+| `serde_json` | Listas de PRs/MRs de GitHub y GitLab |
+| `curl` (externo) | Peticiones a las APIs de GitHub y GitLab |
 
 `curl` viene incluido en macOS, en la mayoría de distribuciones Linux y en
-Windows 10/11. Solo se usa para la pestaña de pull requests de Code Review.
+Windows 10/11. Solo se usa para la pestaña de PRs/MRs de Code Review.
 
 ---
 
@@ -84,8 +84,8 @@ Windows 10/11. Solo se usa para la pestaña de pull requests de Code Review.
 - Un backend gráfico disponible: Metal en macOS, Vulkan/GL en Linux, DX12 en
   Windows.
 - Git instalado para Code Review, el gestor Git y el footer por terminal.
-- `curl` para listar y descargar pull requests de GitHub.
-- Opcional: `gh` autenticado para reutilizar su token de GitHub.
+- `curl` para listar y descargar PRs de GitHub o MRs de GitLab.
+- Opcional: `gh` o `glab` autenticados para reutilizar sus tokens.
 - En Windows, los shells se detectan automáticamente. Git Bash debe usar
   `...\Git\bin\bash.exe`, no `git-bash.exe`.
 
@@ -303,15 +303,26 @@ Es una **ventana nativa independiente**: la terminal principal sigue usable.
 - **Últimos 15 commits**.
 - `↑↓` para mover, `Enter` o clic para abrir, `R` para refrescar.
 
-### Pestaña PULL REQUESTS
+### Pestaña PULL / MERGE REQUESTS
 
-- Lista todas las pull requests abiertas del remoto GitHub del repositorio.
-- Carga paginada de hasta 1.000 PRs.
+- Detecta el proveedor a partir del remoto `origin`:
+  - **GitHub**: la pestaña se llama **PULL REQUESTS** y usa `#123`.
+  - **GitLab**: la pestaña se llama **MERGE REQUESTS** y usa `!123`.
+- Lista los cambios abiertos del remoto.
+- Carga paginada de hasta 1.000 PRs/MRs.
 - Buscador por número, título, autor o rama; admite varios términos separados
   por espacios.
 - `/` o `Cmd+F`/`Ctrl+F` enfocan el buscador.
 - `↑↓` selecciona, `Enter` carga el diff, `R` recarga la lista.
 - `Esc` sale del buscador sin cerrar la ventana.
+
+Soporte de remotos:
+
+- `github.com` y GitHub Enterprise en hosts `github.*`.
+- `gitlab.com`, grupos anidados (`grupo/subgrupo/repo`) y GitLab self-hosted en
+  hosts `gitlab.*`.
+- Los hosts con otros nombres necesitarán configuración explícita en una
+  iteración futura.
 
 ### Diff y revisión
 
@@ -324,10 +335,12 @@ Es una **ventana nativa independiente**: la terminal principal sigue usable.
 - El diff se carga en background y se descarta si llega tarde
   (`window_id` + `request_id`).
 
-### Autenticación de GitHub
+### Autenticación de GitHub y GitLab
 
-Los repos públicos funcionan sin token, con el límite de peticiones de la API.
-Para repos privados, por orden:
+Los repos públicos funcionan sin token, con el límite de peticiones de cada
+API. Para repos privados:
+
+**GitHub**, por orden:
 
 1. `GITHUB_TOKEN` o `GH_TOKEN` en el entorno.
 2. `~/.config/f-terminal/github-token`
@@ -340,7 +353,17 @@ Token recomendado:
 - Fine-grained: lectura de **Pull requests** y **Contents**.
 - Classic: scope `repo`.
 
-El token se envía a `curl` por stdin para no exponerlo en la lista de procesos.
+**GitLab**, por orden:
+
+1. `GITLAB_TOKEN` o `GL_TOKEN` en el entorno.
+2. `~/.config/f-terminal/gitlab-token`
+   (`%APPDATA%\f-terminal\gitlab-token` en Windows).
+3. `glab auth token`, si `glab` está instalado y autenticado.
+
+Token recomendado: scope **`read_api`**.
+
+Los tokens se envían a `curl` por stdin para no exponerlos en la lista de
+procesos.
 
 ---
 
@@ -536,32 +559,40 @@ Los comandos se ejecutan sin `sh -c`, con `GIT_TERMINAL_PROMPT=0`,
 `GIT_PAGER=cat` y `LC_ALL=C`. Si Git necesita una contraseña interactiva, la
 operación falla y el error se muestra en el footer de la ventana Git.
 
-### GitHub para Code Review
+### GitHub y GitLab para Code Review
 
-La pestaña de pull requests usa la API REST de GitHub. Los repos públicos no
-necesitan token. Para repos privados, configura una de estas opciones:
+La pestaña de cambios remotos usa la API REST del proveedor detectado. Los
+repos públicos no necesitan token. Para repos privados, configura un token como
+se describe arriba.
+
+Ejemplos:
 
 ```bash
+# GitHub
 export GITHUB_TOKEN=ghp_...
-# o
-export GH_TOKEN=...
+
+# GitLab
+export GITLAB_TOKEN=glpat-...
 ```
 
-O crea el fichero:
+O crea el fichero correspondiente:
 
 ```bash
 mkdir -p ~/.config/f-terminal
 printf 'TU_TOKEN\n' > ~/.config/f-terminal/github-token
-chmod 600 ~/.config/f-terminal/github-token
+printf 'TU_TOKEN\n' > ~/.config/f-terminal/gitlab-token
+chmod 600 ~/.config/f-terminal/github-token ~/.config/f-terminal/gitlab-token
 ```
 
 En Windows:
 
 ```
 %APPDATA%\f-terminal\github-token
+%APPDATA%\f-terminal\gitlab-token
 ```
 
-También se puede usar `gh auth token` si `gh` está instalado y autenticado.
+También se pueden usar `gh auth token` y `glab auth token` si esos CLIs están
+instalados y autenticados.
 
 ### Configuración actual
 
@@ -588,6 +619,11 @@ src/
   editor.rs        Editor mínimo
   event.rs         Eventos de background hacia la UI
   explorer.rs      Árbol de archivos del cwd
+  forge/
+    mod.rs         Detección de GitHub/GitLab y modelo remoto común
+    github.rs      API de pull requests de GitHub
+    gitlab.rs      API de merge requests de GitLab
+    http.rs        Runner curl compartido
   git/
     mod.rs         Snapshot y detección de repositorio
     command.rs     Runner seguro de git
@@ -602,7 +638,7 @@ src/
   layout.rs        Geometría de panes, splits, footer y divisores
   menu.rs          Menú nativo macOS
   pty.rs           PTY/ConPTY y hilo lector
-  review.rs        Descubrimiento Git, parser de diffs y GitHub
+  review.rs        Descubrimiento Git y parser de diffs
   review_window.rs Ventana de Code Review
   shell/
     mod.rs         TerminalProfile / ShellCatalog
@@ -651,11 +687,11 @@ Los eventos se enrutan por `WindowId`. Cada ventana secundaria tiene su propio
 
 - Resaltado de sintaxis: worker con generación/revisión y debounce.
 - Footer Git: un hilo por consulta de estado.
-- Code Review: listas de PRs y diffs en hilos separados.
+- Code Review: listas de PRs/MRs y diffs en hilos separados.
 - Gestor Git: snapshots, detalles y operaciones en hilos separados.
 - Los resultados llevan `request_id` para descartar respuestas obsoletas.
 - Las operaciones mutantes de Git se serializan con un estado `busy`.
-- Los tokens de GitHub se pasan a `curl` por stdin.
+- Los tokens de GitHub y GitLab se pasan a `curl` por stdin.
 
 ---
 
@@ -665,7 +701,7 @@ Los eventos se enrutan por `WindowId`. Cada ventana secundaria tiene su propio
 cargo test
 ```
 
-Cobertura actual (36 tests):
+Cobertura actual (41 tests):
 
 - Parser VT → `Frame`: texto, colores, fondos y cursor.
 - Geometría de splits, footer y divisores.
@@ -678,6 +714,9 @@ Cobertura actual (36 tests):
 - Parser de refs/stashes.
 - Parser de historial.
 - Integración real de Git en un repo temporal: stage, commit y rama.
+- Detección de remotos GitHub/GitLab, incluidos grupos anidados.
+- Parseo de PRs de GitHub y MRs de GitLab.
+- Construcción de diffs unificados desde los cambios de GitLab.
 - Mapeo de acciones del menú.
 - Smoke test offscreen de GPU con dos panes y una etiqueta.
 
@@ -700,8 +739,10 @@ Limitaciones conocidas:
 
 - Sin fichero de configuración ni pantalla de ajustes.
 - Editor sin undo/redo, selección, file watching ni autoguardado.
-- Code Review solo para GitHub; sin GitLab, comentarios inline, submit de
+- Code Review: soporte de GitHub y GitLab; sin comentarios inline, submit de
   reviews ni resaltado de sintaxis dentro del diff.
+- Self-hosted GitHub/GitLab se detecta en hosts `github.*` / `gitlab.*`; hosts
+  con otros nombres necesitan configuración explícita (pendiente).
 - Marcas de archivos revisados solo en memoria.
 - Gestor Git sin rebase, cherry-pick, revert, tags, force push ni resolución
   integrada de conflictos.
@@ -727,8 +768,10 @@ Limitaciones conocidas:
 - Añadir más perfiles: NuShell, fish en Windows, distros WSL concretas.
 - Git: tags, rebase, cherry-pick, revert, force push con lease y resolución de
   conflictos.
-- Code Review: GitLab, comentarios inline, submit de reviews y resaltado en el
-  diff.
+- Code Review: Bitbucket/Azure DevOps, comentarios inline, submit de reviews y
+  resaltado en el diff.
+- Config por proveedor para hosts self-hosted con nombres arbitrarios.
+- Aprobaciones y discusiones de MRs/PRs.
 - Editor: undo/redo, selección, file watching y autoguardado.
 - Sidebar: reordenar arrastrando, renombrar y actividad en segundo plano.
 - Búsqueda en scrollback.

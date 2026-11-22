@@ -10,12 +10,13 @@ use winit::window::{Window, WindowId};
 use crate::config::Config;
 use crate::diff_view::build_file_frame;
 use crate::event::UserEvent;
+use crate::forge::ForgeKind;
 use crate::layout::Rect;
 use crate::render::Renderer;
 use crate::render::quads::Quad;
 use crate::render::scene::{Label, PaneLayer, Scene};
 use crate::review::{
-    self, CodeReview, FileDiff, FileStatus, PullRequestSummary, ReviewDetail, ReviewSummary,
+    self, CodeReview, FileDiff, FileStatus, RemoteChange, ReviewDetail, ReviewSummary,
 };
 use crate::term::color::to_linear;
 
@@ -178,14 +179,14 @@ impl ReviewWindow {
     pub fn apply_pull_requests(
         &mut self,
         request_id: u64,
-        result: std::result::Result<Vec<PullRequestSummary>, String>,
+        result: std::result::Result<Vec<RemoteChange>, String>,
     ) {
         if request_id != self.prs_request_id {
             return;
         }
 
-        if let Ok(pull_requests) = &result {
-            log::info!("loaded {} open pull request(s)", pull_requests.len());
+        if let Ok(changes) = &result {
+            log::info!("loaded {} remote change(s)", changes.len());
         }
 
         self.review.apply_pull_requests(result);
@@ -211,7 +212,7 @@ impl ReviewWindow {
             .name("pull-requests".into())
             .spawn(move || {
                 let result =
-                    review::load_pull_requests(&repo).map_err(|error| format!("{error:#}"));
+                    crate::forge::load_open_changes(&repo).map_err(|error| format!("{error:#}"));
                 let _ = proxy.send_event(UserEvent::PullRequestsLoaded {
                     window_id,
                     request_id,
@@ -243,8 +244,13 @@ impl ReviewWindow {
                     return true;
                 }
                 let haystack = format!(
-                    "#{} {} {} {} {}",
-                    pull.number, pull.title, pull.author, pull.head, pull.base
+                    "{} {} {} {} {} {}",
+                    pull.id_label(),
+                    pull.id,
+                    pull.title,
+                    pull.author,
+                    pull.source_branch,
+                    pull.target_branch
                 )
                 .to_lowercase();
                 terms.iter().all(|term| haystack.contains(term))
@@ -336,7 +342,7 @@ impl ReviewWindow {
                 filtered
                     .get(self.pr_selected)
                     .and_then(|index| self.review.pull_requests.get(*index))
-                    .map(PullRequestSummary::to_review)
+                    .map(RemoteChange::to_review)
             }
         }
     }
@@ -1077,12 +1083,16 @@ impl ReviewWindow {
             to_linear(theme.border, 1.0),
         ));
 
+        let remote_label = self
+            .review
+            .forge
+            .map_or("REMOTE CHANGES", ForgeKind::tab_label);
         let tab_labels = [
             format!("LOCAL {}", self.review.reviews.len()),
             if self.review.prs_error.is_some() {
-                "PULL REQUESTS !".to_owned()
+                format!("{remote_label} !")
             } else {
-                format!("PULL REQUESTS {}", self.review.pull_requests.len())
+                format!("{remote_label} {}", self.review.pull_requests.len())
             },
         ];
         for (index, rect) in layout.tabs.iter().enumerate() {
@@ -1155,9 +1165,13 @@ impl ReviewWindow {
                 ),
             );
 
+            let placeholder = self
+                .review
+                .forge
+                .map_or("Buscar PR/MR…", ForgeKind::search_placeholder);
             let text = match (self.search.is_empty(), self.search_focused) {
-                (true, true) => "Buscar PRs…▌".to_owned(),
-                (true, false) => "Buscar PRs…".to_owned(),
+                (true, true) => format!("{placeholder}▌"),
+                (true, false) => placeholder.to_owned(),
                 (false, true) => format!("{}▌", self.search),
                 (false, false) => self.search.clone(),
             };
@@ -1199,8 +1213,11 @@ impl ReviewWindow {
                     };
                     let draft = if pull.draft { " · draft" } else { "" };
                     (
-                        format!("#{} {}", pull.number, pull.title),
-                        format!("@{} · {} → {}{}", pull.author, pull.head, pull.base, draft),
+                        pull.list_title(),
+                        format!(
+                            "@{} · {} → {}{}",
+                            pull.author, pull.source_branch, pull.target_branch, draft
+                        ),
                     )
                 }
             };
@@ -1248,15 +1265,25 @@ impl ReviewWindow {
         }
 
         if self.mode == ListMode::PullRequests && layout.review_rows.is_empty() {
+            let changes_name = self
+                .review
+                .forge
+                .map_or("remote changes", ForgeKind::changes_name);
+            let empty = self
+                .review
+                .forge
+                .map_or("No open remote changes.".to_owned(), |forge| {
+                    forge.empty_message().to_owned()
+                });
             let (message, color) = if self.review.prs_loading {
                 (
-                    "Loading open pull requests…".to_owned(),
+                    format!("Loading open {changes_name}…"),
                     theme.sidebar_text_dim,
                 )
             } else if let Some(error) = &self.review.prs_error {
                 (error.clone(), theme.diff_remove_text)
             } else if self.review.pull_requests.is_empty() {
-                ("No open pull requests.".to_owned(), theme.sidebar_text_dim)
+                (empty, theme.sidebar_text_dim)
             } else {
                 (
                     "No matches for this search.".to_owned(),
@@ -1508,18 +1535,24 @@ impl ReviewWindow {
         // No detail: loading/error/welcome.
         let (message, is_error) = match self.mode {
             ListMode::PullRequests => {
+                let changes_name = self
+                    .review
+                    .forge
+                    .map_or("remote changes", ForgeKind::changes_name);
                 if self.review.prs_loading {
-                    ("Loading open pull requests…".to_owned(), false)
+                    (format!("Loading open {changes_name}…"), false)
                 } else if let Some(error) = &self.review.prs_error {
                     (error.clone(), true)
                 } else if self.review.pull_requests.is_empty() {
-                    (
-                        "No open pull requests found in this repository.".to_owned(),
-                        false,
-                    )
+                    let empty = self.review.forge.map_or(
+                        "No open remote changes found in this repository.".to_owned(),
+                        |forge| forge.empty_message().to_owned(),
+                    );
+                    (empty, false)
                 } else {
                     (
-                        "Selecciona una pull request de la izquierda y pulsa Enter.".to_owned(),
+                        "Selecciona un pull request o merge request de la izquierda y pulsa Enter."
+                            .to_owned(),
                         false,
                     )
                 }
@@ -1584,7 +1617,7 @@ impl ReviewWindow {
 
         match focus {
             Focus::Reviews if self.mode == ListMode::PullRequests => {
-                "↑↓ PR   Enter revisar   / o Ctrl+F buscar   R refrescar   Tab panel   Esc cerrar"
+                "↑↓ PR/MR   Enter revisar   / o Ctrl+F buscar   R refrescar   Tab panel   Esc cerrar"
             }
             Focus::Reviews => {
                 "↑↓ revisar   Enter abrir   / buscar PRs   R refrescar   Tab panel   Esc cerrar"
