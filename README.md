@@ -183,6 +183,12 @@ git push origin v0.1.0-alpha-001-test
 El workflow valida que `v0.1.0` coincida con `Cargo.toml`, genera todos los
 instaladores y publica el resultado como **prerelease** de GitHub.
 
+macOS se compila en `macos-latest`. Si el runner de macOS no está disponible
+(por ejemplo, por límites de minutos en un repositorio privado), la release
+publica los artefactos de Linux/Windows y deja un warning; para generar el DMG
+y el PKG hace falta un runner macOS, una cuenta con minutos o un runner
+self-hosted.
+
 ### Build local
 
 ```bash

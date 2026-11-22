@@ -40,8 +40,11 @@ jobs:
   macos:
     name: macOS installers
     needs: validate
-    runs-on: macos-14
+    runs-on: macos-latest
     timeout-minutes: 45
+    # macOS runners are billed separately and can be unavailable depending on
+    # the repository plan. Keep publishing the other platforms in that case.
+    continue-on-error: true
     steps:
       - uses: actions/checkout@v4
         with:
@@ -139,12 +142,32 @@ jobs:
 
   release:
     name: Publish GitHub release
-    needs: [macos, windows, linux]
+    needs: [validate, macos, windows, linux]
+    if: >-
+      always() &&
+      needs.validate.result == 'success' &&
+      (needs.macos.result == 'success' ||
+       needs.windows.result == 'success' ||
+       needs.linux.result == 'success')
     runs-on: ubuntu-latest
     timeout-minutes: 15
     permissions:
       contents: write
     steps:
+      - name: Warn about failed platforms
+        shell: bash
+        run: |
+          set -euo pipefail
+          if [[ "${{ needs.macos.result }}" != "success" ]]; then
+            echo "::warning::macOS installers were not generated; publishing the remaining artifacts."
+          fi
+          if [[ "${{ needs.windows.result }}" != "success" ]]; then
+            echo "::warning::Windows installer was not generated; publishing the remaining artifacts."
+          fi
+          if [[ "${{ needs.linux.result }}" != "success" ]]; then
+            echo "::warning::Linux packages were not generated; publishing the remaining artifacts."
+          fi
+
       - uses: actions/download-artifact@v4
         with:
           path: dist
