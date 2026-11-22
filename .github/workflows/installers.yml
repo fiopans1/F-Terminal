@@ -10,7 +10,7 @@ permissions:
 
 concurrency:
   group: installers-${{ github.ref }}
-  cancel-in-progress: false
+  cancel-in-progress: true
 
 jobs:
   validate:
@@ -168,6 +168,18 @@ jobs:
             echo "::warning::Linux packages were not generated; publishing the remaining artifacts."
           fi
 
+      - name: Remove stale test release
+        if: contains(github.ref_name, '-test')
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          if gh release view "$GITHUB_REF_NAME" >/dev/null 2>&1; then
+            echo "Removing existing release for $GITHUB_REF_NAME"
+            gh release delete "$GITHUB_REF_NAME" --yes
+          fi
+
       - uses: actions/download-artifact@v4
         with:
           path: dist
@@ -184,7 +196,7 @@ jobs:
           mv SHA256SUMS.tmp SHA256SUMS
           cat SHA256SUMS
 
-      - uses: softprops/action-gh-release@v2
+      - uses: softprops/action-gh-release@v3
         with:
           name: F-Terminal ${{ github.ref_name }}
           tag_name: ${{ github.ref_name }}
