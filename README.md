@@ -173,6 +173,16 @@ GitHub Release con:
 
 El workflow no se ejecuta en cada push ni mediante `workflow_dispatch`.
 
+Para probar el pipeline sin publicar una versión estable, usa una prerelease:
+
+```bash
+git tag v0.1.0-alpha-001-test
+git push origin v0.1.0-alpha-001-test
+```
+
+El workflow valida que `v0.1.0` coincida con `Cargo.toml`, genera todos los
+instaladores y publica el resultado como **prerelease** de GitHub.
+
 ### Build local
 
 ```bash
