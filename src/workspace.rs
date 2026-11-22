@@ -172,8 +172,9 @@ impl Pane {
         proxy: EventLoopProxy<UserEvent>,
         profile: &TerminalProfile,
         cwd: PathBuf,
+        scrollback_lines: usize,
     ) -> Result<Self> {
-        let terminal = Terminal::new(grid, EventProxy::new(id, proxy.clone()));
+        let terminal = Terminal::new(grid, EventProxy::new(id, proxy.clone()), scrollback_lines);
         let session = Session::spawn(id, grid.lines, grid.cols, proxy, profile, &cwd)
             .with_context(|| format!("failed to spawn shell for pane {}", id.0))?;
 
@@ -197,6 +198,10 @@ impl Pane {
         self.session.resize(grid.lines, grid.cols);
         self.grid = grid;
         true
+    }
+
+    pub fn apply_scrollback_limit(&mut self, lines: usize) {
+        self.terminal.set_scrollback_limit(lines);
     }
 }
 

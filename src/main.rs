@@ -30,7 +30,7 @@ fn main() -> anyhow::Result<()> {
     event_loop.set_control_flow(ControlFlow::Wait);
 
     let proxy = event_loop.create_proxy();
-    let mut app = app::App::new(proxy, config::Config::default());
+    let mut app = app::App::new(proxy, config::Config::load());
     event_loop.run_app(&mut app)?;
 
     Ok(())

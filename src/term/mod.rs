@@ -62,12 +62,14 @@ pub struct Terminal {
     term: Term<EventProxy>,
     parser: vte::ansi::Processor,
     size: GridSize,
+    scrollback_limit: usize,
 }
 
 impl Terminal {
-    pub fn new(size: GridSize, proxy: EventProxy) -> Self {
+    pub fn new(size: GridSize, proxy: EventProxy, scrollback_lines: usize) -> Self {
+        let scrollback_limit = scrollback_lines.max(1);
         let config = TermConfig {
-            scrolling_history: 10_000,
+            scrolling_history: scrollback_limit,
             // Kitty keyboard protocol is intentionally not advertised yet: the
             // input encoder below speaks the classic xterm protocol.
             kitty_keyboard: false,
@@ -80,7 +82,17 @@ impl Terminal {
             term,
             parser: vte::ansi::Processor::new(),
             size,
+            scrollback_limit,
         }
+    }
+
+    pub fn set_scrollback_limit(&mut self, scrollback_lines: usize) {
+        let scrollback_lines = scrollback_lines.max(1);
+        if scrollback_lines == self.scrollback_limit {
+            return;
+        }
+        self.scrollback_limit = scrollback_lines;
+        self.term.grid_mut().update_history(scrollback_lines);
     }
 
     pub fn feed(&mut self, bytes: &[u8]) {

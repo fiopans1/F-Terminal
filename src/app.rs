@@ -16,7 +16,7 @@ use winit::event_loop::{ActiveEventLoop, ControlFlow, EventLoopProxy};
 use winit::keyboard::{Key, KeyCode, ModifiersState, NamedKey, PhysicalKey};
 use winit::window::{Window, WindowId};
 
-use crate::config::Config;
+use crate::config::{Config, RenderMode};
 use crate::editor::Editor;
 use crate::event::UserEvent;
 use crate::explorer::FileExplorer;
@@ -28,7 +28,7 @@ use crate::layout::{DividerLayout, PaneLayout, Rect, compute_layout};
 use crate::menu;
 use crate::render::quads::Quad;
 use crate::render::scene::{Label, PaneLayer, Scene};
-use crate::render::{CellMetrics, Renderer, grid_size_for};
+use crate::render::{CellMetrics, Renderer, SharedRenderResources, grid_size_for};
 use crate::review_window::ReviewWindow;
 use crate::shell::ShellCatalog;
 use crate::sidebar::{
@@ -44,18 +44,75 @@ pub struct App {
     window: Option<WindowState>,
     review: Option<ReviewWindow>,
     git: Option<GitWindow>,
+    shared_render: Option<SharedRenderResources>,
     _menu: Option<menu::MenuState>,
 }
 
 impl App {
     pub fn new(proxy: EventLoopProxy<UserEvent>, config: Config) -> Self {
+        log::info!(
+            "config: render {:?}, scrollback {} active / {} hidden, budget {} MB",
+            config.render_mode,
+            config.scrollback_lines,
+            config.hidden_scrollback_lines,
+            config.scrollback_budget_mb
+        );
+
         Self {
             proxy,
             config,
             window: None,
             review: None,
             git: None,
+            shared_render: None,
             _menu: None,
+        }
+    }
+
+    /// Create a renderer for a secondary window, reusing the main window's
+    /// GPU device and text atlas when shared rendering is enabled. If shared
+    /// initialization fails, fall back to an isolated renderer so the window
+    /// still opens.
+    fn create_secondary_renderer(
+        &self,
+        window: &Arc<Window>,
+        event_loop: &ActiveEventLoop,
+        label: &str,
+    ) -> Option<Renderer> {
+        let shared = if self.config.render_mode == RenderMode::Shared {
+            self.shared_render.clone()
+        } else {
+            None
+        };
+
+        match pollster::block_on(Renderer::new(
+            window.clone(),
+            event_loop,
+            &self.config,
+            shared.as_ref(),
+        )) {
+            Ok(renderer) => Some(renderer),
+            Err(error) if shared.is_some() => {
+                log::warn!(
+                    "shared renderer for the {label} window failed; falling back to isolated: {error:#}"
+                );
+                match pollster::block_on(Renderer::new(
+                    window.clone(),
+                    event_loop,
+                    &self.config,
+                    None,
+                )) {
+                    Ok(renderer) => Some(renderer),
+                    Err(error) => {
+                        log::error!("failed to initialize the {label} renderer: {error:#}");
+                        None
+                    }
+                }
+            }
+            Err(error) => {
+                log::error!("failed to initialize the {label} renderer: {error:#}");
+                None
+            }
         }
     }
 
@@ -78,16 +135,18 @@ impl App {
             }
         };
 
-        let renderer =
-            match pollster::block_on(Renderer::new(window.clone(), event_loop, &self.config)) {
-                Ok(renderer) => renderer,
-                Err(error) => {
-                    log::error!("failed to initialize the code review renderer: {error:#}");
-                    return;
-                }
-            };
+        let Some(renderer) = self.create_secondary_renderer(&window, event_loop, "code review")
+        else {
+            return;
+        };
 
-        let review = ReviewWindow::new(window, renderer, cwd, self.proxy.clone());
+        let review = ReviewWindow::new(
+            window,
+            renderer,
+            cwd,
+            self.proxy.clone(),
+            self.config.forge_tokens.clone(),
+        );
         review.focus();
         review.request_redraw();
         log::info!("opened code review window");
@@ -113,14 +172,9 @@ impl App {
             }
         };
 
-        let renderer =
-            match pollster::block_on(Renderer::new(window.clone(), event_loop, &self.config)) {
-                Ok(renderer) => renderer,
-                Err(error) => {
-                    log::error!("failed to initialize the git window renderer: {error:#}");
-                    return;
-                }
-            };
+        let Some(renderer) = self.create_secondary_renderer(&window, event_loop, "git") else {
+            return;
+        };
 
         let git = GitWindow::new(window, renderer, cwd, self.proxy.clone());
         git.focus();
@@ -150,7 +204,13 @@ impl ApplicationHandler<UserEvent> for App {
         }
 
         match WindowState::new(event_loop, &self.config, self.proxy.clone()) {
-            Ok(window) => self.window = Some(window),
+            Ok(window) => {
+                if self.config.render_mode == RenderMode::Shared {
+                    self.shared_render = Some(window.shared_render_resources());
+                    log::info!("shared renderer enabled for secondary windows");
+                }
+                self.window = Some(window);
+            }
             Err(error) => {
                 log::error!("failed to start the terminal: {error:#}");
                 event_loop.exit();
@@ -479,6 +539,10 @@ impl WindowState {
         self.window.id()
     }
 
+    fn shared_render_resources(&self) -> SharedRenderResources {
+        self.renderer.shared_resources()
+    }
+
     fn new(
         event_loop: &ActiveEventLoop,
         config: &Config,
@@ -491,7 +555,7 @@ impl WindowState {
         let window = Arc::new(event_loop.create_window(attributes)?);
         window.set_ime_allowed(true);
 
-        let renderer = pollster::block_on(Renderer::new(window.clone(), event_loop, config))?;
+        let renderer = pollster::block_on(Renderer::new(window.clone(), event_loop, config, None))?;
         let mut workspace = Workspace::new();
         workspace.create_terminal();
         let working_directory = std::env::current_dir().unwrap_or_else(|_| PathBuf::from("."));
@@ -782,7 +846,14 @@ impl WindowState {
                     .get(&spawn.profile_id)
                     .cloned()
                     .unwrap_or_else(|| self.shells.default_profile().clone());
-                let pane = Pane::new(*pane_id, grid, self.proxy.clone(), &profile, spawn.cwd)?;
+                let pane = Pane::new(
+                    *pane_id,
+                    grid,
+                    self.proxy.clone(),
+                    &profile,
+                    spawn.cwd,
+                    config.scrollback_lines,
+                )?;
                 self.workspace.insert_pane(pane);
             }
         }
@@ -794,7 +865,57 @@ impl WindowState {
             editor: editor_layout,
         };
 
+        self.apply_scrollback_policy(config);
+
         Ok(())
+    }
+
+    fn apply_scrollback_policy(&mut self, config: &Config) {
+        let active = self.workspace.active_tab_id();
+        let focused = self.workspace.focused_pane();
+
+        let mut panes = Vec::new();
+        for tab in &self.workspace.tabs {
+            let is_active = Some(tab.id) == active;
+            for pane in tab.panes.values() {
+                panes.push(ScrollbackPane {
+                    id: pane.id,
+                    cols: pane.grid.cols,
+                    active: is_active,
+                    focused: Some(pane.id) == focused,
+                });
+            }
+        }
+        panes.sort_by_key(|pane| pane.id.0);
+
+        let limits = plan_scrollback_limits(&panes, config);
+
+        if config.scrollback_budget_mb > 0 {
+            let budget = (config.scrollback_budget_mb as usize).saturating_mul(1024 * 1024);
+            let estimated = panes.iter().fold(0usize, |total, pane| {
+                let limit = limits.get(&pane.id).copied().unwrap_or(0);
+                total.saturating_add(estimate_scrollback_bytes(pane.cols, limit))
+            });
+            log::debug!(
+                "scrollback estimated at {:.1} MB with a {} MB budget",
+                estimated as f64 / 1_048_576.0,
+                config.scrollback_budget_mb
+            );
+
+            if estimated > budget {
+                log::warn!(
+                    "scrollback still above budget after trimming: {:.1} MB > {} MB",
+                    estimated as f64 / 1_048_576.0,
+                    config.scrollback_budget_mb
+                );
+            }
+        }
+
+        for (pane_id, limit) in limits {
+            if let Some(pane) = self.workspace.pane_mut(pane_id) {
+                pane.apply_scrollback_limit(limit);
+            }
+        }
     }
 
     fn relayout(&mut self, config: &Config) {
@@ -3626,6 +3747,88 @@ fn build_editor_frame(editor: &Editor, text: Rect, metrics: CellMetrics, theme: 
     }
 }
 
+/// Scrollback history budget constants and planning.
+const MIN_SCROLLBACK_LINES: usize = 1_000;
+const SCROLLBACK_CELL_BYTES: usize = 32;
+
+#[derive(Clone, Copy, Debug)]
+struct ScrollbackPane {
+    id: PaneId,
+    cols: usize,
+    active: bool,
+    focused: bool,
+}
+
+fn estimate_scrollback_bytes(cols: usize, lines: usize) -> usize {
+    cols.saturating_mul(lines)
+        .saturating_mul(SCROLLBACK_CELL_BYTES)
+}
+
+fn plan_scrollback_limits(panes: &[ScrollbackPane], config: &Config) -> HashMap<PaneId, usize> {
+    let mut limits: HashMap<PaneId, usize> = panes
+        .iter()
+        .map(|pane| {
+            let limit = if pane.active {
+                config.scrollback_lines
+            } else {
+                config.hidden_scrollback_lines
+            };
+            (pane.id, limit)
+        })
+        .collect();
+
+    if config.scrollback_budget_mb == 0 {
+        return limits;
+    }
+
+    let budget = (config.scrollback_budget_mb as usize).saturating_mul(1024 * 1024);
+    let estimate = |limits: &HashMap<PaneId, usize>| {
+        panes.iter().fold(0usize, |total, pane| {
+            let limit = limits.get(&pane.id).copied().unwrap_or(0);
+            total.saturating_add(estimate_scrollback_bytes(pane.cols, limit))
+        })
+    };
+    let mut total = estimate(&limits);
+    if total <= budget {
+        return limits;
+    }
+
+    // Hidden sessions yield their history first, then visible panes, then the
+    // focused pane. Every pane keeps at least MIN_SCROLLBACK_LINES.
+    for priority in 0..=2u8 {
+        for pane in panes {
+            if total <= budget {
+                break;
+            }
+            let pane_priority = match (pane.active, pane.focused) {
+                (false, _) => 0,
+                (true, false) => 1,
+                (true, true) => 2,
+            };
+            if pane_priority != priority {
+                continue;
+            }
+
+            let current = limits.get(&pane.id).copied().unwrap_or(0);
+            if current <= MIN_SCROLLBACK_LINES {
+                continue;
+            }
+
+            let bytes_per_line = pane.cols.saturating_mul(SCROLLBACK_CELL_BYTES).max(1);
+            let excess = total - budget;
+            let reduce = excess
+                .div_ceil(bytes_per_line)
+                .max(1)
+                .min(current - MIN_SCROLLBACK_LINES);
+            let target = current - reduce;
+            limits.insert(pane.id, target);
+            total = total.saturating_sub((current - target).saturating_mul(bytes_per_line));
+        }
+    }
+
+    limits
+}
+
 fn arrow_direction(code: KeyCode) -> Option<FocusDirection> {
     match code {
         KeyCode::ArrowLeft => Some(FocusDirection::Left),
@@ -3648,5 +3851,88 @@ fn digit_index(code: KeyCode) -> Option<usize> {
         KeyCode::Digit8 => Some(7),
         KeyCode::Digit9 => Some(8),
         _ => None,
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn pane(id: u64, cols: usize, active: bool, focused: bool) -> ScrollbackPane {
+        ScrollbackPane {
+            id: PaneId(id),
+            cols,
+            active,
+            focused,
+        }
+    }
+
+    #[test]
+    fn active_and_hidden_sessions_get_their_own_limits() {
+        let config = Config::default();
+        let panes = [
+            pane(1, 100, true, true),
+            pane(2, 100, true, false),
+            pane(3, 100, false, false),
+        ];
+
+        let limits = plan_scrollback_limits(&panes, &config);
+        assert_eq!(limits[&PaneId(1)], 6_000);
+        assert_eq!(limits[&PaneId(2)], 6_000);
+        assert_eq!(limits[&PaneId(3)], 3_000);
+    }
+
+    #[test]
+    fn budget_trims_hidden_panes_before_visible_and_focused() {
+        let config = Config {
+            scrollback_budget_mb: 24,
+            ..Config::default()
+        };
+        let panes = [
+            pane(1, 100, false, false),
+            pane(2, 100, true, false),
+            pane(3, 100, true, true),
+        ];
+
+        let limits = plan_scrollback_limits(&panes, &config);
+        assert_eq!(
+            limits[&PaneId(1)],
+            1_000,
+            "hidden pane should be trimmed first"
+        );
+        assert_eq!(
+            limits[&PaneId(2)],
+            1_000,
+            "visible pane should be trimmed next"
+        );
+        assert!(
+            limits[&PaneId(3)] > 1_000,
+            "focused pane should retain the most history"
+        );
+
+        let total = panes.iter().fold(0usize, |total, pane| {
+            total.saturating_add(estimate_scrollback_bytes(pane.cols, limits[&pane.id]))
+        });
+        assert!(total <= 24 * 1024 * 1024);
+    }
+
+    #[test]
+    fn budget_never_trims_below_the_minimum() {
+        let config = Config {
+            scrollback_budget_mb: 1,
+            ..Config::default()
+        };
+        let panes = [pane(1, 100, true, true)];
+
+        let limits = plan_scrollback_limits(&panes, &config);
+        assert_eq!(limits[&PaneId(1)], 1_000);
+    }
+
+    #[test]
+    fn disabled_budget_leaves_limits_alone() {
+        let config = Config::default();
+        let panes = [pane(1, 100, false, false)];
+        let limits = plan_scrollback_limits(&panes, &config);
+        assert_eq!(limits[&PaneId(1)], 3_000);
     }
 }

@@ -7,6 +7,22 @@ use std::process::Command;
 
 use anyhow::{Context, Result, bail};
 
+/// Optional API tokens loaded from the unified config file.
+#[derive(Clone, Default, PartialEq, Eq)]
+pub struct ForgeTokens {
+    pub github: Option<String>,
+    pub gitlab: Option<String>,
+}
+
+impl std::fmt::Debug for ForgeTokens {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("ForgeTokens")
+            .field("github", &self.github.as_ref().map(|_| "[redacted]"))
+            .field("gitlab", &self.gitlab.as_ref().map(|_| "[redacted]"))
+            .finish()
+    }
+}
+
 /// Forge supported by the Code Review window.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum ForgeKind {
@@ -94,16 +110,21 @@ pub fn detect(repo: &Path) -> Result<RemoteInfo> {
 }
 
 /// Load all open pull requests or merge requests from the detected forge.
-pub fn load_open_changes(repo: &Path) -> Result<Vec<RemoteChange>> {
+pub fn load_open_changes(repo: &Path, tokens: &ForgeTokens) -> Result<Vec<RemoteChange>> {
     let remote = detect(repo)?;
     match remote.kind {
-        ForgeKind::GitHub => github::list_open(&remote),
-        ForgeKind::GitLab => gitlab::list_open(&remote),
+        ForgeKind::GitHub => github::list_open(&remote, tokens),
+        ForgeKind::GitLab => gitlab::list_open(&remote, tokens),
     }
 }
 
 /// Load the unified diff for one remote change.
-pub fn load_change_diff(repo: &Path, kind: ForgeKind, id: u64) -> Result<String> {
+pub fn load_change_diff(
+    repo: &Path,
+    kind: ForgeKind,
+    id: u64,
+    tokens: &ForgeTokens,
+) -> Result<String> {
     let remote = detect(repo)?;
     if remote.kind != kind {
         bail!(
@@ -113,8 +134,8 @@ pub fn load_change_diff(repo: &Path, kind: ForgeKind, id: u64) -> Result<String>
         );
     }
     match kind {
-        ForgeKind::GitHub => github::diff(&remote, id),
-        ForgeKind::GitLab => gitlab::diff(&remote, id),
+        ForgeKind::GitHub => github::diff(&remote, id, tokens),
+        ForgeKind::GitLab => gitlab::diff(&remote, id, tokens),
     }
 }
 
@@ -301,5 +322,17 @@ mod tests {
     fn rejects_unknown_hosts() {
         assert!(detect_url("https://example.com/owner/repo.git").is_err());
         assert!(detect_url("https://github.com/owner").is_err());
+    }
+
+    #[test]
+    fn debug_output_redacts_tokens() {
+        let tokens = ForgeTokens {
+            github: Some("ghp_secret".into()),
+            gitlab: Some("glpat_secret".into()),
+        };
+        let debug = format!("{tokens:?}");
+        assert!(!debug.contains("ghp_secret"));
+        assert!(!debug.contains("glpat_secret"));
+        assert!(debug.contains("[redacted]"));
     }
 }

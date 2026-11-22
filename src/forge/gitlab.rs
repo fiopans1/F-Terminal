@@ -4,11 +4,13 @@ use anyhow::{Context, Result};
 use serde::Deserialize;
 
 use crate::forge::http::{self, Auth};
-use crate::forge::{ForgeKind, RemoteChange, RemoteInfo, token_from_env, token_from_file};
+use crate::forge::{
+    ForgeKind, ForgeTokens, RemoteChange, RemoteInfo, token_from_env, token_from_file,
+};
 
-const HINT: &str = " (private repository or missing token? set GITLAB_TOKEN, GL_TOKEN or ~/.config/f-terminal/gitlab-token)";
+const HINT: &str = " (private repository or missing token? set [forge.gitlab] token, GITLAB_TOKEN, GL_TOKEN or ~/.config/f-terminal/gitlab-token)";
 
-pub fn list_open(remote: &RemoteInfo) -> Result<Vec<RemoteChange>> {
+pub fn list_open(remote: &RemoteInfo, tokens: &ForgeTokens) -> Result<Vec<RemoteChange>> {
     let project = encode_project(&remote.path);
     let mut changes = Vec::new();
 
@@ -20,7 +22,7 @@ pub fn list_open(remote: &RemoteInfo) -> Result<Vec<RemoteChange>> {
         let body = http::get(
             &url,
             "application/json",
-            token(remote).map(gitlab_auth),
+            token(remote, tokens).map(gitlab_auth),
             "GitLab",
             HINT,
         )?;
@@ -35,7 +37,7 @@ pub fn list_open(remote: &RemoteInfo) -> Result<Vec<RemoteChange>> {
     Ok(changes)
 }
 
-pub fn diff(remote: &RemoteInfo, id: u64) -> Result<String> {
+pub fn diff(remote: &RemoteInfo, id: u64, tokens: &ForgeTokens) -> Result<String> {
     let project = encode_project(&remote.path);
     let url = format!(
         "{}/projects/{project}/merge_requests/{id}/changes",
@@ -44,7 +46,7 @@ pub fn diff(remote: &RemoteInfo, id: u64) -> Result<String> {
     let body = http::get(
         &url,
         "application/json",
-        token(remote).map(gitlab_auth),
+        token(remote, tokens).map(gitlab_auth),
         "GitLab",
         HINT,
     )?;
@@ -125,8 +127,11 @@ fn gitlab_auth(token: String) -> Auth {
     }
 }
 
-fn token(remote: &RemoteInfo) -> Option<String> {
-    token_from_env(&["GITLAB_TOKEN", "GL_TOKEN"])
+fn token(remote: &RemoteInfo, tokens: &ForgeTokens) -> Option<String> {
+    tokens
+        .gitlab
+        .clone()
+        .or_else(|| token_from_env(&["GITLAB_TOKEN", "GL_TOKEN"]))
         .or_else(|| token_from_file("gitlab-token"))
         .or_else(|| {
             static GLAB_TOKEN: OnceLock<Option<String>> = OnceLock::new();

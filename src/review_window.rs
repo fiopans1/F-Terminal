@@ -10,7 +10,7 @@ use winit::window::{Window, WindowId};
 use crate::config::Config;
 use crate::diff_view::build_file_frame;
 use crate::event::UserEvent;
-use crate::forge::ForgeKind;
+use crate::forge::{ForgeKind, ForgeTokens};
 use crate::layout::Rect;
 use crate::render::Renderer;
 use crate::render::quads::Quad;
@@ -81,11 +81,12 @@ impl ReviewWindow {
         renderer: Renderer,
         directory: std::path::PathBuf,
         proxy: EventLoopProxy<UserEvent>,
+        tokens: ForgeTokens,
     ) -> Self {
         let mut window = Self {
             window,
             renderer,
-            review: CodeReview::open(directory),
+            review: CodeReview::open(directory, tokens),
             proxy,
             modifiers: ModifiersState::empty(),
             cursor: PhysicalPosition::new(0.0, 0.0),
@@ -206,13 +207,14 @@ impl ReviewWindow {
         self.review.prs_error = None;
 
         let repo = self.review.repo.clone();
+        let tokens = self.review.tokens.clone();
         let proxy = self.proxy.clone();
         let window_id = self.window.id();
         let spawned = std::thread::Builder::new()
             .name("pull-requests".into())
             .spawn(move || {
-                let result =
-                    crate::forge::load_open_changes(&repo).map_err(|error| format!("{error:#}"));
+                let result = crate::forge::load_open_changes(&repo, &tokens)
+                    .map_err(|error| format!("{error:#}"));
                 let _ = proxy.send_event(UserEvent::PullRequestsLoaded {
                     window_id,
                     request_id,
@@ -361,11 +363,12 @@ impl ReviewWindow {
 
         let proxy = self.proxy.clone();
         let window_id = self.window.id();
+        let tokens = self.review.tokens.clone();
         let spawned = std::thread::Builder::new()
             .name("code-review".into())
             .spawn(move || {
-                let result =
-                    review::load_detail(&repo, &summary).map_err(|error| format!("{error:#}"));
+                let result = review::load_detail(&repo, &summary, &tokens)
+                    .map_err(|error| format!("{error:#}"));
                 let _ = proxy.send_event(UserEvent::ReviewLoaded {
                     window_id,
                     request_id,

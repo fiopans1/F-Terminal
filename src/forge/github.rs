@@ -4,11 +4,13 @@ use anyhow::{Context, Result};
 use serde::Deserialize;
 
 use crate::forge::http::{self, Auth};
-use crate::forge::{ForgeKind, RemoteChange, RemoteInfo, token_from_env, token_from_file};
+use crate::forge::{
+    ForgeKind, ForgeTokens, RemoteChange, RemoteInfo, token_from_env, token_from_file,
+};
 
-const HINT: &str = " (private repository or missing token? set GITHUB_TOKEN, GH_TOKEN or ~/.config/f-terminal/github-token)";
+const HINT: &str = " (private repository or missing token? set [forge.github] token, GITHUB_TOKEN, GH_TOKEN or ~/.config/f-terminal/github-token)";
 
-pub fn list_open(remote: &RemoteInfo) -> Result<Vec<RemoteChange>> {
+pub fn list_open(remote: &RemoteInfo, tokens: &ForgeTokens) -> Result<Vec<RemoteChange>> {
     let mut changes = Vec::new();
 
     for page in 1..=10 {
@@ -19,7 +21,7 @@ pub fn list_open(remote: &RemoteInfo) -> Result<Vec<RemoteChange>> {
         let body = http::get(
             &url,
             "application/vnd.github+json",
-            token().map(Auth::Bearer),
+            token(tokens).map(Auth::Bearer),
             "GitHub",
             HINT,
         )?;
@@ -34,12 +36,12 @@ pub fn list_open(remote: &RemoteInfo) -> Result<Vec<RemoteChange>> {
     Ok(changes)
 }
 
-pub fn diff(remote: &RemoteInfo, id: u64) -> Result<String> {
+pub fn diff(remote: &RemoteInfo, id: u64, tokens: &ForgeTokens) -> Result<String> {
     let url = format!("{}/repos/{}/pulls/{id}", remote.api_base, remote.path);
     http::get(
         &url,
         "application/vnd.github.v3.diff",
-        token().map(Auth::Bearer),
+        token(tokens).map(Auth::Bearer),
         "GitHub",
         HINT,
     )
@@ -96,8 +98,11 @@ impl From<GithubPull> for RemoteChange {
     }
 }
 
-fn token() -> Option<String> {
-    token_from_env(&["GITHUB_TOKEN", "GH_TOKEN"])
+fn token(tokens: &ForgeTokens) -> Option<String> {
+    tokens
+        .github
+        .clone()
+        .or_else(|| token_from_env(&["GITHUB_TOKEN", "GH_TOKEN"]))
         .or_else(|| token_from_file("github-token"))
         .or_else(|| {
             static GH_TOKEN: OnceLock<Option<String>> = OnceLock::new();

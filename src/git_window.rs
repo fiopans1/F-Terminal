@@ -586,7 +586,8 @@ impl GitWindow {
         let spawned = std::thread::Builder::new()
             .name("git-detail".into())
             .spawn(move || {
-                let result = crate::review::load_detail(&repo, &summary)
+                let tokens = crate::forge::ForgeTokens::default();
+                let result = crate::review::load_detail(&repo, &summary, &tokens)
                     .map_err(|error| format!("{error:#}"));
                 let _ = proxy.send_event(UserEvent::GitDetailLoaded {
                     window_id,

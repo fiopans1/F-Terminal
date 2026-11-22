@@ -18,6 +18,7 @@ runtime web, manteniendo el binario y el consumo de memoria bajos.
 - [Requisitos](#requisitos)
 - [Compilar y ejecutar](#compilar-y-ejecutar)
 - [Perfiles de shell](#perfiles-de-shell)
+- [Configuración](#configuración)
 - [Terminal](#terminal)
 - [Sidebar, sesiones y splits](#sidebar-sesiones-y-splits)
 - [Explorador y editor](#explorador-y-editor)
@@ -51,6 +52,8 @@ runtime web, manteniendo el binario y el consumo de memoria bajos.
 - Footer Git por terminal con dos burbujas: rama y `+N/-N`.
 - Perfiles de shell: zsh, bash, fish, `cmd.exe`, Windows PowerShell,
   PowerShell 7, Git Bash, MSYS2/Cygwin y distribuciones WSL.
+- Configuración TOML con scrollback por sesión, presupuesto global opcional y
+  modo de render compartido o aislado.
 - La terminal principal sigue usable mientras Code Review o el gestor Git
   están abiertos.
 
@@ -70,6 +73,7 @@ runtime web, manteniendo el binario y el consumo de memoria bajos.
 | `muda` | Menú nativo de macOS |
 | `sysinfo` | cwd del proceso hijo para seguir el `cd` |
 | `syntect` | Resaltado con gramáticas TextMate |
+| `toml` | Configuración legible y comentada |
 | `serde_json` | Listas de PRs/MRs de GitHub y GitLab |
 | `curl` (externo) | Peticiones a las APIs de GitHub y GitLab |
 
@@ -128,7 +132,7 @@ terminal.
 
 Orden de detección:
 
-1. Override `Config::shell`, si está definido.
+1. `[shell] default` en `config.toml`, si está definido.
 2. `$SHELL`.
 3. Entradas de `/etc/shells`.
 4. Fallbacks `/bin/zsh`, `/bin/bash`, `/bin/sh`.
@@ -176,13 +180,120 @@ En la sidebar, junto al botón `+`, hay un botón `▾`:
 Los splits heredan el perfil del pane enfocado. La lista muestra el nombre del
 shell y una etiqueta corta (`zsh`, `bash`, `cmd`, `PS`, `pwsh`, `WSL`).
 
-### Configuración
+### Shell por defecto
 
-Hoy la configuración vive en `src/config.rs`; todavía no se carga un TOML. El
-campo `Config::shell` permite forzar un shell por ruta o nombre. El resto de
-perfiles se detecta automáticamente. Una futura iteración añadirá
-`~/.config/f-terminal/config.toml` con perfiles personalizados y shell por
-defecto.
+El campo `[shell] default` de `config.toml` permite forzar un shell por ruta o
+nombre. Si se omite, se usa la detección automática descrita arriba.
+
+---
+
+## Configuración
+
+F-Terminal usa un único fichero `config.toml`. Se crea automáticamente en el
+primer arranque con una plantilla comentada y permisos `600` en Unix.
+
+| Plataforma | Ruta |
+|---|---|
+| macOS / Linux | `~/.config/f-terminal/config.toml` |
+| Linux con `XDG_CONFIG_HOME` | `$XDG_CONFIG_HOME/f-terminal/config.toml` |
+| Windows | `%APPDATA%\f-terminal\config.toml` |
+
+La variable `F_TERMINAL_CONFIG` permite usar otra ruta.
+
+El fichero se lee al arrancar: reinicia la app para aplicar cambios. Si el TOML
+no se puede leer o parsear, se usan los valores por defecto y se escribe un
+aviso en el log. Los números fuera de rango se recortan; un `render.mode`
+desconocido cae a `isolated` y un tema desconocido a Tokyo Night.
+
+### Ejemplo completo
+
+```toml
+[appearance]
+# font_family = "SF Mono"
+font_size = 14.0
+line_height = 1.3
+padding = 10.0
+sidebar_width = 210.0
+ui_font_size = 12.5
+# El valor por defecto depende de la plataforma:
+# false en macOS, true en Linux/Windows.
+option_as_meta = false
+theme = "tokyo-night"
+
+[terminal]
+# Historial por pane en la sesión activa.
+scrollback_lines = 6000
+# Historial por pane en sesiones ocultas.
+hidden_scrollback_lines = 3000
+# Presupuesto global de scrollback en MB. 0 lo desactiva.
+scrollback_budget_mb = 0
+
+[render]
+# "shared" comparte GPU y atlas de texto entre ventanas.
+# "isolated" crea recursos propios en cada ventana.
+mode = "shared"
+
+[shell]
+# default = "zsh"
+
+[forge.github]
+# token = "github_pat_..."
+
+[forge.gitlab]
+# token = "glpat-..."
+```
+
+### Scrollback
+
+- `scrollback_lines` es el límite por pane de la sesión activa. Por defecto
+  **6000** líneas. Se recorta al rango `500..100000`.
+- `hidden_scrollback_lines` es el límite por pane de las sesiones que no están
+  activas. Por defecto **3000** líneas. Se recorta a `100..scrollback_lines`.
+- «Oculta» significa que su pestaña/sesión no es la activa; plegar una sesión
+  en la sidebar no reduce su historial.
+- Al cambiar de sesión, sus panes suben al límite activo; al ocultarse bajan al
+  límite oculto y se descarta el historial más antiguo que exceda el nuevo
+  límite.
+- `scrollback_budget_mb = 0` desactiva el presupuesto global, que es el valor
+  por defecto. Se recorta al rango `0..4096`. Si se activa, se estima
+  `columnas × líneas × 32 bytes` por pane y se recorta primero el historial de
+  sesiones ocultas, después el de panes visibles no enfocados y por último el
+  del pane enfocado. Ningún pane baja de **1000** líneas. Si el presupuesto es
+  imposible de cumplir, se mantiene el mínimo y se registra un aviso.
+
+Como referencia, un pane de 120 columnas con 6000 líneas se estima en unos
+23 MB de historial.
+
+### Render compartido o aislado
+
+- `mode = "shared"` (por defecto): la ventana principal crea un único
+  `Instance`/`Adapter`/`Device`/`Queue` y una única caché de fuentes y atlas de
+  glifos. Code Review y el gestor Git reutilizan esos recursos, manteniendo su
+  propia superficie, viewport, factor de escala y métricas de celda. Los atlas
+  se separan por formato de textura si las superficies no coinciden.
+- `mode = "isolated"`: cada ventana crea su propio renderer, dispositivo y
+  recursos de texto. Es el comportamiento anterior y la opción conservadora si
+  aparecen problemas de glifos o DPI.
+- Si el render compartido falla al abrir una ventana secundaria, se registra un
+  warning y esa ventana cae automáticamente a renderer aislado; la app sigue
+  funcionando.
+- El modo se aplica al arrancar. Cambiarlo requiere reiniciar la app.
+
+### Volver al comportamiento anterior
+
+Para restaurar el scrollback y el renderer previos, usa:
+
+```toml
+[terminal]
+scrollback_lines = 10000
+hidden_scrollback_lines = 10000
+scrollback_budget_mb = 0
+
+[render]
+mode = "isolated"
+```
+
+y reinicia F-Terminal.
 
 ---
 
@@ -362,11 +473,12 @@ API. Para repos privados:
 
 **GitHub**, por orden:
 
-1. `GITHUB_TOKEN` o `GH_TOKEN` en el entorno.
-2. `~/.config/f-terminal/github-token`
+1. `[forge.github] token` en `config.toml`.
+2. `GITHUB_TOKEN` o `GH_TOKEN` en el entorno.
+3. `~/.config/f-terminal/github-token`
    (`%APPDATA%\f-terminal\github-token` en Windows), con el token en la primera
    línea.
-3. `gh auth token`, si `gh` está instalado y autenticado.
+4. `gh auth token`, si `gh` está instalado y autenticado.
 
 Token recomendado:
 
@@ -375,10 +487,11 @@ Token recomendado:
 
 **GitLab**, por orden:
 
-1. `GITLAB_TOKEN` o `GL_TOKEN` en el entorno.
-2. `~/.config/f-terminal/gitlab-token`
+1. `[forge.gitlab] token` en `config.toml`.
+2. `GITLAB_TOKEN` o `GL_TOKEN` en el entorno.
+3. `~/.config/f-terminal/gitlab-token`
    (`%APPDATA%\f-terminal\gitlab-token` en Windows).
-3. `glab auth token`, si `glab` está instalado y autenticado.
+4. `glab auth token`, si `glab` está instalado y autenticado.
 
 Token recomendado: scope **`read_api`**.
 
@@ -614,17 +727,10 @@ En Windows:
 También se pueden usar `gh auth token` y `glab auth token` si esos CLIs están
 instalados y autenticados.
 
-### Configuración actual
+### Configuración
 
-`Config` se define en código (`src/config.rs`):
-
-- `font_family`, `font_size`, `line_height`.
-- `padding`, `sidebar_width`, `ui_font_size`.
-- `option_as_meta`.
-- `shell` (override opcional).
-- Tema Tokyo Night.
-
-Todavía no hay fichero TOML ni pantalla de ajustes.
+La configuración general, incluidos los tokens, se describe en
+[Configuración](#configuración).
 
 ---
 
@@ -632,9 +738,9 @@ Todavía no hay fichero TOML ni pantalla de ajustes.
 
 ```
 src/
-  main.rs          Arranque y event loop
+  main.rs          Arranque, config y event loop
   app.rs           Ventana principal, routing multi-ventana, atajos y estado
-  config.rs        Configuración por defecto
+  config.rs        Configuración TOML, validación y plantilla
   diff_view.rs     Render compartido de diffs
   editor.rs        Editor mínimo
   event.rs         Eventos de background hacia la UI
@@ -671,10 +777,10 @@ src/
     color.rs       Paleta y conversión sRGB
     frame.rs       Snapshot del grid
   render/
-    mod.rs         Superficie wgpu
+    mod.rs         Superficie wgpu y recursos GPU/texto compartidos
     scene.rs       Panes, labels y quads
     quads.rs       Rectángulos/píldoras instanciados
-    text.rs        Buffers y glyphon
+    text.rs        Buffers, glyphon y atlas compartido
     quads.wgsl     Shader de quads con esquinas redondeadas
 ```
 
@@ -700,8 +806,11 @@ de splits; la sidebar solo conoce IDs; el renderer solo recibe `Rect` y `Frame`.
 - `Option<ReviewWindow>`: Code Review.
 - `Option<GitWindow>`: gestor Git.
 
-Los eventos se enrutan por `WindowId`. Cada ventana secundaria tiene su propio
-`Renderer` y superficie `wgpu`, y puede estar abierta a la vez que las demás.
+Los eventos se enrutan por `WindowId`. Cada ventana tiene su propia superficie,
+viewport, factor de escala y métricas de celda. Con `render.mode = "shared"`
+las ventanas secundarias reutilizan el dispositivo GPU y el atlas de texto de
+la principal; con `"isolated"` cada una crea su propio renderer. Si el modo
+compartido falla, la ventana secundaria cae a aislado.
 
 ### Background y concurrencia
 
@@ -721,7 +830,7 @@ Los eventos se enrutan por `WindowId`. Cada ventana secundaria tiene su propio
 cargo test
 ```
 
-Cobertura actual (42 tests):
+Cobertura actual (54 tests):
 
 - Parser VT → `Frame`: texto, colores, fondos y cursor.
 - Geometría de splits, footer y divisores.
@@ -736,10 +845,14 @@ Cobertura actual (42 tests):
 - Parser de historial.
 - Integración real de Git en un repo temporal: stage, commit y rama.
 - Detección de remotos GitHub/GitLab, incluidos grupos anidados.
+- Redacción de tokens en la salida `Debug`.
 - Parseo de PRs de GitHub y MRs de GitLab.
 - Construcción de diffs unificados desde los cambios de GitLab.
+- Config TOML: defaults, parseo, límites, plantilla y fallback de render.
+- Política de scrollback: sesión activa/oculta, presupuesto global y mínimo.
 - Mapeo de acciones del menú.
-- Smoke test offscreen de GPU con dos panes y una etiqueta.
+- Smoke test offscreen de GPU con dos panes, una etiqueta y un atlas de texto
+  compartido entre dos ventanas.
 
 Comprobaciones recomendadas antes de un cambio:
 
@@ -758,7 +871,7 @@ pero no se han validado en hardware real en este entorno.
 
 Limitaciones conocidas:
 
-- Sin fichero de configuración ni pantalla de ajustes.
+- Sin pantalla de ajustes ni recarga en caliente del TOML.
 - Editor sin undo/redo, selección, file watching ni autoguardado.
 - Code Review: soporte de GitHub y GitLab; sin comentarios inline, submit de
   reviews ni resaltado de sintaxis dentro del diff.
@@ -785,7 +898,9 @@ Limitaciones conocidas:
 ## Roadmap
 
 - Validar perfiles de shell y ConPTY en Windows real.
-- Config TOML, perfiles personalizados y shell por defecto.
+- Pantalla de ajustes, recarga en caliente del TOML y perfiles de shell
+  personalizados.
+- Selector de tema y más paletas.
 - Añadir más perfiles: NuShell, fish en Windows, distros WSL concretas.
 - Git: tags, rebase, cherry-pick, revert, force push con lease y resolución de
   conflictos.

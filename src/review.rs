@@ -4,7 +4,7 @@ use std::process::Command;
 
 use anyhow::{Context, Result, bail};
 
-use crate::forge::{self, ForgeKind};
+use crate::forge::{self, ForgeKind, ForgeTokens};
 
 const MAX_DIFF_LINES: usize = 50_000;
 const MAX_UNTRACKED_BYTES: usize = 512 * 1024;
@@ -101,6 +101,7 @@ pub struct CodeReview {
     pub error: Option<String>,
     pub generation: u64,
     pub forge: Option<ForgeKind>,
+    pub tokens: ForgeTokens,
     pub pull_requests: Vec<RemoteChange>,
     pub prs_loading: bool,
     pub prs_loaded: bool,
@@ -108,7 +109,7 @@ pub struct CodeReview {
 }
 
 impl CodeReview {
-    pub fn open(start: PathBuf) -> Self {
+    pub fn open(start: PathBuf, tokens: ForgeTokens) -> Self {
         match repository_root(&start) {
             Ok(repo) => {
                 let (reviews, error) = match load_reviews(&repo) {
@@ -129,6 +130,7 @@ impl CodeReview {
                     error,
                     generation: 0,
                     forge,
+                    tokens,
                     pull_requests: Vec::new(),
                     prs_loading: false,
                     prs_loaded: false,
@@ -147,6 +149,7 @@ impl CodeReview {
                 error: Some(format!("{error:#}")),
                 generation: 0,
                 forge: None,
+                tokens,
                 pull_requests: Vec::new(),
                 prs_loading: false,
                 prs_loaded: false,
@@ -240,7 +243,11 @@ impl CodeReview {
     }
 }
 
-pub fn load_detail(repo: &Path, summary: &ReviewSummary) -> Result<ReviewDetail> {
+pub fn load_detail(
+    repo: &Path,
+    summary: &ReviewSummary,
+    tokens: &ForgeTokens,
+) -> Result<ReviewDetail> {
     let mut diff = match &summary.kind {
         ReviewKind::Working => {
             let tracked =
@@ -264,7 +271,9 @@ pub fn load_detail(repo: &Path, summary: &ReviewSummary) -> Result<ReviewDetail>
                 hash,
             ],
         )?,
-        ReviewKind::RemoteChange { forge, id } => forge::load_change_diff(repo, *forge, *id)?,
+        ReviewKind::RemoteChange { forge, id } => {
+            forge::load_change_diff(repo, *forge, *id, tokens)?
+        }
     };
 
     if diff.lines().count() > MAX_DIFF_LINES {
