@@ -1,0 +1,13 @@
+[Desktop Entry]
+Type=Application
+Version=1.0
+Name=F-Terminal
+GenericName=Terminal Emulator
+Comment=Native GPU terminal with Git and code review
+Exec=f-terminal
+Icon=f-terminal
+Terminal=false
+Categories=System;TerminalEmulator;
+Keywords=terminal;shell;git;code;review;diff;
+StartupNotify=true
+StartupWMClass=f-terminal

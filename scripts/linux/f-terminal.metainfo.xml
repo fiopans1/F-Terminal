@@ -1,0 +1,39 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<component type="desktop-application">
+  <id>com.fiopans1.f-terminal</id>
+  <metadata_license>CC0-1.0</metadata_license>
+  <project_license>AGPL-3.0-only</project_license>
+  <name>F-Terminal</name>
+  <summary>Native GPU terminal with Git and code review</summary>
+  <description>
+    <p>
+      F-Terminal is a native terminal emulator written in Rust. It includes
+      splits, a file explorer, an editor, a Git manager, and GitHub/GitLab
+      code review in separate windows.
+    </p>
+  </description>
+  <launchable type="desktop-id">f-terminal.desktop</launchable>
+  <url type="homepage">https://github.com/fiopans1/F-Terminal</url>
+  <url type="bugtracker">https://github.com/fiopans1/F-Terminal/issues</url>
+  <developer id="com.fiopans1">
+    <name>fiopans1</name>
+  </developer>
+  <provides>
+    <binary>f-terminal</binary>
+  </provides>
+  <categories>
+    <category>System</category>
+    <category>TerminalEmulator</category>
+    <category>Development</category>
+  </categories>
+  <keywords>
+    <keyword>terminal</keyword>
+    <keyword>shell</keyword>
+    <keyword>git</keyword>
+    <keyword>code review</keyword>
+  </keywords>
+  <releases>
+    <release version="@VERSION@" date="@DATE@"/>
+  </releases>
+  <content_rating type="oars-1.1"/>
+</component>
