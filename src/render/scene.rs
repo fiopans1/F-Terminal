@@ -3,6 +3,15 @@ use crate::render::quads::Quad;
 use crate::term::color::Rgb;
 use crate::term::frame::Frame;
 
+/// Inline completion text drawn at a cell position.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct GhostText {
+    pub row: usize,
+    pub col: usize,
+    pub text: String,
+    pub color: Rgb,
+}
+
 /// A terminal pane to render. `id` is only used to reuse the shaped text
 /// buffer between frames.
 pub struct PaneLayer<'a> {
@@ -12,6 +21,8 @@ pub struct PaneLayer<'a> {
     pub frame: &'a Frame,
     /// Whether the text buffer needs to be reshaped.
     pub dirty: bool,
+    /// Optional inline completion ghost text.
+    pub ghost: Option<GhostText>,
 }
 
 /// A simple single-color label for the sidebar and other chrome.

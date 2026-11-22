@@ -1496,6 +1496,7 @@ impl ReviewWindow {
                     content: *area,
                     frame,
                     dirty: true,
+                    ghost: None,
                 });
             }
 

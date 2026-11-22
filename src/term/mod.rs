@@ -5,6 +5,7 @@ use alacritty_terminal::event::{Event, EventListener};
 use alacritty_terminal::grid::{Dimensions, Scroll};
 use alacritty_terminal::index::{Point, Side};
 use alacritty_terminal::selection::{Selection, SelectionType};
+use alacritty_terminal::term::cell::Flags;
 use alacritty_terminal::term::{Config as TermConfig, Term, TermMode};
 use winit::event_loop::EventLoopProxy;
 
@@ -41,6 +42,19 @@ impl EventListener for EventProxy {
 pub struct GridSize {
     pub cols: usize,
     pub lines: usize,
+}
+
+/// The visible row that contains the cursor, plus one character per column.
+/// Wide-character spacers are represented by spaces so the column index can be
+/// used as a character index.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct InputLine {
+    pub row: usize,
+    pub col: usize,
+    pub text: String,
+    /// First column after the cursor that contains non-blank text, or the
+    /// terminal width. This is where a right prompt starts.
+    pub right_limit: usize,
 }
 
 impl Dimensions for GridSize {
@@ -110,6 +124,13 @@ impl Terminal {
         *self.term.mode()
     }
 
+    /// Snapshot of the cursor row, used by the completion engine. Returns
+    /// `None` in the alternate screen, while scrolled back, or whenever there
+    /// is text to the right of the cursor (right prompts, full-screen apps).
+    pub fn input_line(&self) -> Option<InputLine> {
+        input_line_from(&self.term, self.size)
+    }
+
     pub fn display_offset(&self) -> usize {
         self.term.grid().display_offset()
     }
@@ -142,5 +163,97 @@ impl Terminal {
 
     pub fn selection_to_string(&self) -> Option<String> {
         self.term.selection_to_string()
+    }
+}
+
+fn input_line_from<T: EventListener>(term: &Term<T>, size: GridSize) -> Option<InputLine> {
+    let content = term.renderable_content();
+    if content.mode.contains(TermMode::ALT_SCREEN) || content.display_offset != 0 {
+        return None;
+    }
+
+    let cursor_point = content.cursor.point;
+    let cursor_line = cursor_point.line.0;
+    if cursor_line < 0 || cursor_line as usize >= size.lines {
+        return None;
+    }
+
+    let mut chars = vec![' '; size.cols];
+    let mut found = false;
+    for indexed in content.display_iter {
+        if indexed.point.line.0 != cursor_line {
+            continue;
+        }
+        found = true;
+        let column = indexed.point.column.0;
+        if column >= chars.len() {
+            continue;
+        }
+        let cell = indexed.cell;
+        if cell
+            .flags
+            .intersects(Flags::WIDE_CHAR_SPACER | Flags::LEADING_WIDE_CHAR_SPACER)
+        {
+            continue;
+        }
+        chars[column] = if cell.flags.contains(Flags::HIDDEN) {
+            ' '
+        } else {
+            cell.c
+        };
+    }
+
+    if !found {
+        return None;
+    }
+
+    let col = cursor_point.column.0.min(size.cols.saturating_sub(1));
+    let right_limit = chars[col.saturating_add(1)..]
+        .iter()
+        .position(|character| *character != ' ')
+        .map(|offset| col + 1 + offset)
+        .unwrap_or(size.cols);
+
+    Some(InputLine {
+        row: cursor_line as usize,
+        col,
+        text: chars.into_iter().collect(),
+        right_limit,
+    })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use alacritty_terminal::event::VoidListener;
+    use alacritty_terminal::term::Config;
+
+    fn line_for(bytes: &[u8]) -> Option<InputLine> {
+        let size = GridSize { cols: 40, lines: 4 };
+        let mut term = Term::new(Config::default(), &size, VoidListener);
+        let mut parser: vte::ansi::Processor = vte::ansi::Processor::new();
+        parser.advance(&mut term, bytes);
+        input_line_from(&term, size)
+    }
+
+    #[test]
+    fn reads_the_cursor_row_and_prompt() {
+        let line = line_for(b"user@host:~$ git ch").unwrap();
+        assert_eq!(line.row, 0);
+        assert_eq!(line.col, 19);
+        assert_eq!(&line.text[..19], "user@host:~$ git ch");
+        assert_eq!(line.right_limit, 40);
+    }
+
+    #[test]
+    fn reports_a_right_prompt_limit() {
+        let line = line_for(b"user@host:~$ git ch   12:30\x1b[1;20H").unwrap();
+        assert_eq!(line.col, 19);
+        assert_eq!(line.right_limit, 22);
+    }
+
+    #[test]
+    fn ignores_alternate_screen() {
+        assert!(line_for(b"\x1b[?1049huser@host:~$ git").is_none());
     }
 }

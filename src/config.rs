@@ -44,6 +44,14 @@ pub struct Config {
     pub hidden_scrollback_lines: usize,
     /// Optional global scrollback budget. Zero disables it.
     pub scrollback_budget_mb: u64,
+    /// Inline completion and popup master switch.
+    pub completions: bool,
+    pub completion_history: bool,
+    pub completion_commands: bool,
+    pub completion_paths: bool,
+    pub completion_git: bool,
+    /// Minimum number of typed characters before a ghost suggestion appears.
+    pub completion_min_chars: usize,
     /// Shared or isolated renderer resources.
     pub render_mode: RenderMode,
     /// Optional GitHub/GitLab tokens from the config file.
@@ -67,6 +75,12 @@ impl Default for Config {
             scrollback_lines: 6_000,
             hidden_scrollback_lines: 3_000,
             scrollback_budget_mb: 0,
+            completions: true,
+            completion_history: true,
+            completion_commands: true,
+            completion_paths: true,
+            completion_git: true,
+            completion_min_chars: 2,
             render_mode: RenderMode::Shared,
             forge_tokens: ForgeTokens::default(),
         }
@@ -149,6 +163,12 @@ struct FileTerminal {
     scrollback_lines: Option<usize>,
     hidden_scrollback_lines: Option<usize>,
     scrollback_budget_mb: Option<u64>,
+    completions: Option<bool>,
+    completion_history: Option<bool>,
+    completion_commands: Option<bool>,
+    completion_paths: Option<bool>,
+    completion_git: Option<bool>,
+    completion_min_chars: Option<usize>,
 }
 
 #[derive(Deserialize, Default)]
@@ -223,6 +243,29 @@ impl FileConfig {
             .scrollback_budget_mb
             .unwrap_or(defaults.scrollback_budget_mb)
             .min(4096);
+
+        config.completions = self.terminal.completions.unwrap_or(defaults.completions);
+        config.completion_history = self
+            .terminal
+            .completion_history
+            .unwrap_or(defaults.completion_history);
+        config.completion_commands = self
+            .terminal
+            .completion_commands
+            .unwrap_or(defaults.completion_commands);
+        config.completion_paths = self
+            .terminal
+            .completion_paths
+            .unwrap_or(defaults.completion_paths);
+        config.completion_git = self
+            .terminal
+            .completion_git
+            .unwrap_or(defaults.completion_git);
+        config.completion_min_chars = self
+            .terminal
+            .completion_min_chars
+            .unwrap_or(defaults.completion_min_chars)
+            .clamp(1, 8);
 
         if let Some(shell) = self.shell.default {
             let shell = shell.trim();
@@ -334,6 +377,13 @@ scrollback_lines = 6000
 hidden_scrollback_lines = 3000
 # Global scrollback budget in MB. 0 disables it.
 scrollback_budget_mb = 0
+# Inline completion and popup.
+completions = true
+completion_history = true
+completion_commands = true
+completion_paths = true
+completion_git = true
+completion_min_chars = 2
 
 [render]
 # "shared" shares GPU/font resources between windows.
@@ -363,6 +413,8 @@ mod tests {
         assert_eq!(config.hidden_scrollback_lines, 3_000);
         assert_eq!(config.scrollback_budget_mb, 0);
         assert_eq!(config.render_mode, RenderMode::Shared);
+        assert!(config.completions);
+        assert_eq!(config.completion_min_chars, 2);
     }
 
     #[test]
@@ -377,6 +429,8 @@ option_as_meta = true
 scrollback_lines = 10000
 hidden_scrollback_lines = 10000
 scrollback_budget_mb = 128
+completions = false
+completion_min_chars = 5
 
 [render]
 mode = "isolated"
@@ -397,6 +451,8 @@ token = "glpat_test"
         assert_eq!(config.scrollback_lines, 10_000);
         assert_eq!(config.hidden_scrollback_lines, 10_000);
         assert_eq!(config.scrollback_budget_mb, 128);
+        assert!(!config.completions);
+        assert_eq!(config.completion_min_chars, 5);
         assert_eq!(config.render_mode, RenderMode::Isolated);
         assert_eq!(config.shell.as_deref(), Some("bash"));
         assert_eq!(config.forge_tokens.github.as_deref(), Some("ghp_test"));
@@ -453,6 +509,8 @@ hidden_scrollback_lines = 0
             defaults.hidden_scrollback_lines
         );
         assert_eq!(config.scrollback_budget_mb, defaults.scrollback_budget_mb);
+        assert_eq!(config.completions, defaults.completions);
+        assert_eq!(config.completion_min_chars, defaults.completion_min_chars);
         assert_eq!(config.render_mode, defaults.render_mode);
         assert!(config.font_family.is_none());
         assert!(config.shell.is_none());

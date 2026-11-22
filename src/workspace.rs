@@ -163,6 +163,8 @@ pub struct Pane {
     pub cwd: Option<PathBuf>,
     pub git_status: Option<GitStatus>,
     pub profile_id: String,
+    /// Completion is only considered after the user has edited the line.
+    pub suggestion_armed: bool,
 }
 
 impl Pane {
@@ -187,6 +189,7 @@ impl Pane {
             cwd: Some(cwd),
             git_status: None,
             profile_id: profile.id.clone(),
+            suggestion_armed: false,
         })
     }
 

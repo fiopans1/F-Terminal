@@ -1,5 +1,7 @@
 # F-Terminal
 
+[![License: AGPL v3](https://img.shields.io/badge/License-AGPL_v3-blue.svg)](LICENSE)
+
 Terminal nativa en Rust, ligera y multiplataforma para **macOS, Linux y
 Windows**. Usa un PTY real, parser VT, render GPU con fuentes del sistema y una
 sidebar estilo Warp. Incluye splits, explorador de archivos, editor con
@@ -17,9 +19,11 @@ runtime web, manteniendo el binario y el consumo de memoria bajos.
 - [Stack](#stack)
 - [Requisitos](#requisitos)
 - [Compilar y ejecutar](#compilar-y-ejecutar)
+- [Instaladores y releases](#instaladores-y-releases)
 - [Perfiles de shell](#perfiles-de-shell)
 - [Configuración](#configuración)
 - [Terminal](#terminal)
+- [Autocompletado](#autocompletado)
 - [Sidebar, sesiones y splits](#sidebar-sesiones-y-splits)
 - [Explorador y editor](#explorador-y-editor)
 - [Footer Git por terminal](#footer-git-por-terminal)
@@ -31,6 +35,7 @@ runtime web, manteniendo el binario y el consumo de memoria bajos.
 - [Tests](#tests)
 - [Estado y limitaciones](#estado-y-limitaciones)
 - [Roadmap](#roadmap)
+- [Licencia](#licencia)
 
 ---
 
@@ -50,10 +55,14 @@ runtime web, manteniendo el binario y el consumo de memoria bajos.
 - **Gestor Git** en ventana separada: stage/unstage, commit/amend, ramas,
   fetch/pull/push, merge, stash e historial con diff.
 - Footer Git por terminal con dos burbujas: rama y `+N/-N`.
+- Autocompletado inline y popup: historial, comandos del `PATH`, rutas y
+  ramas/tags de Git, sin indexar el disco ni lanzar `git` por pulsación.
 - Perfiles de shell: zsh, bash, fish, `cmd.exe`, Windows PowerShell,
   PowerShell 7, Git Bash, MSYS2/Cygwin y distribuciones WSL.
 - Configuración TOML con scrollback por sesión, presupuesto global opcional y
   modo de render compartido o aislado.
+- Instaladores nativos offline: DMG en macOS, EXE con UAC en Windows y
+  paquetes DEB/RPM en Linux.
 - La terminal principal sigue usable mientras Code Review o el gestor Git
   están abiertos.
 
@@ -118,8 +127,98 @@ cargo test
 cargo build --release
 ```
 
-La app arranca en el directorio actual. Las terminales nuevas heredan el cwd
-del pane enfocado y los splits heredan también su perfil de shell.
+La app arranca en el directorio actual cuando se lanza desde una terminal; si
+se abre desde Finder, el menú Inicio o un lanzador gráfico, usa el directorio
+home del usuario. Las terminales nuevas heredan el cwd del pane enfocado y los
+splits heredan también su perfil de shell.
+
+---
+
+## Instaladores y releases
+
+F-Terminal se empaqueta de forma nativa para cada plataforma. Los artefactos
+se generan en `dist/` y **no descargan nada durante la instalación**.
+
+### GitHub Actions: solo tags
+
+El workflow [`.github/workflows/installers.yml`](.github/workflows/installers.yml)
+se ejecuta únicamente cuando se empuja un tag `v*`:
+
+```bash
+git tag v0.1.0
+git push origin v0.1.0
+```
+
+Antes de compilar, valida que el tag coincida exactamente con el campo
+`version` de `Cargo.toml`. Después compila en runners nativos y publica un
+GitHub Release con:
+
+- `F-Terminal-0.1.0-macos-universal.dmg`
+- `F-Terminal-0.1.0-macos-universal.pkg`
+- `F-Terminal-Setup-0.1.0-x64.exe`
+- `f-terminal_0.1.0-1_amd64.deb`
+- `f-terminal-0.1.0-1.x86_64.rpm`
+- `SHA256SUMS`
+
+El workflow no se ejecuta en cada push ni mediante `workflow_dispatch`.
+
+### Build local
+
+```bash
+# macOS
+./scripts/package.sh macos
+
+# macOS con instalador .pkg además del .dmg
+./scripts/package.sh macos --pkg
+
+# Linux (Debian/Ubuntu o Fedora/RHEL)
+./scripts/package.sh linux
+
+# Windows
+powershell -ExecutionPolicy Bypass -File scripts/package-windows.ps1
+```
+
+Requisitos de build:
+
+- macOS: Xcode Command Line Tools, Rust y los targets
+  `aarch64-apple-darwin` y `x86_64-apple-darwin`.
+- Windows: Rust MSVC, Visual Studio Build Tools e Inno Setup 6.
+- Linux: Rust, `dpkg-deb`, `rpmbuild` y `file`.
+
+El script de macOS genera un binario universal `arm64 + x86_64`. Si no hay
+identidad de firma configurada, firma en modo ad-hoc; para distribución pública
+se puede usar una identidad Developer ID y notarización:
+
+```bash
+CODESIGN_IDENTITY="Developer ID Application: ..." \
+APPLE_ID="..." APPLE_TEAM_ID="..." APPLE_APP_PASSWORD="..." \
+./scripts/package.sh macos
+```
+
+El instalador de Windows se ejecuta **siempre para todos los usuarios**, con
+UAC y destino en `C:\Program Files\F-Terminal`. También acepta firma
+Authenticode mediante `WINDOWS_CERT_FILE` y `WINDOWS_CERT_PASSWORD` en local,
+o `WINDOWS_CERT_BASE64` en GitHub Actions.
+
+### Instalación para usuarios
+
+```bash
+# macOS
+open dist/macos/F-Terminal-0.1.0-macos-universal.dmg
+
+# Windows
+dist\windows\F-Terminal-Setup-0.1.0-x64.exe
+
+# Debian / Ubuntu
+sudo apt install ./dist/linux/f-terminal_0.1.0-1_amd64.deb
+
+# Fedora / RHEL
+sudo dnf install ./dist/linux/f-terminal-0.1.0-1.x86_64.rpm
+```
+
+Los instaladores sin firma muestran los avisos habituales de Gatekeeper en
+macOS y SmartScreen en Windows. Los `.deb`/`.rpm` usan las librerías base del
+sistema; no se incluye AppImage en esta iteración.
 
 ---
 
@@ -227,6 +326,14 @@ scrollback_lines = 6000
 hidden_scrollback_lines = 3000
 # Presupuesto global de scrollback en MB. 0 lo desactiva.
 scrollback_budget_mb = 0
+# Autocompletado. Desactiva las fuentes que no quieras.
+completions = true
+completion_history = true
+completion_commands = true
+completion_paths = true
+completion_git = true
+# Caracteres mínimos para mostrar texto fantasma.
+completion_min_chars = 2
 
 [render]
 # "shared" comparte GPU y atlas de texto entre ventanas.
@@ -321,6 +428,45 @@ Soporte VT incluido:
 El renderer no conoce `alacritty_terminal`: consume un `Frame` ya resuelto con
 texto, colores, fondos y cursor. Eso mantiene aislado el motor VT de la capa
 gráfica.
+
+---
+
+## Autocompletado
+
+Cada terminal ofrece sugerencias mientras escribes en el prompt:
+
+- **Historial**: comandos ya ejecutados, incluida la sesión actual.
+- **Comandos**: ejecutables del `PATH` y builtins comunes.
+- **Subcomandos de Git**: `checkout`, `switch`, `rebase`, etc.
+- **Rutas**: archivos y directorios, relativos, absolutos y con `~`.
+- **Git**: ramas locales, remotas y tags, solo cuando el subcomando las acepta
+  (`git checkout`, `switch`, `merge`, `rebase`, `push`, `log`...).
+
+La mejor sugerencia aparece como texto atenuado detrás del cursor:
+
+| Acción | Atajo |
+|---|---|
+| Aceptar texto fantasma | `→` |
+| Abrir/cerrar el popup | `Ctrl+.`, `Ctrl+Space` o `Ctrl+Shift+Space` |
+| Mover selección en el popup | `↑` / `↓` |
+| Insertar candidato | `Tab` o `Enter` |
+| Cerrar el popup | `Esc` |
+
+`Tab` sin popup se sigue enviando al shell, para no perder el completado
+específico de zsh/bash/fish o de herramientas como `docker` y `kubectl`.
+
+El motor es deliberadamente ligero:
+
+- Historial en un único buffer con rangos, limitado a 5.000 comandos / 512 KB.
+- Índice de comandos del `PATH` construido una vez en segundo plano.
+- Rutas: solo se lista el directorio del token actual, con caché de 2 s.
+- Git: lectura directa de `refs/heads`, `refs/remotes`, `refs/tags` y
+  `packed-refs`; sin proceso `git` por pulsación.
+- Sin archivos de índice ni escritura en los historiales del shell.
+
+Si el prompt usa un formato no reconocido (`$ `, `% `, `# `, `❯`, `➜`, `λ`,
+`»`, `→`, `> `) o el comando ocupa varias líneas, no se muestran sugerencias.
+En fish se omite el historial inline porque fish ya trae autosugerencias.
 
 ---
 
@@ -740,6 +886,13 @@ La configuración general, incluidos los tokens, se describe en
 src/
   main.rs          Arranque, config y event loop
   app.rs           Ventana principal, routing multi-ventana, atajos y estado
+  complete/
+    mod.rs         Motor, contexto, ranking y candidatos
+    line.rs        Prompt, tokenizador y quoting
+    history.rs     Historial compacto y parsers por shell
+    commands.rs    Índice del PATH y builtins
+    paths.rs       Rutas y caché del directorio actual
+    git.rs         Refs Git directas para ramas/tags
   config.rs        Configuración TOML, validación y plantilla
   diff_view.rs     Render compartido de diffs
   editor.rs        Editor mínimo
@@ -783,6 +936,9 @@ src/
     text.rs        Buffers, glyphon y atlas compartido
     quads.wgsl     Shader de quads con esquinas redondeadas
 ```
+
+El empaquetado nativo vive en `scripts/`, los iconos en `assets/` y el
+workflow de releases en `.github/workflows/installers.yml`.
 
 ### Flujo de datos
 
@@ -830,7 +986,7 @@ compartido falla, la ventana secundaria cae a aislado.
 cargo test
 ```
 
-Cobertura actual (54 tests):
+Cobertura actual:
 
 - Parser VT → `Frame`: texto, colores, fondos y cursor.
 - Geometría de splits, footer y divisores.
@@ -850,6 +1006,9 @@ Cobertura actual (54 tests):
 - Construcción de diffs unificados desde los cambios de GitLab.
 - Config TOML: defaults, parseo, límites, plantilla y fallback de render.
 - Política de scrollback: sesión activa/oculta, presupuesto global y mínimo.
+- Directorio inicial al lanzar desde GUI o desde una terminal.
+- Autocompletado: historial (zsh/bash/fish/PowerShell), prompts, tokenizador,
+  rutas, refs Git, contexto de subcomandos, ranking y layout del popup.
 - Mapeo de acciones del menú.
 - Smoke test offscreen de GPU con dos panes, una etiqueta y un atlas de texto
   compartido entre dos ventanas.
@@ -892,6 +1051,12 @@ Limitaciones conocidas:
   ajustes manuales.
 - Sin emoji a color ni fallback avanzado por script.
 - Sin render incremental por filas sucias ni límite de parseo por frame.
+- Autocompletado: detección de prompt heurística; sin comandos multilínea ni
+  completado en mitad de la línea; sin flags/plugins específicos por comando;
+  los alias y funciones del shell solo aparecen si están en el historial.
+- Autocompletado en WSL: no lee historiales ni refs internos de la distro; usa
+  la sesión actual y el cwd visible.
+- Autocompletado en fish: sin historial inline para no duplicar el nativo.
 
 ---
 
@@ -911,6 +1076,17 @@ Limitaciones conocidas:
 - Editor: undo/redo, selección, file watching y autoguardado.
 - Sidebar: reordenar arrastrando, renombrar y actividad en segundo plano.
 - Búsqueda en scrollback.
+- Integración de shell (OSC 133) para completar comandos multilínea con
+  precisión y añadir flags/plugins específicos por comando.
 - Menú nativo en Windows/Linux.
 - Mejoras de rendimiento: render incremental y menos re-shaping.
 - Tests de integración de PTY y snapshots de frames.
+
+---
+
+## Licencia
+
+F-Terminal se distribuye bajo la **GNU Affero General Public License v3.0**,
+la misma licencia que
+[`task-manager`](https://github.com/fiopans1/task-manager). Consulta
+[`LICENSE`](LICENSE) para el texto completo.

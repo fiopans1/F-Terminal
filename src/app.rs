@@ -1,4 +1,5 @@
 use std::collections::{HashMap, HashSet};
+use std::io::IsTerminal;
 use std::path::PathBuf;
 use std::sync::Arc;
 use std::sync::mpsc::Sender;
@@ -16,6 +17,7 @@ use winit::event_loop::{ActiveEventLoop, ControlFlow, EventLoopProxy};
 use winit::keyboard::{Key, KeyCode, ModifiersState, NamedKey, PhysicalKey};
 use winit::window::{Window, WindowId};
 
+use crate::complete;
 use crate::config::{Config, RenderMode};
 use crate::editor::Editor;
 use crate::event::UserEvent;
@@ -27,7 +29,7 @@ use crate::input;
 use crate::layout::{DividerLayout, PaneLayout, Rect, compute_layout};
 use crate::menu;
 use crate::render::quads::Quad;
-use crate::render::scene::{Label, PaneLayer, Scene};
+use crate::render::scene::{GhostText, Label, PaneLayer, Scene};
 use crate::render::{CellMetrics, Renderer, SharedRenderResources, grid_size_for};
 use crate::review_window::ReviewWindow;
 use crate::shell::ShellCatalog;
@@ -418,6 +420,9 @@ impl ApplicationHandler<UserEvent> for App {
             UserEvent::GitStatus { pane, cwd, status } => {
                 state.on_git_status(pane, cwd, status);
             }
+            UserEvent::CompletionCommands(commands) => {
+                state.on_completion_commands(commands, &self.config);
+            }
             UserEvent::OpenCodeReview { .. }
             | UserEvent::OpenGitManager { .. }
             | UserEvent::ReviewLoaded { .. }
@@ -526,6 +531,24 @@ struct WindowState {
     pending_spawns: HashMap<PaneId, PendingSpawn>,
     shells: ShellCatalog,
     focus: Focus,
+    completion: complete::Engine,
+    completion_view: Option<CompletionView>,
+    completion_open: bool,
+    completion_selected: usize,
+    popup_occlusion: Option<(PaneId, usize, usize, usize, usize)>,
+}
+
+#[derive(Clone, Debug)]
+struct CompletionView {
+    pane: PaneId,
+    row: usize,
+    col: usize,
+    /// Command text after the prompt, used to reject stale suggestions.
+    line: String,
+    candidates: Vec<complete::Candidate>,
+    typed_line: usize,
+    typed_token: usize,
+    right_limit: usize,
 }
 
 #[derive(Clone, Debug)]
@@ -558,8 +581,22 @@ impl WindowState {
         let renderer = pollster::block_on(Renderer::new(window.clone(), event_loop, config, None))?;
         let mut workspace = Workspace::new();
         workspace.create_terminal();
-        let working_directory = std::env::current_dir().unwrap_or_else(|_| PathBuf::from("."));
+        let working_directory = default_directory();
+        log::info!("working directory: {}", working_directory.display());
         let highlight_tx = highlight::spawn_worker(proxy.clone());
+        let completion = complete::Engine::new(config.completions && config.completion_history);
+        if config.completions && config.completion_commands {
+            let index_proxy = proxy.clone();
+            if let Err(error) = std::thread::Builder::new()
+                .name("completion-index".into())
+                .spawn(move || {
+                    let commands = complete::commands::index_path();
+                    let _ = index_proxy.send_event(UserEvent::CompletionCommands(commands));
+                })
+            {
+                log::warn!("failed to start the completion index worker: {error}");
+            }
+        }
         let shells = ShellCatalog::detect(config.shell.as_deref());
         log::info!(
             "detected {} shell profile(s), default: {}",
@@ -607,6 +644,11 @@ impl WindowState {
             pending_spawns: HashMap::new(),
             shells,
             focus: Focus::Terminal,
+            completion,
+            completion_view: None,
+            completion_open: false,
+            completion_selected: 0,
+            popup_occlusion: None,
         };
 
         state.sync_layout(config)?;
@@ -668,6 +710,7 @@ impl WindowState {
                     self.window.request_redraw();
                 } else if let Some(pane) = self.focused_pane_mut() {
                     pane.session.write(text.as_bytes());
+                    pane.suggestion_armed = true;
                 }
             }
             WindowEvent::Ime(Ime::Preedit(_text, _cursor)) => {
@@ -1736,6 +1779,7 @@ impl WindowState {
         } else {
             pane.session.write(text.as_bytes());
         }
+        pane.suggestion_armed = true;
     }
 
     fn focus_direction(&mut self, direction: FocusDirection) {
@@ -1799,6 +1843,358 @@ impl WindowState {
     }
 
     // ------------------------------------------------------------------
+    // Completion
+    // ------------------------------------------------------------------
+
+    fn on_completion_commands(&mut self, commands: Vec<String>, config: &Config) {
+        self.completion.set_commands(commands);
+        self.refresh_completion(config);
+        self.window.request_redraw();
+    }
+
+    fn clear_completion(&mut self) {
+        self.completion_view = None;
+        self.completion_open = false;
+        self.completion_selected = 0;
+    }
+
+    fn refresh_completion(&mut self, config: &Config) {
+        if !config.completions || self.focus != Focus::Terminal {
+            self.clear_completion();
+            return;
+        }
+
+        let Some(pane_id) = self.workspace.focused_pane() else {
+            self.clear_completion();
+            return;
+        };
+
+        let Some((input, command, cwd, is_fish, armed)) =
+            self.workspace.pane(pane_id).and_then(|pane| {
+                let input = pane.terminal.input_line()?;
+                let prefix = complete::line::extract_command(&input)?;
+                Some((
+                    input,
+                    prefix.command,
+                    pane.cwd.clone().unwrap_or_else(default_directory),
+                    self.shells.get(&pane.profile_id).is_some_and(|profile| {
+                        profile.short.eq_ignore_ascii_case("fish")
+                            || profile.name.eq_ignore_ascii_case("fish")
+                    }),
+                    pane.suggestion_armed,
+                ))
+            })
+        else {
+            self.clear_completion();
+            return;
+        };
+
+        if !armed && !self.completion_open {
+            self.clear_completion();
+            return;
+        }
+        if self.completion_open
+            && self
+                .completion_view
+                .as_ref()
+                .is_some_and(|view| view.pane != pane_id)
+        {
+            self.clear_completion();
+            return;
+        }
+        if command.trim().is_empty() && !self.completion_open {
+            self.clear_completion();
+            return;
+        }
+
+        let options = complete::Options {
+            history: config.completion_history,
+            commands: config.completion_commands,
+            paths: config.completion_paths,
+            git: config.completion_git,
+            is_fish,
+        };
+        let completion = self.completion.completion(&command, &cwd, &options);
+        if completion.candidates.is_empty() {
+            self.clear_completion();
+            return;
+        }
+
+        let same_line = self
+            .completion_view
+            .as_ref()
+            .is_some_and(|view| view.pane == pane_id && view.line == command);
+        if !same_line {
+            log::debug!(
+                "completion: {:?} -> {} candidate(s)",
+                command,
+                completion.candidates.len()
+            );
+        }
+        self.completion_view = Some(CompletionView {
+            pane: pane_id,
+            row: input.row,
+            col: input.col,
+            line: command,
+            candidates: completion.candidates,
+            typed_line: completion.typed_line,
+            typed_token: completion.typed_token,
+            right_limit: input.right_limit,
+        });
+        if same_line {
+            let count = self
+                .completion_view
+                .as_ref()
+                .map(|view| view.candidates.len())
+                .unwrap_or(0);
+            self.completion_selected = self.completion_selected.min(count.saturating_sub(1));
+        } else {
+            self.completion_selected = 0;
+        }
+    }
+
+    fn ghost_candidate(&self, config: &Config) -> Option<&complete::Candidate> {
+        if !config.completions || self.focus != Focus::Terminal || self.completion_open {
+            return None;
+        }
+        let view = self.completion_view.as_ref()?;
+        if self.workspace.focused_pane() != Some(view.pane) {
+            return None;
+        }
+        let candidate = view.candidates.first()?;
+        let typed = if candidate.kind == complete::Kind::History {
+            view.typed_line
+        } else {
+            view.typed_token
+        };
+        (typed >= config.completion_min_chars).then_some(candidate)
+    }
+
+    fn ghost_text(&self, config: &Config) -> Option<GhostText> {
+        let view = self.completion_view.as_ref()?;
+        let candidate = self.ghost_candidate(config)?;
+        let free = view.right_limit.saturating_sub(view.col);
+        if free < 3 {
+            return None;
+        }
+        let mut text = candidate.append.clone();
+        if text.chars().count() > free {
+            text = text.chars().take(free).collect();
+        }
+        Some(GhostText {
+            row: view.row,
+            col: view.col,
+            text,
+            color: config.theme.sidebar_text_dim,
+        })
+    }
+
+    fn accept_completion(&mut self, config: &Config, index: usize) -> bool {
+        let Some(view) = self.completion_view.as_ref() else {
+            return false;
+        };
+        let pane_id = view.pane;
+        let expected_line = view.line.clone();
+        if self.workspace.focused_pane() != Some(pane_id) {
+            return false;
+        }
+        let Some(candidate) = view.candidates.get(index).cloned() else {
+            return false;
+        };
+        let Some((command, _row, _col)) = self.workspace.pane(pane_id).and_then(|pane| {
+            let input = pane.terminal.input_line()?;
+            let prefix = complete::line::extract_command(&input)?;
+            Some((prefix.command, input.row, input.col))
+        }) else {
+            self.clear_completion();
+            return false;
+        };
+
+        if command != expected_line || candidate.append.is_empty() {
+            log::debug!(
+                "completion accept rejected: expected={:?} current={:?} append={:?}",
+                expected_line,
+                command,
+                candidate.append
+            );
+            self.refresh_completion(config);
+            return false;
+        }
+
+        log::debug!(
+            "completion accept: {:?} + {:?}",
+            expected_line,
+            candidate.append
+        );
+        let Some(pane) = self.workspace.pane_mut(pane_id) else {
+            return false;
+        };
+        pane.session.write(candidate.append.as_bytes());
+        pane.suggestion_armed = true;
+
+        self.completion_view = None;
+        self.completion_open = false;
+        self.completion_selected = 0;
+        self.dirty_panes.insert(pane_id);
+        self.window.request_redraw();
+        true
+    }
+
+    fn toggle_completion(&mut self, config: &Config) {
+        if self.completion_open {
+            self.completion_open = false;
+            self.completion_view = None;
+            self.completion_selected = 0;
+            self.window.request_redraw();
+            return;
+        }
+
+        self.completion_open = true;
+        self.completion_view = None;
+        self.refresh_completion(config);
+        if self
+            .completion_view
+            .as_ref()
+            .is_none_or(|view| view.candidates.is_empty())
+        {
+            self.completion_open = false;
+        }
+        log::debug!(
+            "completion popup: open={} candidates={} top={:?}",
+            self.completion_open,
+            self.completion_view
+                .as_ref()
+                .map(|view| view.candidates.len())
+                .unwrap_or(0),
+            self.completion_view
+                .as_ref()
+                .map(|view| view
+                    .candidates
+                    .iter()
+                    .take(5)
+                    .map(|candidate| candidate.label.as_str())
+                    .collect::<Vec<_>>())
+                .unwrap_or_default()
+        );
+        self.window.request_redraw();
+    }
+
+    fn handle_completion_key(&mut self, event: &winit::event::KeyEvent, config: &Config) -> bool {
+        let ctrl = self.modifiers.control_key();
+        let alt = self.modifiers.alt_key();
+        let shift = self.modifiers.shift_key();
+        let super_key = self.modifiers.super_key();
+
+        if !config.completions {
+            return false;
+        }
+
+        if ctrl && matches!(event.physical_key, PhysicalKey::Code(KeyCode::Space)) {
+            self.toggle_completion(config);
+            return true;
+        }
+        if alt
+            && !ctrl
+            && !super_key
+            && matches!(event.physical_key, PhysicalKey::Code(KeyCode::Slash))
+        {
+            self.toggle_completion(config);
+            return true;
+        }
+        if ctrl
+            && !alt
+            && !super_key
+            && matches!(event.physical_key, PhysicalKey::Code(KeyCode::Period))
+        {
+            self.toggle_completion(config);
+            return true;
+        }
+
+        if self.completion_open {
+            match &event.logical_key {
+                Key::Named(NamedKey::Escape) => {
+                    self.completion_open = false;
+                    self.completion_view = None;
+                    self.completion_selected = 0;
+                    self.window.request_redraw();
+                    return true;
+                }
+                Key::Named(NamedKey::ArrowUp) => {
+                    self.completion_selected = self.completion_selected.saturating_sub(1);
+                    self.window.request_redraw();
+                    return true;
+                }
+                Key::Named(NamedKey::ArrowDown) => {
+                    if let Some(view) = &self.completion_view {
+                        self.completion_selected = (self.completion_selected + 1)
+                            .min(view.candidates.len().saturating_sub(1));
+                    }
+                    self.window.request_redraw();
+                    return true;
+                }
+                Key::Named(NamedKey::Tab) | Key::Named(NamedKey::Enter) => {
+                    if !self.accept_completion(config, self.completion_selected) {
+                        self.refresh_completion(config);
+                    }
+                    return true;
+                }
+                Key::Named(NamedKey::ArrowRight) if !ctrl && !alt && !shift && !super_key => {
+                    if !self.accept_completion(config, self.completion_selected) {
+                        self.refresh_completion(config);
+                    }
+                    return true;
+                }
+                Key::Named(NamedKey::ArrowLeft)
+                | Key::Named(NamedKey::Home)
+                | Key::Named(NamedKey::End) => {
+                    self.clear_completion();
+                    self.window.request_redraw();
+                    return false;
+                }
+                _ => {}
+            }
+            return false;
+        }
+
+        if !ctrl
+            && !alt
+            && !shift
+            && !super_key
+            && matches!(event.logical_key, Key::Named(NamedKey::ArrowRight))
+            && self.ghost_candidate(config).is_some()
+        {
+            return self.accept_completion(config, 0);
+        }
+
+        false
+    }
+
+    fn capture_history(&mut self, pane_id: PaneId, config: &Config) {
+        if !config.completions || !config.completion_history {
+            return;
+        }
+        if self.workspace.pane(pane_id).is_some_and(|pane| {
+            self.shells.get(&pane.profile_id).is_some_and(|profile| {
+                profile.short.eq_ignore_ascii_case("fish")
+                    || profile.name.eq_ignore_ascii_case("fish")
+            })
+        }) {
+            return;
+        }
+        let Some(command) = self.workspace.pane(pane_id).and_then(|pane| {
+            let input = pane.terminal.input_line()?;
+            let prefix = complete::line::extract_command(&input)?;
+            Some(prefix.command.trim().to_owned())
+        }) else {
+            return;
+        };
+        if command.is_empty() || command.ends_with('\\') {
+            return;
+        }
+        self.completion.add_history(&command);
+    }
+
+    // ------------------------------------------------------------------
     // Keyboard
     // ------------------------------------------------------------------
 
@@ -1831,6 +2227,10 @@ impl WindowState {
             return;
         }
 
+        if self.handle_completion_key(&event, config) {
+            return;
+        }
+
         let Some(pane_id) = self.workspace.focused_pane() else {
             return;
         };
@@ -1839,6 +2239,28 @@ impl WindowState {
             .pane(pane_id)
             .map(|pane| pane.terminal.mode())
             .unwrap_or_default();
+
+        let enter = matches!(event.logical_key, Key::Named(NamedKey::Enter));
+        let escape = matches!(event.logical_key, Key::Named(NamedKey::Escape));
+        let ctrl_c = self.modifiers.control_key()
+            && !self.modifiers.alt_key()
+            && matches!(event.physical_key, PhysicalKey::Code(KeyCode::KeyC));
+        let ctrl_d = self.modifiers.control_key()
+            && !self.modifiers.alt_key()
+            && matches!(event.physical_key, PhysicalKey::Code(KeyCode::KeyD));
+        let disarm = enter || escape || ctrl_c || ctrl_d;
+
+        if enter {
+            self.capture_history(pane_id, config);
+        }
+        if disarm {
+            if let Some(pane) = self.workspace.pane_mut(pane_id) {
+                pane.suggestion_armed = false;
+            }
+            self.completion_view = None;
+            self.completion_open = false;
+            self.completion_selected = 0;
+        }
 
         if let Key::Named(named) = &event.logical_key
             && matches!(named, NamedKey::PageUp | NamedKey::PageDown)
@@ -1865,6 +2287,9 @@ impl WindowState {
                 self.window.request_redraw();
             }
             pane.session.write(&bytes);
+            if !disarm {
+                pane.suggestion_armed = true;
+            }
         }
     }
 
@@ -2192,6 +2617,11 @@ impl WindowState {
         let y = self.cursor_position.y as f32;
 
         if state == ElementState::Pressed && button == MouseButton::Left {
+            if self.completion_open {
+                self.clear_completion();
+                self.window.request_redraw();
+            }
+
             if self.sidebar.profile_menu && !self.view.sidebar.rect.contains(x, y) {
                 self.sidebar.profile_menu = false;
                 self.sidebar.hovered_profile = None;
@@ -2666,6 +3096,8 @@ impl WindowState {
         let ui_font_size = self.renderer.physical(config.ui_font_size);
         let header_font_size = (ui_font_size * 0.82).max(9.0);
 
+        self.refresh_completion(config);
+
         let Some(tab) = self.workspace.active_tab() else {
             return;
         };
@@ -2898,6 +3330,122 @@ impl WindowState {
             });
         }
 
+        let mut popup_occlusion = None;
+        if self.completion_open
+            && let Some(view) = &self.completion_view
+            && let Some((_, content, frame)) = frames.iter_mut().find(|(id, _, _)| *id == view.pane)
+        {
+            let layout = popup_layout(
+                PopupGeometry {
+                    content: *content,
+                    row: view.row,
+                    col: view.col,
+                    selected: self.completion_selected,
+                    metrics,
+                    ui_font_size,
+                    scale,
+                },
+                &view.candidates,
+            );
+            let rect = layout.rect;
+            if rect.width > 1.0 && rect.height > 1.0 {
+                quads.push(Quad::rounded(
+                    rect.x - 1.0,
+                    rect.y - 1.0,
+                    rect.width + 2.0,
+                    rect.height + 2.0,
+                    5.0 * scale,
+                    to_linear(theme.border, 1.0),
+                ));
+                quads.push(Quad::rounded(
+                    rect.x,
+                    rect.y,
+                    rect.width,
+                    rect.height,
+                    4.0 * scale,
+                    to_linear(theme.sidebar_background, 1.0),
+                ));
+
+                let selected_y = rect.y
+                    + layout.padding
+                    + (self.completion_selected - layout.first) as f32 * layout.row_height;
+                quads.push(Quad::rounded(
+                    rect.x + layout.padding * 0.5,
+                    selected_y,
+                    rect.width - layout.padding,
+                    layout.row_height,
+                    3.0 * scale,
+                    to_linear(theme.sidebar_active, 0.95),
+                ));
+
+                let detail_width = (rect.width * 0.30).max(40.0 * scale);
+                let label_width = (rect.width - layout.padding * 2.0 - detail_width).max(1.0);
+                let line_height = ui_font_size * 1.35;
+                for (offset, candidate) in view.candidates[layout.first..layout.first + layout.rows]
+                    .iter()
+                    .enumerate()
+                {
+                    let index = layout.first + offset;
+                    let selected = index == self.completion_selected;
+                    let row_y = rect.y
+                        + layout.padding
+                        + offset as f32 * layout.row_height
+                        + (layout.row_height - line_height) / 2.0;
+                    labels.push(Label {
+                        text: candidate.label.clone(),
+                        x: rect.x + layout.padding,
+                        y: row_y,
+                        width: label_width,
+                        font_size: ui_font_size,
+                        color: if selected {
+                            theme.foreground
+                        } else {
+                            theme.sidebar_text
+                        },
+                        bold: selected,
+                    });
+                    labels.push(Label {
+                        text: candidate.detail.clone(),
+                        x: rect.right() - layout.padding - detail_width,
+                        y: row_y,
+                        width: detail_width,
+                        font_size: ui_font_size * 0.86,
+                        color: theme.sidebar_text_dim,
+                        bold: false,
+                    });
+                }
+
+                let row_start = (((rect.y - content.y) / metrics.height).floor() as isize)
+                    .clamp(0, frame.rows.len() as isize - 1)
+                    as usize;
+                let row_end = (((rect.bottom() - content.y) / metrics.height).ceil() as usize)
+                    .min(frame.rows.len());
+                let col_start = (((rect.x - content.x) / metrics.width).floor() as isize)
+                    .clamp(0, frame.cols as isize - 1) as usize;
+                let col_end =
+                    (((rect.right() - content.x) / metrics.width).ceil() as usize).min(frame.cols);
+                blank_region(frame, row_start..row_end, col_start..col_end, theme);
+                popup_occlusion = Some((view.pane, row_start, row_end, col_start, col_end));
+            }
+        }
+
+        if popup_occlusion != self.popup_occlusion {
+            if let Some((pane, _, _, _, _)) = self.popup_occlusion {
+                self.dirty_panes.insert(pane);
+            }
+            if let Some((pane, _, _, _, _)) = popup_occlusion {
+                self.dirty_panes.insert(pane);
+            }
+            self.popup_occlusion = popup_occlusion;
+        }
+
+        let ghost = self.ghost_text(config);
+        let ghost_pane = if ghost.is_some() {
+            self.completion_view.as_ref().map(|view| view.pane)
+        } else {
+            None
+        };
+
         let mut scene_panes: Vec<PaneLayer<'_>> = frames
             .iter()
             .map(|(id, content, frame)| PaneLayer {
@@ -2905,6 +3453,11 @@ impl WindowState {
                 content: *content,
                 frame,
                 dirty: self.dirty_panes.contains(id),
+                ghost: if Some(*id) == ghost_pane {
+                    ghost.clone()
+                } else {
+                    None
+                },
             })
             .collect();
         if let Some((content, frame)) = &editor_frame {
@@ -2913,6 +3466,7 @@ impl WindowState {
                 content: *content,
                 frame,
                 dirty: self.editor_dirty,
+                ghost: None,
             });
         }
 
@@ -3435,13 +3989,23 @@ impl WindowState {
 }
 
 fn default_directory() -> PathBuf {
-    if let Ok(cwd) = std::env::current_dir() {
-        return cwd;
+    let interactive = std::io::stdin().is_terminal() || std::io::stdout().is_terminal();
+    let cwd = std::env::current_dir().ok();
+    let home = std::env::var_os("HOME")
+        .or_else(|| std::env::var_os("USERPROFILE"))
+        .map(PathBuf::from);
+    choose_launch_directory(interactive, cwd, home)
+}
+
+fn choose_launch_directory(
+    interactive: bool,
+    cwd: Option<PathBuf>,
+    home: Option<PathBuf>,
+) -> PathBuf {
+    if !interactive && let Some(home) = home {
+        return home;
     }
-    if let Some(home) = std::env::var_os("HOME").or_else(|| std::env::var_os("USERPROFILE")) {
-        return PathBuf::from(home);
-    }
-    PathBuf::from(".")
+    cwd.or(home).unwrap_or_else(|| PathBuf::from("."))
 }
 
 struct PaneFooterStyle<'a> {
@@ -3685,6 +4249,139 @@ fn push_cursor_quads(
 
 const HIGHLIGHT_LIMIT: usize = 512 * 1024;
 
+struct PopupLayout {
+    rect: Rect,
+    first: usize,
+    rows: usize,
+    row_height: f32,
+    padding: f32,
+}
+
+#[derive(Clone, Copy)]
+struct PopupGeometry {
+    content: Rect,
+    row: usize,
+    col: usize,
+    selected: usize,
+    metrics: CellMetrics,
+    ui_font_size: f32,
+    scale: f32,
+}
+
+fn popup_layout(geometry: PopupGeometry, candidates: &[complete::Candidate]) -> PopupLayout {
+    let PopupGeometry {
+        content,
+        row,
+        col,
+        selected,
+        metrics,
+        ui_font_size,
+        scale,
+    } = geometry;
+    let padding = 6.0 * scale;
+    if candidates.is_empty() {
+        return PopupLayout {
+            rect: Rect::default(),
+            first: 0,
+            rows: 0,
+            row_height: 1.0,
+            padding,
+        };
+    }
+    let row_height = (ui_font_size * 1.65).max(metrics.height * 0.9);
+    let max_chars = candidates
+        .iter()
+        .map(|candidate| candidate.label.chars().count())
+        .max()
+        .unwrap_or(12)
+        .min(72);
+    let max_width = (content.width - 8.0 * scale).max(80.0);
+    let width = ((max_chars as f32 * ui_font_size * 0.58) + 150.0 * scale)
+        .max(180.0 * scale)
+        .min(max_width);
+    let max_rows = (((content.height - 18.0 * scale) / row_height).floor() as usize).max(1);
+    let rows = candidates.len().min(8).min(max_rows).max(1);
+    let selected = selected.min(candidates.len().saturating_sub(1));
+    let first = if selected >= rows {
+        (selected + 1 - rows).min(candidates.len() - rows)
+    } else {
+        0
+    };
+    let height = rows as f32 * row_height + padding * 2.0;
+
+    let anchor_x = content.x + col as f32 * metrics.width;
+    let x = anchor_x
+        .min(content.right() - width - 3.0 * scale)
+        .max(content.x + 3.0 * scale);
+    let below = content.y + (row + 1) as f32 * metrics.height + 4.0 * scale;
+    let y = if below + height <= content.bottom() - 3.0 * scale {
+        below
+    } else {
+        (content.y + row as f32 * metrics.height - height - 4.0 * scale)
+            .max(content.y + 3.0 * scale)
+    };
+
+    PopupLayout {
+        rect: Rect::new(x, y, width, height),
+        first,
+        rows,
+        row_height,
+        padding,
+    }
+}
+
+/// Replace part of the rendered terminal rows with spaces so the popup is not
+/// drawn over terminal glyphs. Runs keep their byte ranges because only ASCII
+/// characters are replaced; rows with wide or non-ASCII glyphs are cleared
+/// entirely as a safe fallback.
+fn blank_region(
+    frame: &mut Frame,
+    rows: std::ops::Range<usize>,
+    cols: std::ops::Range<usize>,
+    theme: &Theme,
+) {
+    if rows.is_empty() || cols.is_empty() {
+        return;
+    }
+    let col_start = cols.start;
+    let col_end = cols.end;
+
+    for row in frame.rows.iter_mut().take(rows.end).skip(rows.start) {
+        let mut chars: Vec<char> = row.text.chars().collect();
+        if chars.len() != frame.cols {
+            clear_row(row, frame.cols, theme);
+            continue;
+        }
+        if (col_start..col_end).any(|column| {
+            chars
+                .get(column)
+                .is_some_and(|character| !character.is_ascii())
+        }) {
+            clear_row(row, frame.cols, theme);
+            continue;
+        }
+
+        let mut changed = false;
+        for character in chars.iter_mut().take(col_end).skip(col_start) {
+            if *character != ' ' {
+                *character = ' ';
+                changed = true;
+            }
+        }
+        if changed {
+            row.text = chars.into_iter().collect();
+        }
+    }
+}
+
+fn clear_row(row: &mut Row, cols: usize, theme: &Theme) {
+    row.text = " ".repeat(cols);
+    row.runs = vec![Run {
+        range: 0..cols,
+        color: theme.background,
+    }];
+}
+
 fn build_editor_frame(editor: &Editor, text: Rect, metrics: CellMetrics, theme: &Theme) -> Frame {
     let cols = (text.width / metrics.width).floor().max(1.0) as usize;
     let rows = (text.height / metrics.height).floor().max(1.0) as usize;
@@ -3858,6 +4555,106 @@ fn digit_index(code: KeyCode) -> Option<usize> {
 mod tests {
     use super::*;
 
+    fn candidate(label: &str) -> complete::Candidate {
+        complete::Candidate {
+            append: label.to_owned(),
+            label: label.to_owned(),
+            kind: complete::Kind::Path,
+            detail: "ruta".into(),
+            score: 1,
+        }
+    }
+
+    #[test]
+    fn popup_keeps_the_selection_visible_and_inside_the_pane() {
+        let candidates: Vec<_> = (0..20)
+            .map(|index| candidate(&format!("item-{index}")))
+            .collect();
+        let content = Rect::new(10.0, 20.0, 500.0, 300.0);
+        let layout = popup_layout(
+            PopupGeometry {
+                content,
+                row: 0,
+                col: 2,
+                selected: 10,
+                metrics: CellMetrics {
+                    width: 8.0,
+                    height: 18.0,
+                },
+                ui_font_size: 14.0,
+                scale: 1.0,
+            },
+            &candidates,
+        );
+        assert_eq!(layout.rows, 8);
+        assert_eq!(layout.first, 3);
+        assert!(layout.rect.x >= content.x);
+        assert!(layout.rect.right() <= content.right());
+        assert!(layout.rect.y >= content.y);
+        assert!(layout.rect.bottom() <= content.bottom());
+    }
+
+    #[test]
+    fn popup_moves_above_when_there_is_no_room_below() {
+        let candidates = vec![candidate("one"), candidate("two")];
+        let content = Rect::new(0.0, 0.0, 400.0, 100.0);
+        let layout = popup_layout(
+            PopupGeometry {
+                content,
+                row: 4,
+                col: 0,
+                selected: 0,
+                metrics: CellMetrics {
+                    width: 8.0,
+                    height: 18.0,
+                },
+                ui_font_size: 14.0,
+                scale: 1.0,
+            },
+            &candidates,
+        );
+        assert!(layout.rect.bottom() <= content.bottom());
+        assert!(layout.rect.y >= content.y);
+    }
+
+    #[test]
+    fn blanking_hides_cells_without_touching_the_runs() {
+        let mut frame = Frame {
+            rows: vec![Row {
+                text: "hello world".into(),
+                runs: vec![Run {
+                    range: 0..11,
+                    color: Theme::tokyo_night().foreground,
+                }],
+                backgrounds: Vec::new(),
+            }],
+            cols: 11,
+            cursor: None,
+        };
+        blank_region(&mut frame, 0..1, 2..5, &Theme::tokyo_night());
+        assert_eq!(frame.rows[0].text, "he    world");
+        assert_eq!(frame.rows[0].runs[0].range, 0..11);
+    }
+
+    #[test]
+    fn blanking_clears_wide_rows_instead_of_breaking_runs() {
+        let mut frame = Frame {
+            rows: vec![Row {
+                text: "héllo".into(),
+                runs: vec![Run {
+                    range: 0..6,
+                    color: Theme::tokyo_night().foreground,
+                }],
+                backgrounds: Vec::new(),
+            }],
+            cols: 5,
+            cursor: None,
+        };
+        blank_region(&mut frame, 0..1, 1..2, &Theme::tokyo_night());
+        assert_eq!(frame.rows[0].text, "     ");
+        assert_eq!(frame.rows[0].runs[0].range, 0..5);
+    }
+
     fn pane(id: u64, cols: usize, active: bool, focused: bool) -> ScrollbackPane {
         ScrollbackPane {
             id: PaneId(id),
@@ -3934,5 +4731,25 @@ mod tests {
         let panes = [pane(1, 100, false, false)];
         let limits = plan_scrollback_limits(&panes, &config);
         assert_eq!(limits[&PaneId(1)], 3_000);
+    }
+
+    #[test]
+    fn gui_launches_start_in_the_home_directory() {
+        let directory = choose_launch_directory(
+            false,
+            Some(PathBuf::from("/")),
+            Some(PathBuf::from("/home/user")),
+        );
+        assert_eq!(directory, PathBuf::from("/home/user"));
+    }
+
+    #[test]
+    fn terminal_launches_preserve_the_current_directory() {
+        let directory = choose_launch_directory(
+            true,
+            Some(PathBuf::from("/work/project")),
+            Some(PathBuf::from("/home/user")),
+        );
+        assert_eq!(directory, PathBuf::from("/work/project"));
     }
 }

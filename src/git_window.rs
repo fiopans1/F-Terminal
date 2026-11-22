@@ -2324,6 +2324,7 @@ impl GitWindow {
                 content: *area,
                 frame,
                 dirty: true,
+                ghost: None,
             });
         }
         self.draw_commit_panel(theme, scale, ui_font, &layout, &mut quads, &mut labels);

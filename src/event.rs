@@ -22,6 +22,8 @@ pub enum UserEvent {
     PtyClosed { pane: PaneId },
     /// Event emitted by the VT state machine (title, DA responses, clipboard...).
     Term { pane: PaneId, event: Event },
+    /// Executable names discovered in `PATH` for completion.
+    CompletionCommands(Vec<String>),
     /// Action selected from the native macOS menu.
     Menu(Action),
     /// Syntax highlighting result from the background worker.

@@ -220,6 +220,33 @@ impl TextPipeline {
             );
         }
 
+        let mut ghost_buffers = Vec::with_capacity(scene.panes.len());
+        let mut ghost_layouts = Vec::with_capacity(scene.panes.len());
+        for pane in &scene.panes {
+            let Some(ghost) = &pane.ghost else {
+                continue;
+            };
+            let left = pane.content.x + ghost.col as f32 * metrics.width;
+            let top = pane.content.y + ghost.row as f32 * metrics.height;
+            let width = pane.content.right() - left;
+            if width < 1.0 || top + metrics.height > pane.content.bottom() + 0.5 {
+                continue;
+            }
+
+            let mut buffer = Buffer::new(font_system, Metrics::new(*font_size, metrics.height));
+            buffer.set_wrap(Wrap::None);
+            buffer.set_size(Some(width), Some(metrics.height));
+            let attrs = Attrs::new().family(Family::Name(family)).color(Color::rgb(
+                ghost.color.r,
+                ghost.color.g,
+                ghost.color.b,
+            ));
+            buffer.set_text(ghost.text.as_str(), &attrs, Shaping::Basic, None);
+            buffer.shape_until_scroll(font_system, false);
+            ghost_buffers.push(buffer);
+            ghost_layouts.push((left, top, width, ghost.color));
+        }
+
         let mut label_buffers = Vec::with_capacity(scene.labels.len());
         for label in &scene.labels {
             label_buffers.push(build_label_buffer(font_system, label, ui_family));
@@ -229,6 +256,24 @@ impl TextPipeline {
             let buffer = pane_buffers.get(&pane.id)?;
             Some(pane_text_area(buffer, pane.content, theme))
         });
+        let ghost_areas =
+            ghost_buffers
+                .iter()
+                .zip(&ghost_layouts)
+                .map(|(buffer, (left, top, width, color))| TextArea {
+                    buffer,
+                    left: *left,
+                    top: *top,
+                    scale: 1.0,
+                    bounds: TextBounds {
+                        left: left.floor() as i32,
+                        top: top.floor() as i32,
+                        right: (*left + *width).ceil() as i32,
+                        bottom: (*top + metrics.height).ceil() as i32,
+                    },
+                    default_color: Color::rgb(color.r, color.g, color.b),
+                    custom_glyphs: &[],
+                });
         let label_areas = scene
             .labels
             .iter()
@@ -248,7 +293,7 @@ impl TextPipeline {
             font_system,
             &mut bundle.atlas,
             viewport,
-            pane_areas.chain(label_areas),
+            pane_areas.chain(ghost_areas).chain(label_areas),
             swash_cache,
         ) {
             log::error!("text prepare failed: {error}");
@@ -666,12 +711,14 @@ mod tests {
                     content: Rect::new(4.0, 4.0, 220.0, 50.0),
                     frame: &left,
                     dirty: true,
+                    ghost: None,
                 },
                 PaneLayer {
                     id: 2,
                     content: Rect::new(234.0, 4.0, 220.0, 50.0),
                     frame: &right,
                     dirty: true,
+                    ghost: None,
                 },
             ],
             labels: vec![Label {
@@ -753,6 +800,7 @@ mod tests {
                 content: Rect::new(4.0, 4.0, 180.0, 60.0),
                 frame: &first_frame,
                 dirty: true,
+                ghost: None,
             }],
             labels: vec![],
             quads: vec![],
@@ -763,6 +811,7 @@ mod tests {
                 content: Rect::new(4.0, 4.0, 180.0, 60.0),
                 frame: &second_frame,
                 dirty: true,
+                ghost: None,
             }],
             labels: vec![],
             quads: vec![],

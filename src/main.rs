@@ -1,4 +1,7 @@
+#![cfg_attr(target_os = "windows", windows_subsystem = "windows")]
+
 mod app;
+mod complete;
 mod config;
 mod diff_view;
 mod editor;
