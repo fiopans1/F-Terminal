@@ -102,9 +102,7 @@ pub fn wsl_directory(path: &std::path::Path) -> Option<String> {
         let value = path.to_string_lossy();
         for prefix in [r"\\wsl$\", r"\\wsl.localhost\"] {
             if let Some(rest) = value.strip_prefix(prefix) {
-                let mut parts = rest.splitn(2, '\\');
-                let _distro = parts.next()?;
-                let linux = parts.next()?;
+                let (_distro, linux) = rest.split_once('\\')?;
                 return Some(format!("/{}", linux.replace('\\', "/")));
             }
         }

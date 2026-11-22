@@ -1,6 +1,11 @@
 # F-Terminal
 
+[![CI](https://github.com/fiopans1/F-Terminal/actions/workflows/ci.yml/badge.svg)](https://github.com/fiopans1/F-Terminal/actions/workflows/ci.yml)
 [![License: AGPL v3](https://img.shields.io/badge/License-AGPL_v3-blue.svg)](LICENSE)
+[![Rust](https://img.shields.io/badge/rust-1.95%2B-orange.svg?logo=rust)](https://www.rust-lang.org/)
+[![Platforms](https://img.shields.io/badge/platform-macOS%20%7C%20Linux%20%7C%20Windows-blue.svg)](#requisitos)
+[![Status](https://img.shields.io/badge/status-early%20development-yellow.svg)](#estado-y-limitaciones)
+[![PRs welcome](https://img.shields.io/badge/PRs-welcome-brightgreen.svg)](CONTRIBUTING.md)
 
 Terminal nativa en Rust, ligera y multiplataforma para **macOS, Linux y
 Windows**. Usa un PTY real, parser VT, render GPU con fuentes del sistema y una
@@ -10,6 +15,9 @@ un footer por terminal con la rama y los cambios del working tree.
 
 El objetivo es tener una terminal cómoda para el día a día sin Electron ni
 runtime web, manteniendo el binario y el consumo de memoria bajos.
+
+La documentación está en español. Issues and pull requests in English are
+welcome.
 
 ---
 
@@ -35,6 +43,9 @@ runtime web, manteniendo el binario y el consumo de memoria bajos.
 - [Tests](#tests)
 - [Estado y limitaciones](#estado-y-limitaciones)
 - [Roadmap](#roadmap)
+- [Contribuir](#contribuir)
+- [Seguridad](#seguridad)
+- [Changelog](#changelog)
 - [Licencia](#licencia)
 
 ---
@@ -93,8 +104,8 @@ Windows 10/11. Solo se usa para la pestaña de PRs/MRs de Code Review.
 
 ## Requisitos
 
-- Rust estable. El proyecto usa `edition = "2024"` y se ha probado con Rust
-  1.100.
+- Rust estable, mínimo **1.95**. El proyecto usa `edition = "2024"` y se ha
+  probado con Rust 1.100.
 - Un backend gráfico disponible: Metal en macOS, Vulkan/GL en Linux, DX12 en
   Windows.
 - Git instalado para Code Review, el gestor Git y el footer por terminal.
@@ -986,6 +997,16 @@ compartido falla, la ventana secundaria cae a aislado.
 cargo test
 ```
 
+Los tests de `render::text` necesitan un adaptador GPU real. En CI o en
+entornos headless se omiten:
+
+```bash
+cargo test --all-targets -- --skip render::text::tests
+```
+
+La CI ejecuta formato, Clippy y tests en Linux, macOS y Windows. Los
+instaladores completos y ConPTY se validan en el workflow de release de tags.
+
 Cobertura actual:
 
 - Parser VT → `Frame`: texto, colores, fondos y cursor.
@@ -1084,9 +1105,43 @@ Limitaciones conocidas:
 
 ---
 
+## Contribuir
+
+F-Terminal está en desarrollo activo y las contribuciones son bienvenidas:
+bugs, mejoras, documentación, pruebas en Linux/Windows o nuevas ideas.
+
+1. Lee [CONTRIBUTING.md](CONTRIBUTING.md).
+2. Revisa el [roadmap](#roadmap) y los issues abiertos.
+3. Abre un issue con la plantilla correspondiente antes de un cambio grande.
+4. Ejecuta `cargo fmt`, `cargo clippy` y `cargo test` antes del pull request.
+
+Al participar aceptas el [Código de Conducta](CODE_OF_CONDUCT.md). Las
+contribuciones se publican bajo AGPL-3.0.
+
+---
+
+## Seguridad
+
+No publiques vulnerabilidades en un issue público. Usa el reporte privado:
+
+<https://github.com/fiopans1/F-Terminal/security/advisories/new>
+
+Consulta [SECURITY.md](SECURITY.md) para versiones soportadas, alcance y
+tiempos de respuesta.
+
+---
+
+## Changelog
+
+Los cambios relevantes se documentan en [CHANGELOG.md](CHANGELOG.md).
+
+---
+
 ## Licencia
 
 F-Terminal se distribuye bajo la **GNU Affero General Public License v3.0**,
 la misma licencia que
 [`task-manager`](https://github.com/fiopans1/task-manager). Consulta
 [`LICENSE`](LICENSE) para el texto completo.
+
+Copyright © 2026 fiopans1.

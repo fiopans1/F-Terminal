@@ -25,6 +25,7 @@ pub enum UserEvent {
     /// Executable names discovered in `PATH` for completion.
     CompletionCommands(Vec<String>),
     /// Action selected from the native macOS menu.
+    #[cfg_attr(not(target_os = "macos"), allow(dead_code))]
     Menu(Action),
     /// Syntax highlighting result from the background worker.
     Highlight {

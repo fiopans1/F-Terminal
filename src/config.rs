@@ -317,7 +317,7 @@ fn config_path() -> Option<PathBuf> {
     #[cfg(windows)]
     {
         let base = std::env::var_os("APPDATA")?;
-        return Some(PathBuf::from(base).join("f-terminal").join("config.toml"));
+        Some(PathBuf::from(base).join("f-terminal").join("config.toml"))
     }
 
     #[cfg(not(windows))]

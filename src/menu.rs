@@ -9,6 +9,7 @@ use crate::event::UserEvent;
 /// shortcuts. Keeping them in one enum avoids duplicating behavior between
 /// the native menu and the terminal UI.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[cfg_attr(not(target_os = "macos"), allow(dead_code))]
 pub enum Action {
     Explorer,
     OpenCode,
@@ -17,6 +18,7 @@ pub enum Action {
     Settings,
 }
 
+#[cfg_attr(not(target_os = "macos"), allow(dead_code))]
 impl Action {
     pub fn from_menu_id(id: &str) -> Option<Self> {
         match id {

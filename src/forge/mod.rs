@@ -144,7 +144,7 @@ pub fn token_file(name: &str) -> Option<PathBuf> {
     #[cfg(windows)]
     {
         let base = std::env::var_os("APPDATA")?;
-        return Some(PathBuf::from(base).join("f-terminal").join(name));
+        Some(PathBuf::from(base).join("f-terminal").join(name))
     }
 
     #[cfg(not(windows))]

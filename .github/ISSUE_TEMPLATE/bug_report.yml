@@ -1,0 +1,94 @@
+name: Bug report
+description: Report a reproducible problem in F-Terminal
+title: "[bug]: "
+labels: ["bug"]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Gracias por dedicar tiempo a reportar un problema. Antes de continuar:
+
+        - Busca en los issues existentes para evitar duplicados.
+        - No incluyas tokens, rutas privadas ni credenciales en los logs.
+        - Para vulnerabilidades de seguridad usa [SECURITY.md](https://github.com/fiopans1/F-Terminal/blob/main/SECURITY.md), no un issue público.
+
+  - type: textarea
+    id: description
+    attributes:
+      label: Descripción
+      description: ¿Qué ocurre y qué esperabas que ocurriera?
+      placeholder: Al abrir un split, el cursor...
+    validations:
+      required: true
+
+  - type: textarea
+    id: steps
+    attributes:
+      label: Pasos para reproducir
+      description: Incluye la secuencia mínima de acciones.
+      placeholder: |
+        1. Ejecuta `cargo run`
+        2. Abre un segundo pane
+        3. Pulsa...
+    validations:
+      required: true
+
+  - type: dropdown
+    id: platform
+    attributes:
+      label: Plataforma
+      options:
+        - macOS (Apple Silicon)
+        - macOS (Intel)
+        - Linux (X11)
+        - Linux (Wayland)
+        - Windows
+        - WSL
+        - Otra
+    validations:
+      required: true
+
+  - type: input
+    id: version
+    attributes:
+      label: Versión o commit
+      description: Salida de `git rev-parse --short HEAD` o versión del instalador.
+      placeholder: ff0556a
+    validations:
+      required: true
+
+  - type: dropdown
+    id: shell
+    attributes:
+      label: Shell
+      options:
+        - zsh
+        - bash
+        - fish
+        - cmd.exe
+        - Windows PowerShell
+        - PowerShell 7
+        - Git Bash / MSYS2 / Cygwin
+        - WSL
+        - Otro
+    validations:
+      required: true
+
+  - type: textarea
+    id: logs
+    attributes:
+      label: Logs
+      description: Ejecuta con `RUST_LOG=debug` y pega solo las líneas relevantes.
+      render: shell
+    validations:
+      required: false
+
+  - type: checkboxes
+    id: checks
+    attributes:
+      label: Comprobaciones
+      options:
+        - label: He buscado issues duplicados.
+          required: true
+        - label: He eliminado tokens y datos privados de los logs.
+          required: true

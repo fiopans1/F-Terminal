@@ -1,0 +1,61 @@
+name: Feature request
+description: Propón una mejora o una nueva capacidad
+title: "[feature]: "
+labels: ["enhancement"]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Antes de abrir la propuesta, revisa el [roadmap](https://github.com/fiopans1/F-Terminal#roadmap)
+        y los issues existentes. Las propuestas pequeñas y centradas son más fáciles de revisar.
+
+  - type: textarea
+    id: problem
+    attributes:
+      label: Problema o necesidad
+      description: ¿Qué te falta y por qué es importante?
+      placeholder: Cuando trabajo con varios repositorios...
+    validations:
+      required: true
+
+  - type: textarea
+    id: proposal
+    attributes:
+      label: Solución propuesta
+      description: Describe el comportamiento que te gustaría ver.
+    validations:
+      required: true
+
+  - type: textarea
+    id: alternatives
+    attributes:
+      label: Alternativas consideradas
+      description: ¿Hay alguna forma de resolverlo hoy?
+    validations:
+      required: false
+
+  - type: dropdown
+    id: area
+    attributes:
+      label: Área
+      options:
+        - Terminal / PTY
+        - Render / rendimiento
+        - Sidebar / sesiones / splits
+        - Explorador / editor
+        - Autocompletado
+        - Git / Code Review
+        - Configuración
+        - Instaladores / CI
+        - Documentación
+        - Otra
+    validations:
+      required: true
+
+  - type: checkboxes
+    id: checks
+    attributes:
+      label: Comprobaciones
+      options:
+        - label: He revisado el roadmap y los issues existentes.
+          required: true

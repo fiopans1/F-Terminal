@@ -2,10 +2,13 @@
 name = "f-terminal"
 version = "0.1.0"
 edition = "2024"
+rust-version = "1.95"
 description = "Native GPU terminal with Git and code review"
 repository = "https://github.com/fiopans1/F-Terminal"
 license = "AGPL-3.0-only"
 readme = "README.md"
+keywords = ["terminal", "gpu", "wgpu", "git", "pty"]
+categories = ["command-line-interface", "gui"]
 
 [dependencies]
 alacritty_terminal = "0.26"
