@@ -19,7 +19,7 @@ runtime web, manteniendo el binario y el consumo de memoria bajos.
 - [Compilar y ejecutar](#compilar-y-ejecutar)
 - [Perfiles de shell](#perfiles-de-shell)
 - [Terminal](#terminal)
-- [Sidebar, tabs y splits](#sidebar-tabs-y-splits)
+- [Sidebar, sesiones y splits](#sidebar-sesiones-y-splits)
 - [Explorador y editor](#explorador-y-editor)
 - [Footer Git por terminal](#footer-git-por-terminal)
 - [Code Review](#code-review)
@@ -37,8 +37,9 @@ runtime web, manteniendo el binario y el consumo de memoria bajos.
 
 - Terminal real con PTY (Unix) y **ConPTY** (Windows), sin emulación de shell.
 - Render GPU con `wgpu` y texto con `glyphon`/`cosmic-text`.
-- Sidebar con terminales y explorador de archivos.
-- Tabs, splits derecha/abajo y divisores arrastrables.
+- Sidebar con árbol de sesiones y panes, más explorador de archivos.
+- Sesiones plegables con panes hijos y splits derecha/abajo; divisores
+  arrastrables.
 - Cada pane tiene su propio shell, cwd, scrollback y estado VT.
 - Selección con ratón, portapapeles, IME, bracketed paste y alternate screen.
 - Colores ANSI de 16/256/truecolor, OSC 4/10/11 y consultas DA/DSR.
@@ -212,26 +213,45 @@ gráfica.
 
 ---
 
-## Sidebar, tabs y splits
+## Sidebar, sesiones y splits
 
 La sidebar tiene dos modos:
 
-- **TERMINALS**: lista de terminales.
+- **SESSIONS**: árbol de sesiones/workspaces y sus panes.
 - **FILES**: explorador del cwd del pane enfocado.
+
+### Árbol de sesiones
+
+Cada sesión es un workspace con uno o más panes:
+
+- Una sesión con un solo pane ocupa una fila.
+- Cuando la sesión tiene varios panes, aparece una fila padre y los panes como
+  hijos, con conectores `├`/`└`.
+- El padre muestra un chevron `▾`/`▸` para plegar o desplegar sus hijos y un
+  contador de panes.
+- El título inicial de una sesión es **New session**. Cuando el shell envía su
+  título por OSC, el padre se actualiza.
+- Los hijos muestran el título del pane o, si no hay, el shell (`zsh`, `bash`,
+  `PowerShell`…).
+- Clic en el padre: enfoca el pane activo de esa sesión.
+- Clic en un hijo: enfoca ese pane concreto.
+- `×` en el padre cierra la sesión completa.
+- `×` en un hijo cierra solo ese pane.
+- El pane enfocado se resalta con una barra de acento.
 
 Acciones:
 
-- `+` crea una terminal con el shell por defecto.
+- `+` crea una nueva sesión con el shell por defecto.
 - `▾` abre el selector de perfiles.
-- `F` cambia a FILES; `T` vuelve a TERMINALS.
-- `×` cierra una terminal.
+- `F` cambia a FILES; `T` vuelve a SESSIONS.
 - `«` colapsa la sidebar; el rail `»` la recupera.
-- Rueda del ratón para hacer scroll si hay muchas entradas.
+- Rueda del ratón para hacer scroll si hay muchas sesiones o panes.
 
-Los tabs de terminal agrupan uno o más panes. Dentro de cada tab:
+Dentro de cada sesión:
 
 - `Cmd+D` / `Ctrl+Shift+D`: split a la derecha.
 - `Cmd+Shift+D` / `Ctrl+Shift+E`: split abajo.
+- Los nuevos panes aparecen como hijos del árbol y expanden la sesión.
 - Los divisores se arrastran con el ratón.
 - El pane enfocado muestra un borde de acento.
 - `Cmd+Alt+flechas` / `Ctrl+Alt+flechas`: mover el foco.
@@ -476,7 +496,7 @@ En la pestaña **REFS**:
 | Cambiar de terminal | `Cmd+Shift+[` / `]`, `Cmd+1..9`, `Ctrl+Tab` |
 | Mover foco entre panes | `Cmd+Alt+flechas`, `Cmd+\`` |
 | Mostrar/ocultar sidebar | `Cmd+B` |
-| Cambiar TERMINALS / FILES | `Cmd+Shift+F` |
+| Cambiar SESSIONS / FILES | `Cmd+Shift+F` |
 | Abrir Code Review | `Cmd+Shift+R` |
 | Abrir gestor Git | `Cmd+Shift+G` |
 | Abrir explorador | `Cmd+Shift+O` |
@@ -496,7 +516,7 @@ En la pestaña **REFS**:
 | Cambiar de terminal | `Ctrl+Tab`, `Ctrl+Shift+Tab`, `Ctrl+Shift+[ / ]` |
 | Mover foco entre panes | `Ctrl+Alt+flechas`, `Ctrl+Shift+\`` |
 | Mostrar/ocultar sidebar | `Ctrl+Shift+B` |
-| Cambiar TERMINALS / FILES | `Ctrl+Shift+F` |
+| Cambiar SESSIONS / FILES | `Ctrl+Shift+F` |
 | Abrir Code Review | `Ctrl+Shift+R` |
 | Abrir gestor Git | `Ctrl+Shift+G` |
 | Abrir explorador | `Ctrl+Shift+O` |
@@ -644,8 +664,8 @@ src/
     mod.rs         TerminalProfile / ShellCatalog
     unix.rs        Detección en macOS/Linux
     windows.rs     cmd, PowerShell, Git Bash, MSYS2, Cygwin y WSL
-  sidebar.rs       Layout, selector de shells y hit-testing
-  workspace.rs     Tabs, panes, splits y sesiones PTY
+  sidebar.rs       Árbol de sesiones/panes, selector de shells y hit-testing
+  workspace.rs     Sesiones (tabs), panes, splits y PTYs
   term/
     mod.rs         Term + parser + selección
     color.rs       Paleta y conversión sRGB
@@ -701,11 +721,12 @@ Los eventos se enrutan por `WindowId`. Cada ventana secundaria tiene su propio
 cargo test
 ```
 
-Cobertura actual (41 tests):
+Cobertura actual (42 tests):
 
 - Parser VT → `Frame`: texto, colores, fondos y cursor.
 - Geometría de splits, footer y divisores.
-- Sidebar: tabs, Files, selector de perfiles y collapse/reveal.
+- Sidebar: árbol sesión → panes, plegado, Files, selector de perfiles y
+  collapse/reveal.
 - Explorador de archivos.
 - Editor mínimo: edición, guardado, scroll y backspace.
 - Resaltado de sintaxis.

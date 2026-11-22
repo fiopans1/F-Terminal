@@ -32,7 +32,7 @@ use crate::render::{CellMetrics, Renderer, grid_size_for};
 use crate::review_window::ReviewWindow;
 use crate::shell::ShellCatalog;
 use crate::sidebar::{
-    self, LayoutSpec, Sidebar, SidebarHit, SidebarLayout, SidebarMode, TabSummary,
+    self, LayoutSpec, Sidebar, SidebarHit, SidebarLayout, SidebarMode, SidebarRow, TabSummary,
 };
 use crate::term::color::{Theme, to_linear};
 use crate::term::frame::{Cursor, CursorShapeKind, Frame, Row, Run};
@@ -648,8 +648,15 @@ impl WindowState {
             .workspace
             .tabs
             .iter()
-            .map(|tab| TabSummary { id: tab.id })
+            .map(|tab| TabSummary {
+                id: tab.id,
+                focused: tab.focused,
+                panes: tab.leaves(),
+            })
             .collect();
+        self.sidebar
+            .collapsed_tabs
+            .retain(|id| self.workspace.tabs.iter().any(|tab| tab.id == *id));
         let sidebar_layout = sidebar::layout(
             &self.sidebar,
             &summaries,
@@ -662,6 +669,11 @@ impl WindowState {
                 file_count: self.explorer.rows.len(),
                 profile_count: self.shells.profiles.len(),
             },
+        );
+        log::debug!(
+            "sidebar tree: {} sessions, {} rows",
+            summaries.len(),
+            sidebar_layout.rows.len()
         );
 
         let clamped_scroll = self.sidebar.scroll.clamp(0.0, sidebar_layout.max_scroll);
@@ -850,6 +862,9 @@ impl WindowState {
         let Some(new_pane) = self.workspace.split_focused(direction) else {
             return;
         };
+        if let Some(tab) = self.workspace.active_tab_id() {
+            self.sidebar.collapsed_tabs.remove(&tab);
+        }
         self.pending_spawns
             .insert(new_pane, PendingSpawn { cwd, profile_id });
         self.focus = Focus::Terminal;
@@ -895,6 +910,23 @@ impl WindowState {
                 self.sidebar.hovered = None;
                 self.relayout(config);
             }
+        }
+    }
+
+    fn toggle_workspace(&mut self, tab: TabId, config: &Config) {
+        if !self.sidebar.collapsed_tabs.remove(&tab) {
+            self.sidebar.collapsed_tabs.insert(tab);
+        }
+        self.relayout(config);
+    }
+
+    fn select_pane(&mut self, tab: TabId, pane: PaneId, config: &Config) {
+        self.workspace.select_tab(tab);
+        if self.workspace.focus_pane(pane) {
+            self.focus = Focus::Terminal;
+            self.sync_explorer_to_focused();
+            self.update_window_title();
+            self.relayout(config);
         }
     }
 
@@ -1996,12 +2028,18 @@ impl WindowState {
         }
 
         let mut hovered_tab = None;
+        let mut hovered_pane = None;
         let mut hovered_file = None;
         let mut hovered_profile = None;
         if self.view.sidebar.rect.width > 0.0 {
             match sidebar::hit_test(&self.view.sidebar, position.x as f32, position.y as f32) {
-                Some(SidebarHit::Select(tab)) | Some(SidebarHit::Close(tab)) => {
+                Some(SidebarHit::Select(tab))
+                | Some(SidebarHit::Close(tab))
+                | Some(SidebarHit::ToggleWorkspace(tab)) => {
                     hovered_tab = Some(tab);
+                }
+                Some(SidebarHit::SelectPane(_, pane)) | Some(SidebarHit::ClosePane(pane)) => {
+                    hovered_pane = Some(pane);
                 }
                 Some(SidebarHit::File(row)) => hovered_file = Some(row),
                 Some(SidebarHit::Profile(index)) => hovered_profile = Some(index),
@@ -2010,10 +2048,12 @@ impl WindowState {
         }
 
         if hovered_tab != self.sidebar.hovered
+            || hovered_pane != self.sidebar.hovered_pane
             || hovered_file != self.sidebar.hovered_file
             || hovered_profile != self.sidebar.hovered_profile
         {
             self.sidebar.hovered = hovered_tab;
+            self.sidebar.hovered_pane = hovered_pane;
             self.sidebar.hovered_file = hovered_file;
             self.sidebar.hovered_profile = hovered_profile;
             self.window.request_redraw();
@@ -2046,8 +2086,17 @@ impl WindowState {
                         SidebarHit::ToggleProfiles => self.toggle_profile_menu(config),
                         SidebarHit::NewTerminal => self.new_terminal(config),
                         SidebarHit::RefreshFiles => self.refresh_files(config),
+                        SidebarHit::ToggleWorkspace(tab) => {
+                            self.toggle_workspace(tab, config);
+                        }
                         SidebarHit::Select(tab) => self.select_tab(tab, config),
+                        SidebarHit::SelectPane(tab, pane) => {
+                            self.select_pane(tab, pane, config);
+                        }
                         SidebarHit::Close(tab) => self.close_tab(tab, event_loop, config),
+                        SidebarHit::ClosePane(pane) => {
+                            self.close_pane(pane, event_loop, config);
+                        }
                         SidebarHit::File(row) => self.activate_file_row(row, config),
                         SidebarHit::Profile(index) => self.select_profile(index, config),
                     }
@@ -2831,7 +2880,7 @@ impl WindowState {
             "NEW TERMINAL"
         } else {
             match layout.mode {
-                SidebarMode::Terminals => "TERMINALS",
+                SidebarMode::Terminals => "SESSIONS",
                 SidebarMode::Files => "FILES",
             }
         };
@@ -3009,69 +3058,174 @@ impl WindowState {
 
         match layout.mode {
             SidebarMode::Terminals => {
-                let hovered = self.sidebar.hovered;
+                let hovered_tab = self.sidebar.hovered;
+                let hovered_pane = self.sidebar.hovered_pane;
+                let close_size = ui_font_size * 1.1;
 
-                for item in &layout.items {
-                    let is_active = item.is_active;
-                    let is_hovered = Some(item.tab) == hovered;
+                for row in &layout.rows {
+                    match row {
+                        SidebarRow::Workspace(item) => {
+                            let is_hovered = Some(item.tab) == hovered_tab;
+                            if item.is_active || is_hovered {
+                                let background = if item.is_active {
+                                    theme.sidebar_active
+                                } else {
+                                    theme.sidebar_hover
+                                };
+                                quads.push(Quad::new(
+                                    item.rect.x,
+                                    item.rect.y,
+                                    item.rect.width,
+                                    item.rect.height,
+                                    to_linear(background, 1.0),
+                                ));
+                            }
+                            if item.is_active {
+                                quads.push(Quad::new(
+                                    item.rect.x,
+                                    item.rect.y,
+                                    2.0 * scale,
+                                    item.rect.height,
+                                    to_linear(theme.accent, 1.0),
+                                ));
+                            }
 
-                    if is_active || is_hovered {
-                        let background = if is_active {
-                            theme.sidebar_active
-                        } else {
-                            theme.sidebar_hover
-                        };
-                        quads.push(Quad::new(
-                            item.rect.x,
-                            item.rect.y,
-                            item.rect.width,
-                            item.rect.height,
-                            to_linear(background, 1.0),
-                        ));
+                            if item.pane_count > 1 {
+                                let chevron_size = ui_font_size * 0.82;
+                                labels.push(Label {
+                                    text: if item.expanded { "▾" } else { "▸" }.into(),
+                                    x: item.toggle.x
+                                        + (item.toggle.width - chevron_size * 0.55) / 2.0,
+                                    y: item.toggle.y
+                                        + (item.toggle.height - chevron_size * 1.35) / 2.0,
+                                    width: item.toggle.width,
+                                    font_size: chevron_size,
+                                    color: if item.is_active {
+                                        theme.accent
+                                    } else {
+                                        theme.sidebar_text_dim
+                                    },
+                                    bold: false,
+                                });
+                            }
+
+                            let title = self
+                                .workspace
+                                .tabs
+                                .iter()
+                                .find(|tab| tab.id == item.tab)
+                                .map(|tab| tab.title.as_str())
+                                .unwrap_or_default();
+                            labels.push(Label {
+                                text: title.to_owned(),
+                                x: item.label.x,
+                                y: item.label.y + (item.label.height - line_height) / 2.0,
+                                width: item.label.width,
+                                font_size: ui_font_size,
+                                color: if item.is_active {
+                                    theme.sidebar_text
+                                } else {
+                                    theme.sidebar_text_dim
+                                },
+                                bold: item.is_active,
+                            });
+
+                            if item.pane_count > 1 {
+                                labels.push(Label {
+                                    text: item.pane_count.to_string(),
+                                    x: item.close.x - 20.0 * scale,
+                                    y: item.close.y
+                                        + (item.close.height - ui_font_size * 1.35) / 2.0,
+                                    width: 16.0 * scale,
+                                    font_size: ui_font_size * 0.7,
+                                    color: theme.sidebar_text_dim,
+                                    bold: false,
+                                });
+                            }
+
+                            labels.push(Label {
+                                text: "×".into(),
+                                x: item.close.x + (item.close.width - close_size * 0.55) / 2.0,
+                                y: item.close.y + (item.close.height - close_size * 1.35) / 2.0,
+                                width: item.close.width,
+                                font_size: close_size,
+                                color: theme.sidebar_text_dim,
+                                bold: false,
+                            });
+                        }
+                        SidebarRow::Pane(item) => {
+                            let is_hovered = Some(item.pane) == hovered_pane;
+                            if item.is_focused || is_hovered {
+                                let background = if item.is_focused {
+                                    theme.sidebar_active
+                                } else {
+                                    theme.sidebar_hover
+                                };
+                                quads.push(Quad::new(
+                                    item.rect.x + 12.0 * scale,
+                                    item.rect.y,
+                                    (item.rect.width - 12.0 * scale).max(1.0),
+                                    item.rect.height,
+                                    to_linear(background, 1.0),
+                                ));
+                            }
+                            if item.is_focused {
+                                quads.push(Quad::new(
+                                    item.rect.x + 12.0 * scale,
+                                    item.rect.y,
+                                    2.0 * scale,
+                                    item.rect.height,
+                                    to_linear(theme.accent, 1.0),
+                                ));
+                            }
+
+                            let connector_size = ui_font_size * 0.9;
+                            labels.push(Label {
+                                text: if item.last { "└" } else { "├" }.into(),
+                                x: item.rect.x + 20.0 * scale,
+                                y: item.rect.y + (item.rect.height - connector_size * 1.35) / 2.0,
+                                width: 16.0 * scale,
+                                font_size: connector_size,
+                                color: theme.sidebar_text_dim,
+                                bold: false,
+                            });
+
+                            let pane = self.workspace.pane(item.pane);
+                            let profile = pane
+                                .and_then(|pane| self.shells.get(&pane.profile_id))
+                                .map(|profile| profile.short.as_str())
+                                .unwrap_or("sh");
+                            let title = pane
+                                .and_then(|pane| pane.title.clone())
+                                .filter(|title| !title.is_empty())
+                                .unwrap_or_else(|| profile.to_owned());
+
+                            labels.push(Label {
+                                text: title,
+                                x: item.label.x,
+                                y: item.label.y
+                                    + (item.label.height - ui_font_size * 0.88 * 1.35) / 2.0,
+                                width: item.label.width,
+                                font_size: ui_font_size * 0.88,
+                                color: if item.is_focused {
+                                    theme.sidebar_text
+                                } else {
+                                    theme.sidebar_text_dim
+                                },
+                                bold: item.is_focused,
+                            });
+
+                            labels.push(Label {
+                                text: "×".into(),
+                                x: item.close.x + (item.close.width - close_size * 0.55) / 2.0,
+                                y: item.close.y + (item.close.height - close_size * 1.35) / 2.0,
+                                width: item.close.width,
+                                font_size: close_size,
+                                color: theme.sidebar_text_dim,
+                                bold: false,
+                            });
+                        }
                     }
-
-                    if is_active {
-                        quads.push(Quad::new(
-                            item.rect.x,
-                            item.rect.y,
-                            2.0 * scale,
-                            item.rect.height,
-                            to_linear(theme.accent, 1.0),
-                        ));
-                    }
-
-                    let title = self
-                        .workspace
-                        .tabs
-                        .iter()
-                        .find(|tab| tab.id == item.tab)
-                        .map(|tab| tab.title.as_str())
-                        .unwrap_or_default();
-
-                    labels.push(Label {
-                        text: title.to_owned(),
-                        x: item.label.x,
-                        y: item.label.y + (item.label.height - line_height) / 2.0,
-                        width: item.label.width,
-                        font_size: ui_font_size,
-                        color: if is_active {
-                            theme.sidebar_text
-                        } else {
-                            theme.sidebar_text_dim
-                        },
-                        bold: is_active,
-                    });
-
-                    let close_size = ui_font_size * 1.1;
-                    labels.push(Label {
-                        text: "×".into(),
-                        x: item.close.x + (item.close.width - close_size * 0.55) / 2.0,
-                        y: item.close.y + (item.close.height - close_size * 1.35) / 2.0,
-                        width: item.close.width,
-                        font_size: close_size,
-                        color: theme.sidebar_text_dim,
-                        bold: false,
-                    });
                 }
             }
             SidebarMode::Files => {

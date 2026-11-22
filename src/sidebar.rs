@@ -1,11 +1,14 @@
-use crate::layout::Rect;
-use crate::workspace::TabId;
+use std::collections::HashSet;
 
-/// Tabs shown in the sidebar. This is a lightweight view so the sidebar does
-/// not need access to the whole workspace.
-#[derive(Clone, Copy, Debug)]
+use crate::layout::Rect;
+use crate::workspace::{PaneId, TabId};
+
+/// A workspace/tab summary for the sidebar. Pane ids are in layout order.
+#[derive(Clone, Debug)]
 pub struct TabSummary {
     pub id: TabId,
+    pub focused: PaneId,
+    pub panes: Vec<PaneId>,
 }
 
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
@@ -21,7 +24,9 @@ pub struct Sidebar {
     pub mode: SidebarMode,
     pub scroll: f32,
     pub hovered: Option<TabId>,
+    pub hovered_pane: Option<PaneId>,
     pub hovered_file: Option<usize>,
+    pub collapsed_tabs: HashSet<TabId>,
     pub profile_menu: bool,
     pub profile_selected: usize,
     pub hovered_profile: Option<usize>,
@@ -34,7 +39,9 @@ impl Default for Sidebar {
             mode: SidebarMode::Terminals,
             scroll: 0.0,
             hovered: None,
+            hovered_pane: None,
             hovered_file: None,
+            collapsed_tabs: HashSet::new(),
             profile_menu: false,
             profile_selected: 0,
             hovered_profile: None,
@@ -43,12 +50,32 @@ impl Default for Sidebar {
 }
 
 #[derive(Clone, Copy, Debug)]
-pub struct SidebarItem {
+pub struct WorkspaceItem {
     pub tab: TabId,
     pub rect: Rect,
     pub label: Rect,
     pub close: Rect,
+    pub toggle: Rect,
     pub is_active: bool,
+    pub expanded: bool,
+    pub pane_count: usize,
+}
+
+#[derive(Clone, Copy, Debug)]
+pub struct PaneItem {
+    pub tab: TabId,
+    pub pane: PaneId,
+    pub rect: Rect,
+    pub label: Rect,
+    pub close: Rect,
+    pub is_focused: bool,
+    pub last: bool,
+}
+
+#[derive(Clone, Copy, Debug)]
+pub enum SidebarRow {
+    Workspace(WorkspaceItem),
+    Pane(PaneItem),
 }
 
 #[derive(Clone, Copy, Debug)]
@@ -78,7 +105,7 @@ pub struct SidebarLayout {
     pub mode_button: Rect,
     pub header_label: Rect,
     pub path_rect: Rect,
-    pub items: Vec<SidebarItem>,
+    pub rows: Vec<SidebarRow>,
     pub file_items: Vec<FileItem>,
     pub profile_items: Vec<ProfileItem>,
     pub profile_menu: bool,
@@ -104,8 +131,11 @@ pub enum SidebarHit {
     ToggleProfiles,
     NewTerminal,
     RefreshFiles,
+    ToggleWorkspace(TabId),
     Select(TabId),
+    SelectPane(TabId, PaneId),
     Close(TabId),
+    ClosePane(PaneId),
     File(usize),
     Profile(usize),
 }
@@ -118,6 +148,21 @@ pub struct LayoutSpec {
     pub width_logical: f32,
     pub file_count: usize,
     pub profile_count: usize,
+}
+
+#[derive(Clone, Copy, Debug)]
+enum TerminalRowSpec {
+    Workspace {
+        tab: TabId,
+        expanded: bool,
+        pane_count: usize,
+    },
+    Pane {
+        tab: TabId,
+        pane: PaneId,
+        focused: bool,
+        last: bool,
+    },
 }
 
 /// Lay out the sidebar and its clickable regions. All inputs and outputs are
@@ -136,6 +181,7 @@ pub fn layout(
         file_count,
         profile_count,
     } = spec;
+
     if !state.visible {
         let padding = (8.0 * scale).round();
         let rail_width = (14.0 * scale).round().max(padding * 2.0 + 4.0);
@@ -216,11 +262,32 @@ pub fn layout(
     let list = Rect::new(0.0, list_top, width, (window_height - list_top).max(0.0));
 
     let profile_menu = state.profile_menu && state.mode == SidebarMode::Terminals;
+    let mut terminal_rows = Vec::new();
+    for tab in tabs {
+        let expanded = !state.collapsed_tabs.contains(&tab.id);
+        let pane_count = tab.panes.len();
+        terminal_rows.push(TerminalRowSpec::Workspace {
+            tab: tab.id,
+            expanded,
+            pane_count,
+        });
+        if pane_count > 1 && expanded {
+            for (index, pane) in tab.panes.iter().enumerate() {
+                terminal_rows.push(TerminalRowSpec::Pane {
+                    tab: tab.id,
+                    pane: *pane,
+                    focused: active == Some(tab.id) && tab.focused == *pane,
+                    last: index + 1 == pane_count,
+                });
+            }
+        }
+    }
+
     let row_count = if profile_menu {
         profile_count
     } else {
         match state.mode {
-            SidebarMode::Terminals => tabs.len(),
+            SidebarMode::Terminals => terminal_rows.len(),
             SidebarMode::Files => file_count,
         }
     };
@@ -229,7 +296,7 @@ pub fn layout(
     let scroll = state.scroll.clamp(0.0, max_scroll);
     let start_y = list.y + padding - scroll;
 
-    let mut items = Vec::with_capacity(tabs.len());
+    let mut rows = Vec::with_capacity(terminal_rows.len());
     let mut file_items = Vec::with_capacity(file_count);
     let mut profile_items = Vec::with_capacity(profile_count);
 
@@ -257,44 +324,97 @@ pub fn layout(
     } else {
         match state.mode {
             SidebarMode::Terminals => {
-                for (index, tab) in tabs.iter().enumerate() {
+                for (index, row) in terminal_rows.iter().enumerate() {
                     let item_rect = row_rect(index);
-
-                    // Fully clipped rows are skipped so quads never leave the list.
                     if item_rect.y < list.y || item_rect.bottom() > list.bottom() {
                         continue;
                     }
 
-                    let close = Rect::new(
-                        (item_rect.right() - close_size - 6.0 * scale).max(item_rect.x),
-                        item_rect.y + (item_rect.height - close_size) / 2.0,
-                        close_size,
-                        close_size,
-                    );
-                    let label = Rect::new(
-                        item_rect.x + 10.0 * scale,
-                        item_rect.y,
-                        (close.x - item_rect.x - 14.0 * scale).max(1.0),
-                        item_rect.height,
-                    );
-
-                    items.push(SidebarItem {
-                        tab: tab.id,
-                        rect: item_rect,
-                        label,
-                        close,
-                        is_active: active == Some(tab.id),
-                    });
+                    match *row {
+                        TerminalRowSpec::Workspace {
+                            tab,
+                            expanded,
+                            pane_count,
+                        } => {
+                            let multi = pane_count > 1;
+                            let close = Rect::new(
+                                (item_rect.right() - close_size - 6.0 * scale).max(item_rect.x),
+                                item_rect.y + (item_rect.height - close_size) / 2.0,
+                                close_size,
+                                close_size,
+                            );
+                            let toggle = if multi {
+                                let size = (16.0 * scale).round();
+                                Rect::new(
+                                    item_rect.x + 6.0 * scale,
+                                    item_rect.y + (item_rect.height - size) / 2.0,
+                                    size,
+                                    size,
+                                )
+                            } else {
+                                Rect::default()
+                            };
+                            let label_x = if multi {
+                                item_rect.x + 28.0 * scale
+                            } else {
+                                item_rect.x + 10.0 * scale
+                            };
+                            let right_pad = if multi { 24.0 * scale } else { 4.0 * scale };
+                            let label = Rect::new(
+                                label_x,
+                                item_rect.y,
+                                (close.x - label_x - right_pad).max(1.0),
+                                item_rect.height,
+                            );
+                            rows.push(SidebarRow::Workspace(WorkspaceItem {
+                                tab,
+                                rect: item_rect,
+                                label,
+                                close,
+                                toggle,
+                                is_active: active == Some(tab),
+                                expanded,
+                                pane_count,
+                            }));
+                        }
+                        TerminalRowSpec::Pane {
+                            tab,
+                            pane,
+                            focused,
+                            last,
+                        } => {
+                            let close = Rect::new(
+                                (item_rect.right() - close_size - 6.0 * scale).max(item_rect.x),
+                                item_rect.y + (item_rect.height - close_size) / 2.0,
+                                close_size,
+                                close_size,
+                            );
+                            let label_x = item_rect.x + 38.0 * scale;
+                            let label = Rect::new(
+                                label_x,
+                                item_rect.y,
+                                (close.x - label_x - 4.0 * scale).max(1.0),
+                                item_rect.height,
+                            );
+                            rows.push(SidebarRow::Pane(PaneItem {
+                                tab,
+                                pane,
+                                rect: item_rect,
+                                label,
+                                close,
+                                is_focused: focused,
+                                last,
+                            }));
+                        }
+                    }
                 }
             }
             SidebarMode::Files => {
                 for index in 0..file_count {
                     let item_rect = row_rect(index);
-
                     if item_rect.y < list.y || item_rect.bottom() > list.bottom() {
                         continue;
                     }
-
                     let label = Rect::new(
                         item_rect.x + 8.0 * scale,
                         item_rect.y,
@@ -322,7 +442,7 @@ pub fn layout(
         mode_button,
         header_label,
         path_rect,
-        items,
+        rows,
         file_items,
         profile_items,
         profile_menu,
@@ -381,12 +501,27 @@ pub fn hit_test(layout: &SidebarLayout, x: f32, y: f32) -> Option<SidebarHit> {
 
     match layout.mode {
         SidebarMode::Terminals => {
-            for item in &layout.items {
-                if item.close.contains(x, y) {
-                    return Some(SidebarHit::Close(item.tab));
-                }
-                if item.rect.contains(x, y) {
-                    return Some(SidebarHit::Select(item.tab));
+            for row in &layout.rows {
+                match row {
+                    SidebarRow::Workspace(item) => {
+                        if item.pane_count > 1 && item.toggle.contains(x, y) {
+                            return Some(SidebarHit::ToggleWorkspace(item.tab));
+                        }
+                        if item.close.contains(x, y) {
+                            return Some(SidebarHit::Close(item.tab));
+                        }
+                        if item.rect.contains(x, y) {
+                            return Some(SidebarHit::Select(item.tab));
+                        }
+                    }
+                    SidebarRow::Pane(item) => {
+                        if item.close.contains(x, y) {
+                            return Some(SidebarHit::ClosePane(item.pane));
+                        }
+                        if item.rect.contains(x, y) {
+                            return Some(SidebarHit::SelectPane(item.tab, item.pane));
+                        }
+                    }
                 }
             }
         }
@@ -424,26 +559,91 @@ mod tests {
         }
     }
 
-    #[test]
-    fn hit_test_finds_items_and_close_buttons() {
-        let state = Sidebar::default();
-        let tabs = [TabSummary { id: TabId(1) }, TabSummary { id: TabId(2) }];
-        let layout = layout(&state, &tabs, Some(TabId(1)), spec(0));
+    fn tabs() -> Vec<TabSummary> {
+        vec![
+            TabSummary {
+                id: TabId(1),
+                focused: PaneId(1),
+                panes: vec![PaneId(1)],
+            },
+            TabSummary {
+                id: TabId(2),
+                focused: PaneId(2),
+                panes: vec![PaneId(2), PaneId(3)],
+            },
+        ]
+    }
 
-        let first = layout.items[0];
+    #[test]
+    fn builds_a_two_level_tree_and_hit_tests_it() {
+        let state = Sidebar::default();
+        let layout = layout(&state, &tabs(), Some(TabId(2)), spec(0));
+
+        assert_eq!(layout.rows.len(), 4);
+        let SidebarRow::Workspace(first) = layout.rows[0] else {
+            panic!("expected workspace");
+        };
+        assert_eq!(first.tab, TabId(1));
+        assert!(!first.is_active);
         assert_eq!(
-            hit_test(&layout, first.rect.x + 4.0, first.rect.y + 4.0),
+            hit_test(
+                &layout,
+                first.rect.x + 4.0,
+                first.rect.y + first.rect.height / 2.0
+            ),
             Some(SidebarHit::Select(TabId(1)))
         );
         assert_eq!(
             hit_test(&layout, first.close.x + 2.0, first.close.y + 2.0),
             Some(SidebarHit::Close(TabId(1)))
         );
+
+        let SidebarRow::Workspace(second) = layout.rows[1] else {
+            panic!("expected workspace");
+        };
+        assert!(second.is_active);
+        assert!(second.expanded);
+        assert_eq!(
+            hit_test(&layout, second.toggle.x + 2.0, second.toggle.y + 2.0),
+            Some(SidebarHit::ToggleWorkspace(TabId(2)))
+        );
+
+        let SidebarRow::Pane(child) = layout.rows[2] else {
+            panic!("expected pane");
+        };
+        assert_eq!(child.tab, TabId(2));
+        assert_eq!(child.pane, PaneId(2));
+        assert!(child.is_focused);
+        assert_eq!(
+            hit_test(&layout, child.label.x + 4.0, child.label.y + 4.0),
+            Some(SidebarHit::SelectPane(TabId(2), PaneId(2)))
+        );
+        assert_eq!(
+            hit_test(&layout, child.close.x + 2.0, child.close.y + 2.0),
+            Some(SidebarHit::ClosePane(PaneId(2)))
+        );
+    }
+
+    #[test]
+    fn collapses_workspace_children() {
+        let mut state = Sidebar::default();
+        state.collapsed_tabs.insert(TabId(2));
+        let layout = layout(&state, &tabs(), Some(TabId(2)), spec(0));
+
+        assert_eq!(layout.rows.len(), 2);
+        let SidebarRow::Workspace(second) = layout.rows[1] else {
+            panic!("expected workspace");
+        };
+        assert!(!second.expanded);
+        assert_eq!(
+            hit_test(&layout, second.toggle.x + 2.0, second.toggle.y + 2.0),
+            Some(SidebarHit::ToggleWorkspace(TabId(2)))
+        );
     }
 
     #[test]
     fn collapse_reveal_and_mode_buttons_are_clickable() {
-        let tabs = [TabSummary { id: TabId(1) }];
+        let tabs = tabs();
         let visible_state = Sidebar::default();
         let visible = layout(&visible_state, &tabs, Some(TabId(1)), spec(0));
 
@@ -489,7 +689,7 @@ mod tests {
 
         assert!(layout.profile_menu);
         assert_eq!(layout.profile_items.len(), 3);
-        assert!(layout.items.is_empty());
+        assert!(layout.rows.is_empty());
 
         let row = layout.profile_items[1];
         assert_eq!(
@@ -515,7 +715,7 @@ mod tests {
         let layout = layout(&state, &[], None, spec(3));
 
         assert_eq!(layout.file_items.len(), 3);
-        assert!(layout.items.is_empty());
+        assert!(layout.rows.is_empty());
         assert!(layout.path_rect.height > 0.0);
 
         let row = layout.file_items[1];

@@ -234,7 +234,6 @@ pub struct Workspace {
     pub tabs: Vec<Tab>,
     active: usize,
     next_id: u64,
-    next_terminal: u64,
 }
 
 impl Workspace {
@@ -243,7 +242,6 @@ impl Workspace {
             tabs: Vec::new(),
             active: 0,
             next_id: 1,
-            next_terminal: 1,
         }
     }
 
@@ -258,13 +256,11 @@ impl Workspace {
     pub fn create_terminal(&mut self) -> (TabId, PaneId) {
         let tab_id = TabId(self.alloc_id());
         let pane_id = PaneId(self.alloc_id());
-        let number = self.next_terminal;
-        self.next_terminal += 1;
 
         self.tabs.push(Tab {
             id: tab_id,
-            title: format!("Terminal {number}"),
-            default_title: format!("Terminal {number}"),
+            title: "New session".to_owned(),
+            default_title: "New session".to_owned(),
             layout: LayoutNode::Leaf(pane_id),
             focused: pane_id,
             panes: HashMap::new(),
