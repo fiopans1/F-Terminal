@@ -1,7 +1,9 @@
 use std::io::Write;
-use std::process::{Command, Stdio};
+use std::process::Stdio;
 
 use anyhow::{Context, Result, bail};
+
+use crate::process::command;
 
 /// Authentication header used for a forge API.
 pub enum Auth {
@@ -29,7 +31,7 @@ pub fn get(
     service: &str,
     hint: &str,
 ) -> Result<String> {
-    let mut command = Command::new("curl");
+    let mut command = command("curl");
     command.args([
         "-sS",
         "-L",

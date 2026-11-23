@@ -18,6 +18,67 @@ use crate::term::color::{Theme, to_linear};
 
 pub use text::CellMetrics;
 
+/// Backends to try first on this platform.
+///
+/// On Windows, DX12 avoids initializing the Vulkan loader and enumerating its
+/// adapters during startup. `WGPU_BACKEND` still wins when the user sets it.
+fn configured_backends() -> (wgpu::Backends, bool) {
+    if let Some(backends) = wgpu::Backends::from_env() {
+        return (backends, true);
+    }
+
+    #[cfg(target_os = "windows")]
+    let backends = wgpu::Backends::DX12;
+    #[cfg(target_os = "macos")]
+    let backends = wgpu::Backends::METAL;
+    #[cfg(all(unix, not(target_os = "macos")))]
+    let backends = wgpu::Backends::VULKAN | wgpu::Backends::GL;
+    #[cfg(not(any(unix, windows)))]
+    let backends = wgpu::Backends::all();
+
+    (backends, false)
+}
+
+async fn create_gpu(
+    window: Arc<Window>,
+    event_loop: &ActiveEventLoop,
+    backends: wgpu::Backends,
+) -> Result<(wgpu::Surface<'static>, Arc<GpuContext>)> {
+    let mut descriptor = wgpu::InstanceDescriptor::new_with_display_handle(Box::new(
+        event_loop.owned_display_handle(),
+    ));
+    descriptor.backends = backends;
+
+    let instance = wgpu::Instance::new(descriptor);
+    let surface = instance
+        .create_surface(window)
+        .context("failed to create the wgpu surface")?;
+
+    let adapter = instance
+        .request_adapter(&wgpu::RequestAdapterOptions {
+            power_preference: wgpu::PowerPreference::HighPerformance,
+            force_fallback_adapter: false,
+            compatible_surface: Some(&surface),
+            apply_limit_buckets: false,
+        })
+        .await
+        .context("no compatible GPU adapter found")?;
+
+    let (device, queue) = adapter
+        .request_device(&wgpu::DeviceDescriptor::default())
+        .await
+        .context("failed to create the wgpu device")?;
+
+    let gpu = Arc::new(GpuContext {
+        instance,
+        adapter,
+        device: Arc::new(device),
+        queue: Arc::new(queue),
+    });
+
+    Ok((surface, gpu))
+}
+
 /// Compute the grid that fits in a content area.
 pub fn grid_size_for(width: f32, height: f32, metrics: CellMetrics) -> GridSize {
     GridSize {
@@ -65,6 +126,24 @@ impl Renderer {
         let height = size.height.max(1);
         let scale_factor = window.scale_factor();
 
+        // Scanning every system font takes hundreds of milliseconds. Run it
+        // alongside GPU initialization instead of after it.
+        let font_worker = if shared.is_none() {
+            let preferred = config.font_family.clone();
+            match std::thread::Builder::new()
+                .name("font-load".into())
+                .spawn(move || text::FontResources::load(preferred.as_deref()))
+            {
+                Ok(worker) => Some(worker),
+                Err(error) => {
+                    log::warn!("failed to start the font worker: {error}");
+                    None
+                }
+            }
+        } else {
+            None
+        };
+
         let (surface, gpu) = if let Some(shared) = shared {
             let surface = shared
                 .gpu
@@ -73,39 +152,22 @@ impl Renderer {
                 .context("failed to create the wgpu surface")?;
             (surface, shared.gpu.clone())
         } else {
-            let instance = wgpu::Instance::new(wgpu::InstanceDescriptor::new_with_display_handle(
-                Box::new(event_loop.owned_display_handle()),
-            ));
-
-            let surface = instance
-                .create_surface(window.clone())
-                .context("failed to create the wgpu surface")?;
-
-            let adapter = instance
-                .request_adapter(&wgpu::RequestAdapterOptions {
-                    power_preference: wgpu::PowerPreference::HighPerformance,
-                    force_fallback_adapter: false,
-                    compatible_surface: Some(&surface),
-                    apply_limit_buckets: false,
-                })
-                .await
-                .context("no compatible GPU adapter found")?;
-
-            let (device, queue) = adapter
-                .request_device(&wgpu::DeviceDescriptor::default())
-                .await
-                .context("failed to create the wgpu device")?;
-
-            let gpu = Arc::new(GpuContext {
-                instance,
-                adapter,
-                device: Arc::new(device),
-                queue: Arc::new(queue),
-            });
-            (surface, gpu)
+            let (backends, explicit) = configured_backends();
+            match create_gpu(window.clone(), event_loop, backends).await {
+                Ok(pair) => pair,
+                Err(error) if !explicit && backends != wgpu::Backends::all() => {
+                    log::warn!(
+                        "GPU backend {backends:?} is unavailable; retrying with all backends: {error:#}"
+                    );
+                    create_gpu(window.clone(), event_loop, wgpu::Backends::all()).await?
+                }
+                Err(error) => return Err(error),
+            }
         };
 
         let capabilities = surface.get_capabilities(&gpu.adapter);
+        let adapter_info = gpu.adapter.get_info();
+        log::debug!("GPU: {} ({:?})", adapter_info.name, adapter_info.backend);
         let format = capabilities
             .formats
             .iter()
@@ -148,12 +210,23 @@ impl Renderer {
             [width as f32, height as f32],
         );
 
-        let shared_text = shared.map(|shared| shared.text.clone()).unwrap_or_else(|| {
-            Rc::new(RefCell::new(text::SharedText::new(
-                gpu.device.as_ref(),
-                config,
-            )))
+        let preloaded_fonts = font_worker.and_then(|worker| match worker.join() {
+            Ok(fonts) => Some(fonts),
+            Err(_) => {
+                log::warn!("the font worker panicked; loading fonts on the UI thread");
+                None
+            }
         });
+        let shared_text = if let Some(shared) = shared {
+            shared.text.clone()
+        } else {
+            let fonts = preloaded_fonts
+                .unwrap_or_else(|| text::FontResources::load(config.font_family.as_deref()));
+            Rc::new(RefCell::new(text::SharedText::new_with_fonts(
+                gpu.device.as_ref(),
+                fonts,
+            )))
+        };
         let text = text::TextPipeline::new(
             gpu.device.as_ref(),
             gpu.queue.as_ref(),

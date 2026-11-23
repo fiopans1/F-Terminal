@@ -137,7 +137,7 @@ fn token(remote: &RemoteInfo, tokens: &ForgeTokens) -> Option<String> {
             static GLAB_TOKEN: OnceLock<Option<String>> = OnceLock::new();
             GLAB_TOKEN
                 .get_or_init(|| {
-                    let host_output = std::process::Command::new("glab")
+                    let host_output = crate::process::command("glab")
                         .args(["auth", "token", "--hostname", &remote.host])
                         .output()
                         .ok();
@@ -150,7 +150,7 @@ fn token(remote: &RemoteInfo, tokens: &ForgeTokens) -> Option<String> {
                         }
                     }
 
-                    let output = std::process::Command::new("glab")
+                    let output = crate::process::command("glab")
                         .args(["auth", "token"])
                         .output()
                         .ok()?;

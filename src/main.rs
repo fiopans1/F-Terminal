@@ -15,6 +15,7 @@ mod highlight;
 mod input;
 mod layout;
 mod menu;
+mod process;
 mod pty;
 mod render;
 mod review;

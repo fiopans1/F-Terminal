@@ -18,10 +18,11 @@ use winit::keyboard::{Key, KeyCode, ModifiersState, NamedKey, PhysicalKey};
 use winit::window::{Window, WindowId};
 
 use crate::complete;
+use crate::complete::history::History;
 use crate::config::{Config, RenderMode};
 use crate::editor::Editor;
 use crate::event::UserEvent;
-use crate::explorer::FileExplorer;
+use crate::explorer::{FileExplorer, FileRow};
 use crate::git_status::{self, GitStatus};
 use crate::git_window::GitWindow;
 use crate::highlight::{self, HighlightRequest, StyledSpan};
@@ -32,7 +33,7 @@ use crate::render::quads::Quad;
 use crate::render::scene::{GhostText, Label, PaneLayer, Scene};
 use crate::render::{CellMetrics, Renderer, SharedRenderResources, grid_size_for};
 use crate::review_window::ReviewWindow;
-use crate::shell::ShellCatalog;
+use crate::shell::{ShellCatalog, TerminalProfile};
 use crate::sidebar::{
     self, LayoutSpec, Sidebar, SidebarHit, SidebarLayout, SidebarMode, SidebarRow, TabSummary,
 };
@@ -423,6 +424,15 @@ impl ApplicationHandler<UserEvent> for App {
             UserEvent::CompletionCommands(commands) => {
                 state.on_completion_commands(commands, &self.config);
             }
+            UserEvent::CompletionHistory(history) => {
+                state.on_completion_history(history);
+            }
+            UserEvent::ShellProfiles(profiles) => {
+                state.on_shell_profiles(profiles, &self.config);
+            }
+            UserEvent::ExplorerLoaded { root, rows, error } => {
+                state.on_explorer_loaded(root, rows, error, &self.config);
+            }
             UserEvent::OpenCodeReview { .. }
             | UserEvent::OpenGitManager { .. }
             | UserEvent::ReviewLoaded { .. }
@@ -509,6 +519,7 @@ struct WindowState {
     sidebar: Sidebar,
     view: ViewLayout,
     modifiers: ModifiersState,
+    window_focused: bool,
     cursor_position: PhysicalPosition<f64>,
     scroll_accumulators: HashMap<PaneId, f32>,
     drag: Option<DragState>,
@@ -571,32 +582,24 @@ impl WindowState {
         config: &Config,
         proxy: EventLoopProxy<UserEvent>,
     ) -> anyhow::Result<Self> {
+        let startup = Instant::now();
         let attributes = Window::default_attributes()
             .with_title("F-Terminal")
             .with_inner_size(LogicalSize::new(1100.0, 700.0))
-            .with_min_inner_size(LogicalSize::new(520.0, 260.0));
+            .with_min_inner_size(LogicalSize::new(520.0, 260.0))
+            .with_visible(false);
         let window = Arc::new(event_loop.create_window(attributes)?);
         window.set_ime_allowed(true);
 
         let renderer = pollster::block_on(Renderer::new(window.clone(), event_loop, config, None))?;
+        log::info!("renderer ready in {:?}", startup.elapsed());
+
         let mut workspace = Workspace::new();
         workspace.create_terminal();
         let working_directory = default_directory();
         log::info!("working directory: {}", working_directory.display());
         let highlight_tx = highlight::spawn_worker(proxy.clone());
-        let completion = complete::Engine::new(config.completions && config.completion_history);
-        if config.completions && config.completion_commands {
-            let index_proxy = proxy.clone();
-            if let Err(error) = std::thread::Builder::new()
-                .name("completion-index".into())
-                .spawn(move || {
-                    let commands = complete::commands::index_path();
-                    let _ = index_proxy.send_event(UserEvent::CompletionCommands(commands));
-                })
-            {
-                log::warn!("failed to start the completion index worker: {error}");
-            }
-        }
+        let completion = complete::Engine::new(false);
         let shells = ShellCatalog::detect(config.shell.as_deref());
         log::info!(
             "detected {} shell profile(s), default: {}",
@@ -618,17 +621,18 @@ impl WindowState {
             renderer,
             workspace,
             proxy,
-            clipboard: arboard::Clipboard::new().ok(),
+            clipboard: None,
             sidebar: Sidebar::default(),
             view: ViewLayout::empty(),
             modifiers: ModifiersState::empty(),
+            window_focused: true,
             cursor_position: PhysicalPosition::new(0.0, 0.0),
             scroll_accumulators: HashMap::new(),
             drag: None,
             selecting: None,
             last_click: None,
             processes: System::new().ok(),
-            explorer: FileExplorer::new(working_directory),
+            explorer: FileExplorer::empty(working_directory),
             editor: None,
             highlight_tx,
             highlight_generation: 0,
@@ -652,10 +656,18 @@ impl WindowState {
         };
 
         state.sync_layout(config)?;
-        state.refresh_git_statuses();
         state.update_window_title();
-        state.window.request_redraw();
 
+        // Paint once while the window is still hidden so Windows never shows
+        // an unpainted white frame. Rendering a second time after showing
+        // covers platforms that ignore presents on hidden surfaces.
+        state.on_redraw(config);
+        state.window.set_visible(true);
+        state.on_redraw(config);
+        state.window.request_redraw();
+        state.start_deferred_workers(config);
+
+        log::info!("first frame in {:?}", startup.elapsed());
         log::info!(
             "started with {}x{} grid, cell {:.2}x{:.2}px, scale {:.1}",
             state
@@ -676,6 +688,63 @@ impl WindowState {
         );
 
         Ok(state)
+    }
+
+    /// Start work that is not needed for the first frame. These workers only
+    /// touch the UI through `UserEvent`s, so startup stays responsive.
+    fn start_deferred_workers(&mut self, config: &Config) {
+        if config.completions && config.completion_history {
+            let proxy = self.proxy.clone();
+            if let Err(error) = std::thread::Builder::new()
+                .name("completion-history".into())
+                .spawn(move || {
+                    let history = History::load_standard();
+                    let _ = proxy.send_event(UserEvent::CompletionHistory(history));
+                })
+            {
+                log::warn!("failed to start the completion history worker: {error}");
+            }
+        }
+
+        if config.completions && config.completion_commands {
+            let proxy = self.proxy.clone();
+            if let Err(error) = std::thread::Builder::new()
+                .name("completion-index".into())
+                .spawn(move || {
+                    let commands = complete::commands::index_path();
+                    let _ = proxy.send_event(UserEvent::CompletionCommands(commands));
+                })
+            {
+                log::warn!("failed to start the completion index worker: {error}");
+            }
+        }
+
+        let root = self.explorer.root.clone();
+        let proxy = self.proxy.clone();
+        if let Err(error) = std::thread::Builder::new()
+            .name("explorer-scan".into())
+            .spawn(move || {
+                let (rows, error) = FileExplorer::scan(&root, &HashSet::new());
+                let _ = proxy.send_event(UserEvent::ExplorerLoaded { root, rows, error });
+            })
+        {
+            log::warn!("failed to start the explorer scan worker: {error}");
+            self.explorer.rebuild();
+        }
+
+        #[cfg(windows)]
+        {
+            let proxy = self.proxy.clone();
+            if let Err(error) = std::thread::Builder::new()
+                .name("wsl-profiles".into())
+                .spawn(move || {
+                    let profiles = crate::shell::detect_extra_profiles();
+                    let _ = proxy.send_event(UserEvent::ShellProfiles(profiles));
+                })
+            {
+                log::warn!("failed to start the WSL profile worker: {error}");
+            }
+        }
     }
 
     fn on_window_event(
@@ -727,6 +796,13 @@ impl WindowState {
                 self.on_mouse_wheel(delta, config);
             }
             WindowEvent::Focused(focused) => {
+                self.window_focused = focused;
+                if focused {
+                    let now = Instant::now();
+                    self.last_cwd_poll = now.checked_sub(Duration::from_millis(750)).unwrap_or(now);
+                    self.last_git_poll = now.checked_sub(Duration::from_secs(2)).unwrap_or(now);
+                }
+
                 let send_focus = self
                     .focused_pane()
                     .is_some_and(|pane| pane.terminal.mode().contains(TermMode::FOCUS_IN_OUT));
@@ -1367,6 +1443,13 @@ impl WindowState {
     fn poll_background(&mut self, config: &Config) {
         let now = Instant::now();
 
+        // Background polling is only useful while the user can see the
+        // terminal. Sleeping here also stops git processes while the window
+        // is minimized or another application owns the focus.
+        if !self.window_focused || self.window.is_minimized().unwrap_or(false) {
+            return;
+        }
+
         if now.duration_since(self.last_cwd_poll) >= Duration::from_millis(750) {
             self.last_cwd_poll = now;
             self.refresh_cwds(config);
@@ -1435,6 +1518,10 @@ impl WindowState {
     }
 
     fn next_wake(&self) -> Duration {
+        if !self.window_focused || self.window.is_minimized().unwrap_or(false) {
+            return Duration::from_secs(1);
+        }
+
         let now = Instant::now();
         let cwd_wait =
             Duration::from_millis(750).saturating_sub(now.duration_since(self.last_cwd_poll));
@@ -1686,11 +1773,18 @@ impl WindowState {
         true
     }
 
+    fn clipboard(&mut self) -> Option<&mut arboard::Clipboard> {
+        if self.clipboard.is_none() {
+            self.clipboard = arboard::Clipboard::new().ok();
+        }
+        self.clipboard.as_mut()
+    }
+
     fn paste_into_editor(&mut self) {
-        let Some(clipboard) = &mut self.clipboard else {
-            return;
-        };
-        if let Ok(text) = clipboard.get_text()
+        let text = self
+            .clipboard()
+            .and_then(|clipboard| clipboard.get_text().ok());
+        if let Some(text) = text
             && let Some(editor) = &mut self.editor
         {
             editor.insert_str(&text);
@@ -1738,7 +1832,7 @@ impl WindowState {
             return;
         }
 
-        match &mut self.clipboard {
+        match self.clipboard() {
             Some(clipboard) => {
                 if let Err(error) = clipboard.set_text(text) {
                     log::warn!("clipboard copy failed: {error}");
@@ -1749,7 +1843,7 @@ impl WindowState {
     }
 
     fn paste(&mut self) {
-        let Some(clipboard) = &mut self.clipboard else {
+        let Some(clipboard) = self.clipboard() else {
             log::warn!("clipboard is unavailable");
             return;
         };
@@ -1850,6 +1944,35 @@ impl WindowState {
         self.completion.set_commands(commands);
         self.refresh_completion(config);
         self.window.request_redraw();
+    }
+
+    fn on_completion_history(&mut self, history: History) {
+        self.completion.set_history(history);
+    }
+
+    fn on_shell_profiles(&mut self, profiles: Vec<TerminalProfile>, config: &Config) {
+        let added = self.shells.merge_profiles(profiles);
+        if added > 0 {
+            log::info!("discovered {added} additional shell profile(s)");
+            self.relayout(config);
+        }
+    }
+
+    fn on_explorer_loaded(
+        &mut self,
+        root: PathBuf,
+        rows: Vec<FileRow>,
+        error: Option<String>,
+        config: &Config,
+    ) {
+        if self.explorer.root != root || !self.explorer.rows.is_empty() {
+            return;
+        }
+
+        self.explorer.apply_scan(rows, error);
+        if self.sidebar.mode == SidebarMode::Files {
+            self.relayout(config);
+        }
     }
 
     fn clear_completion(&mut self) {
@@ -3061,7 +3184,7 @@ impl WindowState {
                 }
             }
             Event::ClipboardStore(_, text) => {
-                if let Some(clipboard) = &mut self.clipboard
+                if let Some(clipboard) = self.clipboard()
                     && let Err(error) = clipboard.set_text(text)
                 {
                     log::warn!("OSC 52 clipboard store failed: {error}");
@@ -3069,8 +3192,7 @@ impl WindowState {
             }
             Event::ClipboardLoad(_, formatter) => {
                 let text = self
-                    .clipboard
-                    .as_mut()
+                    .clipboard()
                     .and_then(|clipboard| clipboard.get_text().ok())
                     .unwrap_or_default();
                 let response = formatter(&text);

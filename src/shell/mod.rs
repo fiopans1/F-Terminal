@@ -85,6 +85,23 @@ impl ShellCatalog {
         self.profiles.iter().find(|profile| profile.id == id)
     }
 
+    /// Add profiles discovered after startup (for example WSL distributions),
+    /// preserving the current default profile. Returns how many were added.
+    pub fn merge_profiles(&mut self, profiles: Vec<TerminalProfile>) -> usize {
+        let mut added = 0;
+        for profile in profiles {
+            if self
+                .profiles
+                .iter()
+                .all(|existing| existing.id != profile.id)
+            {
+                self.profiles.push(profile);
+                added += 1;
+            }
+        }
+        added
+    }
+
     pub fn index_of(&self, id: &str) -> Option<usize> {
         self.profiles.iter().position(|profile| profile.id == id)
     }
@@ -93,6 +110,15 @@ impl ShellCatalog {
         self.get(&self.default_id)
             .unwrap_or_else(|| &self.profiles[0])
     }
+}
+
+/// Detect shell profiles that are too slow to enumerate during startup.
+///
+/// On Windows this queries WSL for its installed distributions. The call can
+/// take seconds, so callers must run it on a worker thread.
+#[cfg(windows)]
+pub fn detect_extra_profiles() -> Vec<TerminalProfile> {
+    windows::wsl_profiles()
 }
 
 /// Translate a Windows path into the Linux path expected by `wsl.exe --cd`.

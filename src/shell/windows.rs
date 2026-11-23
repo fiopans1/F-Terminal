@@ -1,8 +1,8 @@
 use std::env;
 use std::path::{Path, PathBuf};
-use std::process::Command;
 
 use super::{CwdMode, TerminalProfile};
+use crate::process::command;
 
 pub fn detect(profiles: &mut Vec<TerminalProfile>, preferred: Option<&str>) {
     let mut candidates = Vec::new();
@@ -87,23 +87,35 @@ pub fn detect(profiles: &mut Vec<TerminalProfile>, preferred: Option<&str>) {
             env: env.clone(),
             cwd_mode: CwdMode::Wsl { distro: None },
         });
-
-        for distro in wsl_distros(&wsl) {
-            candidates.push(TerminalProfile {
-                id: format!("windows:wsl:{distro}"),
-                name: format!("{distro} (WSL)"),
-                short: "WSL".to_owned(),
-                program: wsl.clone(),
-                args: vec!["-d".to_owned(), distro.clone()],
-                env: env.clone(),
-                cwd_mode: CwdMode::Wsl {
-                    distro: Some(distro),
-                },
-            });
-        }
     }
 
     profiles.extend(candidates);
+}
+
+/// Enumerate WSL distributions discovered after startup.
+///
+/// `wsl.exe --list` can take seconds to answer, so this runs on a worker
+/// thread and its profiles are merged into the catalog when they arrive.
+pub fn wsl_profiles() -> Vec<TerminalProfile> {
+    let Some(wsl) = wsl_exe() else {
+        return Vec::new();
+    };
+    let env = wsl_env();
+
+    wsl_distros(&wsl)
+        .into_iter()
+        .map(|distro| TerminalProfile {
+            id: format!("windows:wsl:{distro}"),
+            name: format!("{distro} (WSL)"),
+            short: "WSL".to_owned(),
+            program: wsl.clone(),
+            args: vec!["-d".to_owned(), distro.clone()],
+            env: env.clone(),
+            cwd_mode: CwdMode::Wsl {
+                distro: Some(distro),
+            },
+        })
+        .collect()
 }
 
 fn simple(id: &str, name: &str, short: &str, program: PathBuf, args: Vec<&str>) -> TerminalProfile {
@@ -144,14 +156,14 @@ fn cmd_exe() -> Option<PathBuf> {
                 .map(|root| PathBuf::from(root).join(r"System32\cmd.exe"))
                 .filter(|path| path.is_file())
         })
-        .or_else(|| where_program("cmd.exe"))
+        .or_else(|| find_program("cmd.exe"))
 }
 
 fn windows_powershell() -> Option<PathBuf> {
     env::var_os("SystemRoot")
         .map(|root| PathBuf::from(root).join(r"System32\WindowsPowerShell\v1.0\powershell.exe"))
         .filter(|path| path.is_file())
-        .or_else(|| where_program("powershell.exe"))
+        .or_else(|| find_program("powershell.exe"))
 }
 
 fn find_pwsh() -> Option<PathBuf> {
@@ -168,7 +180,7 @@ fn find_pwsh() -> Option<PathBuf> {
     candidates
         .into_iter()
         .find(|path| path.is_file())
-        .or_else(|| where_program("pwsh.exe"))
+        .or_else(|| find_program("pwsh.exe"))
 }
 
 fn git_bash() -> Option<PathBuf> {
@@ -182,7 +194,7 @@ fn git_bash() -> Option<PathBuf> {
         roots.push(PathBuf::from(local).join(r"Programs\Git"));
     }
 
-    if let Some(git) = where_program("git.exe")
+    if let Some(git) = find_program("git.exe")
         && let Some(root) = git.parent().and_then(Path::parent)
     {
         roots.push(root.to_path_buf());
@@ -218,11 +230,11 @@ fn wsl_exe() -> Option<PathBuf> {
     env::var_os("SystemRoot")
         .map(|root| PathBuf::from(root).join(r"System32\wsl.exe"))
         .filter(|path| path.is_file())
-        .or_else(|| where_program("wsl.exe"))
+        .or_else(|| find_program("wsl.exe"))
 }
 
 fn wsl_distros(wsl: &Path) -> Vec<String> {
-    let Ok(output) = Command::new(wsl).args(["-l", "-q"]).output() else {
+    let Ok(output) = command(wsl).args(["-l", "-q"]).output() else {
         return Vec::new();
     };
     if !output.status.success() {
@@ -268,16 +280,38 @@ fn wsl_env() -> Vec<(String, String)> {
     )]
 }
 
-fn where_program(name: &str) -> Option<PathBuf> {
-    let output = Command::new("where.exe").arg(name).output().ok()?;
-    if !output.status.success() {
-        return None;
+/// Resolve a program through `PATH` without spawning `where.exe`.
+///
+/// This keeps startup synchronous and instant: `where.exe` is a console
+/// process, which would both cost a process launch and flash a terminal
+/// window on Windows.
+fn find_program(name: &str) -> Option<PathBuf> {
+    let path = env::var_os("PATH")?;
+    let has_extension = Path::new(name).extension().is_some();
+    let extensions: Vec<String> = if has_extension {
+        Vec::new()
+    } else {
+        env::var("PATHEXT")
+            .unwrap_or_else(|_| ".COM;.EXE;.BAT;.CMD".to_owned())
+            .split(';')
+            .filter(|extension| !extension.is_empty())
+            .map(|extension| extension.to_ascii_lowercase())
+            .collect()
+    };
+
+    for directory in env::split_paths(&path) {
+        let direct = directory.join(name);
+        if direct.is_file() {
+            return Some(direct);
+        }
+
+        for extension in &extensions {
+            let candidate = directory.join(format!("{name}{extension}"));
+            if candidate.is_file() {
+                return Some(candidate);
+            }
+        }
     }
 
-    String::from_utf8_lossy(&output.stdout)
-        .lines()
-        .map(str::trim)
-        .filter(|line| !line.is_empty())
-        .map(PathBuf::from)
-        .find(|path| path.is_file())
+    None
 }

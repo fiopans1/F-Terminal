@@ -108,7 +108,7 @@ fn token(tokens: &ForgeTokens) -> Option<String> {
             static GH_TOKEN: OnceLock<Option<String>> = OnceLock::new();
             GH_TOKEN
                 .get_or_init(|| {
-                    let output = std::process::Command::new("gh")
+                    let output = crate::process::command("gh")
                         .args(["auth", "token"])
                         .output()
                         .ok()?;

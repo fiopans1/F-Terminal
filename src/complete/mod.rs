@@ -120,6 +120,16 @@ impl Engine {
         self.commands = Some(commands);
     }
 
+    /// Install history loaded by a background worker.
+    pub fn set_history(&mut self, history: History) {
+        log::info!(
+            "completion history: {} commands, {} KB",
+            history.len(),
+            history.bytes() / 1024
+        );
+        self.history = history;
+    }
+
     pub fn add_history(&mut self, command: &str) {
         self.history.add(command);
     }

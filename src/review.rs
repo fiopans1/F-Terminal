@@ -1,10 +1,10 @@
 use std::fs;
 use std::path::{Path, PathBuf};
-use std::process::Command;
 
 use anyhow::{Context, Result, bail};
 
 use crate::forge::{self, ForgeKind, ForgeTokens};
+use crate::process::command;
 
 const MAX_DIFF_LINES: usize = 50_000;
 const MAX_UNTRACKED_BYTES: usize = 512 * 1024;
@@ -635,7 +635,7 @@ fn git(repo: &Path, args: &[&str]) -> Result<String> {
 }
 
 fn git_at(repo: &Path, args: &[&str]) -> Result<String> {
-    let output = Command::new("git")
+    let output = command("git")
         .arg("-c")
         .arg("color.ui=false")
         .arg("-c")

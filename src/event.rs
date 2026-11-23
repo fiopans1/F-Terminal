@@ -3,12 +3,15 @@ use std::path::PathBuf;
 use alacritty_terminal::event::Event;
 use winit::window::WindowId;
 
+use crate::complete::history::History;
+use crate::explorer::FileRow;
 use crate::forge::RemoteChange;
 use crate::git::{Snapshot, StatusSnapshot};
 use crate::git_status::GitStatus;
 use crate::highlight::StyledSpan;
 use crate::menu::Action;
 use crate::review::ReviewDetail;
+use crate::shell::TerminalProfile;
 use crate::workspace::PaneId;
 
 /// Events sent from background threads (PTY readers, terminal event proxy)
@@ -24,6 +27,17 @@ pub enum UserEvent {
     Term { pane: PaneId, event: Event },
     /// Executable names discovered in `PATH` for completion.
     CompletionCommands(Vec<String>),
+    /// Shell history loaded by a background worker.
+    CompletionHistory(History),
+    /// Extra shell profiles discovered after startup (WSL distributions).
+    #[cfg_attr(not(windows), allow(dead_code))]
+    ShellProfiles(Vec<TerminalProfile>),
+    /// Initial directory scan for the file explorer sidebar.
+    ExplorerLoaded {
+        root: PathBuf,
+        rows: Vec<FileRow>,
+        error: Option<String>,
+    },
     /// Action selected from the native macOS menu.
     #[cfg_attr(not(target_os = "macos"), allow(dead_code))]
     Menu(Action),

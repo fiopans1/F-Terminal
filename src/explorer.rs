@@ -24,15 +24,41 @@ pub struct FileExplorer {
 }
 
 impl FileExplorer {
+    #[cfg(test)]
     pub fn new(root: PathBuf) -> Self {
-        let mut explorer = Self {
+        let mut explorer = Self::empty(root);
+        explorer.rebuild();
+        explorer
+    }
+
+    /// Create an explorer without walking the directory. The initial scan can
+    /// be done on a worker thread so it never delays the first frame.
+    pub fn empty(root: PathBuf) -> Self {
+        Self {
             root,
             expanded: HashSet::new(),
             rows: Vec::new(),
             error: None,
-        };
-        explorer.rebuild();
-        explorer
+        }
+    }
+
+    /// Scan a directory tree for a deferred initial load.
+    pub fn scan(root: &Path, expanded: &HashSet<PathBuf>) -> (Vec<FileRow>, Option<String>) {
+        if !root.is_dir() {
+            return (
+                Vec::new(),
+                Some(format!("not a directory: {}", root.display())),
+            );
+        }
+
+        let mut rows = Vec::new();
+        walk_directory(root, 0, expanded, &mut rows);
+        (rows, None)
+    }
+
+    pub fn apply_scan(&mut self, rows: Vec<FileRow>, error: Option<String>) {
+        self.rows = rows;
+        self.error = error;
     }
 
     pub fn set_root(&mut self, root: PathBuf) {
@@ -45,17 +71,9 @@ impl FileExplorer {
     }
 
     pub fn rebuild(&mut self) {
-        self.rows.clear();
-        self.error = None;
-
-        if !self.root.is_dir() {
-            self.error = Some(format!("not a directory: {}", self.root.display()));
-            return;
-        }
-
-        let mut rows = Vec::new();
-        walk_directory(&self.root, 0, &self.expanded, &mut rows);
+        let (rows, error) = Self::scan(&self.root, &self.expanded);
         self.rows = rows;
+        self.error = error;
     }
 
     pub fn toggle(&mut self, path: &Path) {

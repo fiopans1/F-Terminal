@@ -4,6 +4,7 @@ use std::process::{Command, Stdio};
 use winit::event_loop::EventLoopProxy;
 
 use crate::event::UserEvent;
+use crate::process::command as process_command;
 
 /// Actions that can be triggered from the macOS menu or from keyboard
 /// shortcuts. Keeping them in one enum avoids duplicating behavior between
@@ -49,23 +50,23 @@ pub fn open_settings() {
 fn explorer_command(directory: &Path) -> Command {
     #[cfg(target_os = "macos")]
     {
-        let mut command = Command::new("/usr/bin/open");
-        command.arg(directory);
-        command
+        let mut cmd = process_command("/usr/bin/open");
+        cmd.arg(directory);
+        cmd
     }
 
     #[cfg(target_os = "windows")]
     {
-        let mut command = Command::new("explorer.exe");
-        command.arg(directory);
-        command
+        let mut cmd = process_command("explorer.exe");
+        cmd.arg(directory);
+        cmd
     }
 
     #[cfg(all(unix, not(target_os = "macos")))]
     {
-        let mut command = Command::new("xdg-open");
-        command.arg(directory);
-        command
+        let mut cmd = process_command("xdg-open");
+        cmd.arg(directory);
+        cmd
     }
 }
 
@@ -80,7 +81,7 @@ fn code_command(directory: &Path) -> Command {
     #[cfg(not(target_os = "macos"))]
     let program = "code";
 
-    let mut command = Command::new(program);
+    let mut command = process_command(program);
     command.arg(directory);
     command
 }

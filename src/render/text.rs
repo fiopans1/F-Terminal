@@ -35,21 +35,48 @@ struct TextAtlasBundle {
     renderer: TextRenderer,
 }
 
-impl SharedText {
-    pub(crate) fn new(device: &wgpu::Device, config: &Config) -> Self {
+/// CPU-side font state that can be built on a worker thread while the GPU
+/// device is being initialized.
+pub(crate) struct FontResources {
+    font_system: FontSystem,
+    swash_cache: SwashCache,
+    family: String,
+    ui_family: String,
+}
+
+impl FontResources {
+    /// Scan system fonts and pick the terminal and UI families.
+    ///
+    /// `FontSystem::new` loads every installed face and is one of the slowest
+    /// parts of startup, so callers should run it concurrently with GPU setup.
+    pub(crate) fn load(preferred: Option<&str>) -> Self {
         let mut font_system = FontSystem::new();
-        let family = choose_terminal_family(&mut font_system, config.font_family.as_deref());
+        let family = choose_terminal_family(&mut font_system, preferred);
         let ui_family = choose_ui_family(&mut font_system, &family);
-        let swash_cache = SwashCache::new();
-        let cache = Cache::new(device);
 
         Self {
             font_system,
-            swash_cache,
-            cache,
-            atlases: HashMap::new(),
+            swash_cache: SwashCache::new(),
             family,
             ui_family,
+        }
+    }
+}
+
+impl SharedText {
+    #[cfg(test)]
+    pub(crate) fn new(device: &wgpu::Device, config: &Config) -> Self {
+        Self::new_with_fonts(device, FontResources::load(config.font_family.as_deref()))
+    }
+
+    pub(crate) fn new_with_fonts(device: &wgpu::Device, fonts: FontResources) -> Self {
+        Self {
+            font_system: fonts.font_system,
+            swash_cache: fonts.swash_cache,
+            cache: Cache::new(device),
+            atlases: HashMap::new(),
+            family: fonts.family,
+            ui_family: fonts.ui_family,
         }
     }
 }
