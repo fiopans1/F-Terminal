@@ -372,6 +372,75 @@ fn clean_token(token: Option<String>) -> Option<String> {
     })
 }
 
+/// Persist a runtime font-size change in `config.toml`, keeping the rest of
+/// the file (comments and other sections) untouched.
+pub fn save_font_size(font_size: f32) -> std::io::Result<()> {
+    let Some(path) = config_path() else {
+        return Err(std::io::Error::new(
+            std::io::ErrorKind::NotFound,
+            "could not resolve the config path",
+        ));
+    };
+    if let Some(parent) = path.parent() {
+        fs::create_dir_all(parent)?;
+    }
+    if !path.exists() {
+        let _ = write_default_config(&path);
+    }
+    let text = fs::read_to_string(&path).unwrap_or_else(|_| default_template());
+    fs::write(&path, update_font_size(&text, font_size))
+}
+
+fn update_font_size(text: &str, font_size: f32) -> String {
+    let value = format!("font_size = {font_size:.1}");
+    let newline = if text.contains("\r\n") { "\r\n" } else { "\n" };
+    let mut lines = Vec::new();
+    let mut in_appearance = false;
+    let mut saw_appearance = false;
+    let mut inserted = false;
+
+    for line in text.lines() {
+        let trimmed = line.trim();
+        if trimmed.eq_ignore_ascii_case("[appearance]") {
+            saw_appearance = true;
+            in_appearance = true;
+            lines.push(line.to_owned());
+            continue;
+        }
+        if in_appearance && trimmed.starts_with('[') && trimmed.ends_with(']') {
+            if !inserted {
+                lines.push(value.clone());
+                inserted = true;
+            }
+            in_appearance = false;
+        }
+        if in_appearance
+            && trimmed
+                .split_once('=')
+                .is_some_and(|(key, _)| key.trim() == "font_size")
+        {
+            lines.push(value.clone());
+            inserted = true;
+            continue;
+        }
+        lines.push(line.to_owned());
+    }
+
+    if saw_appearance && in_appearance && !inserted {
+        lines.push(value.clone());
+    } else if !saw_appearance {
+        lines.push(String::new());
+        lines.push("[appearance]".to_owned());
+        lines.push(value);
+    }
+
+    let mut result = lines.join(newline);
+    if !result.ends_with(newline) {
+        result.push_str(newline);
+    }
+    result
+}
+
 pub fn config_path() -> Option<PathBuf> {
     if let Some(path) = std::env::var_os("F_TERMINAL_CONFIG") {
         let path = PathBuf::from(path);
@@ -621,6 +690,29 @@ hidden_scrollback_lines = 0
         assert!(config.shell.is_none());
         assert!(config.forge_tokens.github.is_none());
         assert!(config.forge_tokens.gitlab.is_none());
+    }
+
+    #[test]
+    fn updates_font_size_in_place() {
+        let text =
+            "[appearance]\nfont_size = 14.0\nui_font_size = 12.5\n\n[terminal]\nfont_size = 99.0\n";
+        let updated = update_font_size(text, 16.0);
+        assert!(updated.contains("[appearance]\nfont_size = 16.0\nui_font_size = 12.5"));
+        assert!(updated.contains("[terminal]\nfont_size = 99.0"));
+    }
+
+    #[test]
+    fn preserves_windows_line_endings_when_updating_font_size() {
+        let updated = update_font_size("[appearance]\r\nfont_size = 14.0\r\n", 16.0);
+        assert!(updated.contains("\r\nfont_size = 16.0\r\n"));
+    }
+
+    #[test]
+    fn inserts_font_size_when_missing() {
+        let updated = update_font_size("[appearance]\nui_font_size = 12.5\n", 18.0);
+        assert!(updated.contains("[appearance]\nui_font_size = 12.5\nfont_size = 18.0"));
+        let updated = update_font_size("[terminal]\nscrollback_lines = 100\n", 18.0);
+        assert!(updated.ends_with("[appearance]\nfont_size = 18.0\n"));
     }
 
     #[test]

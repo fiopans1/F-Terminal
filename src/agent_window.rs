@@ -141,6 +141,22 @@ impl AgentWindow {
         self.window.request_redraw();
     }
 
+    pub fn apply_config(&mut self, config: &Config) {
+        self.renderer.refresh_font_metrics(config);
+        self.window.request_redraw();
+    }
+
+    /// Paint once while the window is hidden, then show it. This mirrors the
+    /// main window and avoids the white flash Windows shows before the first
+    /// GPU frame.
+    pub fn reveal(&mut self, config: &Config) {
+        self.draw(config);
+        self.window.set_visible(true);
+        self.draw(config);
+        self.focus();
+        self.window.request_redraw();
+    }
+
     pub fn apply_snapshot(&mut self, snapshot: AgentSnapshot) {
         let selected = self.selected.clone();
         let changed = self.snapshot != snapshot;

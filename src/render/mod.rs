@@ -283,6 +283,11 @@ impl Renderer {
         self.text.set_scale_factor(scale_factor, config);
     }
 
+    /// Recompute the terminal cell metrics after `font_size` changes.
+    pub fn refresh_font_metrics(&mut self, config: &Config) {
+        self.text.set_scale_factor(self.scale_factor, config);
+    }
+
     pub fn resize(&mut self, size: PhysicalSize<u32>) {
         let width = size.width.max(1);
         let height = size.height.max(1);

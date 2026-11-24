@@ -1,7 +1,7 @@
 use std::fs;
 use std::path::{Path, PathBuf};
 
-use crate::process::command;
+use crate::process::git_command;
 
 /// Branch and working-tree stats for a terminal pane.
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -111,7 +111,7 @@ fn sum_numstat(text: &str) -> (usize, usize) {
 }
 
 fn run_git(dir: &Path, args: &[&str]) -> Option<String> {
-    let output = command("git")
+    let output = git_command()
         .arg("-C")
         .arg(dir)
         .args(args)

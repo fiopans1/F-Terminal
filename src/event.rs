@@ -61,6 +61,8 @@ pub enum UserEvent {
         pid: u32,
         result: Result<String, String>,
     },
+    /// Change the terminal font size at runtime.
+    SetFontSize(f32),
     /// Syntax highlighting result from the background worker.
     Highlight {
         generation: u64,

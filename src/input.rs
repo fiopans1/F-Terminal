@@ -73,7 +73,7 @@ fn encode_named(named: &NamedKey, modifiers: ModifiersState, app_cursor: bool) -
     let param = modifier_param(modifiers);
 
     match named {
-        NamedKey::Enter => Some(with_alt(vec![b'\r'], alt)),
+        NamedKey::Enter => Some(enter(shift, alt)),
         NamedKey::Tab if shift => Some(vec![0x1b, b'[', b'Z']),
         NamedKey::Tab => Some(with_alt(vec![b'\t'], alt)),
         NamedKey::Backspace => {
@@ -117,6 +117,13 @@ fn encode_named(named: &NamedKey, modifiers: ModifiersState, app_cursor: bool) -
 
         _ => None,
     }
+}
+
+fn enter(shift: bool, alt: bool) -> Vec<u8> {
+    // Shift+Enter is commonly used by TUIs (OpenCode, Claude Code, Codex) to
+    // insert a newline. Legacy terminals cannot distinguish Shift+Return, so
+    // send LF, which those apps accept as a newline.
+    with_alt(vec![if shift { b'\n' } else { b'\r' }], alt)
 }
 
 fn with_alt(mut bytes: Vec<u8>, alt: bool) -> Vec<u8> {
@@ -278,6 +285,13 @@ mod tests {
             modifier_param(ModifiersState::SHIFT | ModifiersState::ALT | ModifiersState::CONTROL),
             8
         );
+    }
+
+    #[test]
+    fn shift_enter_sends_a_linefeed() {
+        assert_eq!(enter(false, false), b"\r");
+        assert_eq!(enter(true, false), b"\n");
+        assert_eq!(enter(true, true), b"\x1b\n");
     }
 
     #[test]

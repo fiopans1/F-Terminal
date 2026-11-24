@@ -281,7 +281,16 @@ impl GitWindow {
         self.window.focus_window();
     }
 
-    pub fn request_redraw(&self) {
+    pub fn apply_config(&mut self, config: &Config) {
+        self.renderer.refresh_font_metrics(config);
+        self.window.request_redraw();
+    }
+
+    pub fn reveal(&mut self, config: &Config) {
+        self.draw(config);
+        self.window.set_visible(true);
+        self.draw(config);
+        self.focus();
         self.window.request_redraw();
     }
 

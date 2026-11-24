@@ -100,6 +100,7 @@ pub struct SidebarLayout {
     pub header: Rect,
     pub new_button: Rect,
     pub profile_button: Rect,
+    pub back_button: Rect,
     pub collapse_button: Rect,
     pub reveal_button: Rect,
     pub mode_button: Rect,
@@ -131,6 +132,7 @@ pub enum SidebarHit {
     ToggleProfiles,
     NewTerminal,
     RefreshFiles,
+    ExplorerUp,
     ToggleWorkspace(TabId),
     Select(TabId),
     SelectPane(TabId, PaneId),
@@ -234,28 +236,53 @@ pub fn layout(
         button_size,
     );
     let profile_size = (16.0 * scale).round();
-    let profile_button = Rect::new(
-        (new_button.x - 2.0 * scale - profile_size).max(0.0),
-        ((header_height - profile_size) / 2.0).max(0.0),
-        profile_size,
-        profile_size,
-    );
+    let profile_button = if state.mode == SidebarMode::Terminals {
+        Rect::new(
+            (new_button.x - 2.0 * scale - profile_size).max(0.0),
+            ((header_height - profile_size) / 2.0).max(0.0),
+            profile_size,
+            profile_size,
+        )
+    } else {
+        Rect::default()
+    };
     let collapse_button = Rect::new(
         padding,
         ((header_height - collapse_size) / 2.0).max(0.0),
         collapse_size,
         collapse_size,
     );
+    let header_right = if state.mode == SidebarMode::Terminals {
+        profile_button.x
+    } else {
+        new_button.x
+    };
     let header_label = Rect::new(
         collapse_button.right() + 8.0 * scale,
         0.0,
-        (profile_button.x - collapse_button.right() - 8.0 * scale - padding).max(1.0),
+        (header_right - collapse_button.right() - 8.0 * scale - padding).max(1.0),
         header_height,
     );
+    let back_size = (16.0 * scale).round();
+    let back_button = if state.mode == SidebarMode::Files {
+        Rect::new(
+            padding,
+            header_height + ((path_height - back_size) / 2.0).max(0.0),
+            back_size,
+            back_size,
+        )
+    } else {
+        Rect::default()
+    };
+    let path_x = if state.mode == SidebarMode::Files {
+        back_button.right() + 4.0 * scale
+    } else {
+        padding
+    };
     let path_rect = Rect::new(
-        padding,
+        path_x,
         header_height,
-        (width - padding * 2.0).max(1.0),
+        (width - path_x - padding).max(1.0),
         path_height,
     );
     let list_top = header_height + path_height;
@@ -437,6 +464,7 @@ pub fn layout(
         header,
         new_button,
         profile_button,
+        back_button,
         collapse_button,
         reveal_button: Rect::default(),
         mode_button,
@@ -484,6 +512,10 @@ pub fn hit_test(layout: &SidebarLayout, x: f32, y: f32) -> Option<SidebarHit> {
             SidebarMode::Terminals => SidebarHit::NewTerminal,
             SidebarMode::Files => SidebarHit::RefreshFiles,
         });
+    }
+
+    if layout.mode == SidebarMode::Files && layout.back_button.contains(x, y) {
+        return Some(SidebarHit::ExplorerUp);
     }
 
     if !layout.list.contains(x, y) {
@@ -717,6 +749,7 @@ mod tests {
         assert_eq!(layout.file_items.len(), 3);
         assert!(layout.rows.is_empty());
         assert!(layout.path_rect.height > 0.0);
+        assert_eq!(layout.profile_button, Rect::default());
 
         let row = layout.file_items[1];
         assert_eq!(
@@ -730,6 +763,14 @@ mod tests {
                 layout.new_button.y + 2.0
             ),
             Some(SidebarHit::RefreshFiles)
+        );
+        assert_eq!(
+            hit_test(
+                &layout,
+                layout.back_button.x + 2.0,
+                layout.back_button.y + 2.0
+            ),
+            Some(SidebarHit::ExplorerUp)
         );
     }
 }

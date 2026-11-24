@@ -142,6 +142,10 @@ impl Terminal {
         self.program_status.take_notifications()
     }
 
+    pub fn take_cwd(&mut self) -> Option<std::path::PathBuf> {
+        self.program_status.take_cwd()
+    }
+
     pub fn resize(&mut self, size: GridSize) {
         if size != self.size {
             self.term.resize(size);

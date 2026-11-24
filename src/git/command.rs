@@ -4,7 +4,7 @@ use std::process::Stdio;
 
 use anyhow::{Context, Result, bail};
 
-use crate::process::command;
+use crate::process::git_command;
 
 /// Captured output of a Git command.
 #[derive(Clone, Debug)]
@@ -30,7 +30,7 @@ pub fn run_args(repo: &Path, args: &[String]) -> Result<Output> {
 }
 
 fn run_impl(repo: &Path, args: &[&str], input: Option<&str>) -> Result<Output> {
-    let mut command = command("git");
+    let mut command = git_command();
     command
         .arg("-C")
         .arg(repo)

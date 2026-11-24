@@ -212,7 +212,8 @@ Requisitos de build:
 
 - macOS: Xcode Command Line Tools, Rust y los targets
   `aarch64-apple-darwin` y `x86_64-apple-darwin`.
-- Windows: Rust MSVC, Visual Studio Build Tools e Inno Setup 6.
+- Windows: Rust MSVC, Visual Studio Build Tools e Inno Setup 6. Para publicar
+  releases estables hace falta un certificado Authenticode OV/EV.
 - Linux: Rust, `dpkg-deb`, `rpmbuild` y `file`.
 
 El script de macOS genera un binario universal `arm64 + x86_64`. Si no hay
@@ -226,9 +227,54 @@ APPLE_ID="..." APPLE_TEAM_ID="..." APPLE_APP_PASSWORD="..." \
 ```
 
 El instalador de Windows se ejecuta **siempre para todos los usuarios**, con
-UAC y destino en `C:\Program Files\F-Terminal`. También acepta firma
-Authenticode mediante `WINDOWS_CERT_FILE` y `WINDOWS_CERT_PASSWORD` en local,
-o `WINDOWS_CERT_BASE64` en GitHub Actions.
+UAC y destino en `C:\Program Files\F-Terminal`.
+
+#### Firma Authenticode en Windows
+
+Para que Windows muestre un editor verificado hay que firmar con un
+certificado de firma de código **OV/EV emitido por una CA** (o con Azure
+Artifact Signing). Un certificado autofirmado no elimina SmartScreen.
+
+En local:
+
+```powershell
+$env:WINDOWS_CERT_FILE = "C:\ruta\certificado.pfx"
+$env:WINDOWS_CERT_PASSWORD = "contraseña"
+powershell -ExecutionPolicy Bypass -File scripts/package-windows.ps1
+```
+
+En GitHub Actions, configura estos secretos del repositorio:
+
+- `WINDOWS_CERT_BASE64`: el `.pfx` codificado en base64.
+- `WINDOWS_CERT_PASSWORD`: la contraseña del `.pfx`.
+
+```bash
+# macOS/Linux
+openssl base64 -A -in certificado.pfx -out certificado.pfx.b64
+```
+
+```powershell
+# Windows PowerShell
+[Convert]::ToBase64String([IO.File]::ReadAllBytes("certificado.pfx")) |
+    Set-Clipboard
+```
+
+Opcionalmente, `WINDOWS_TIMESTAMP_URL` permite cambiar el servidor de
+timestamp (por defecto `http://timestamp.digicert.com`). Este pipeline usa un
+PFX; para Azure Artifact Signing o un certificado en token/HSM hay que
+sustituir el paso de firma por la acción o el comando correspondiente.
+
+El script firma el ejecutable y deja que Inno Setup firme el instalador, sus
+copias temporales y el desinstalador. Después verifica el ejecutable y el
+instalador con `signtool verify /pa /v`. Los tags estables fallan si
+no hay certificado configurado; los tags prerelease (los que contienen `-`)
+pueden seguir generándose sin firma.
+
+La firma no garantiza que SmartScreen deje de avisar en la primera descarga:
+Microsoft valora también la reputación del editor y del hash del archivo. Esa
+reputación se construye con el tiempo y se hereda entre releases si se firma
+siempre con la misma identidad. La única forma de evitar el aviso de forma
+inmediata es distribuir a través de Microsoft Store.
 
 ### Instalación para usuarios
 
@@ -246,9 +292,10 @@ sudo apt install ./dist/linux/f-terminal_0.1.0-1_amd64.deb
 sudo dnf install ./dist/linux/f-terminal-0.1.0-1.x86_64.rpm
 ```
 
-Los instaladores sin firma muestran los avisos habituales de Gatekeeper en
-macOS y SmartScreen en Windows. Los `.deb`/`.rpm` usan las librerías base del
-sistema; no se incluye AppImage en esta iteración.
+Los tags prerelease (con `-` en el nombre) pueden publicarse sin firma y
+mostrar los avisos habituales de Gatekeeper en macOS o SmartScreen en Windows.
+Los tags estables de Windows exigen firma Authenticode. Los `.deb`/`.rpm` usan las librerías base
+del sistema; no se incluye AppImage en esta iteración.
 
 ---
 
@@ -292,6 +339,16 @@ Notas de Windows:
 - WSL recibe `--cd <ruta>` para traducir el cwd de Windows. Las rutas
   `\\wsl$\...` y `\\wsl.localhost\...` se convierten a su ruta Linux.
 - `WSLENV` propaga `TERM`, `COLORTERM` y `TERM_PROGRAM` a la distribución.
+- En Windows, F-Terminal pide la ruta al propio shell mediante `OSC 9;9`:
+  PowerShell 7 y Windows PowerShell envuelven su función `prompt`, `cmd.exe`
+  usa `$E]9;9;$P` en `PROMPT`, y Git Bash/MSYS2/Cygwin añaden un
+  `PROMPT_COMMAND`. Así los splits, las pestañas nuevas, el explorador y el
+  footer Git siguen el `cd` actual aunque el proceso no actualice su cwd
+  (PowerShell es el caso más claro).
+- Si `git` no está en el `PATH` del proceso, se busca en las instalaciones
+  habituales de Git for Windows, Scoop y Chocolatey antes de rendirse.
+- WSL no puede leer el cwd de su shell Linux desde Windows; los perfiles WSL
+  siguen usando la última ruta traducida que F-Terminal conoce.
 - Los perfiles WSL y Git Bash heredan `TERM=xterm-256color` y
   `COLORTERM=truecolor`.
 
@@ -582,7 +639,7 @@ Cada sesión es un workspace con uno o más panes:
 Acciones:
 
 - `+` crea una nueva sesión con el shell por defecto.
-- `▾` abre el selector de perfiles.
+- `▾` abre el selector de perfiles; solo aparece en SESSIONS.
 - `F` cambia a FILES; `T` vuelve a SESSIONS.
 - `«` colapsa la sidebar; el rail `»` la recupera.
 - Rueda del ratón para hacer scroll si hay muchas sesiones o panes.
@@ -606,6 +663,8 @@ Dentro de cada sesión:
 - Sigue el cwd real del shell enfocado.
 - Carpetas expandibles con `▸`/`▾`.
 - Archivos abribles con un clic.
+- Botón `←` para subir al directorio padre. La navegación manual se mantiene
+  hasta que cambie el cwd del shell o el pane enfocado.
 - Botón `↻` para refrescar.
 - No usa file watching: se actualiza al hacer `cd` o al refrescar.
 
@@ -1014,6 +1073,7 @@ poll_interval_ms = 2000
 | Cerrar editor | `Esc` o `Cmd+W` |
 | Copiar / pegar | `Cmd+C` / `Cmd+V` |
 | Limpiar terminal | `Cmd+K` |
+| Aumentar / reducir / restablecer letra | `Cmd+=` / `Cmd+-` / `Cmd+0` |
 
 ### Globales — Linux / Windows
 
@@ -1034,8 +1094,17 @@ poll_interval_ms = 2000
 | Abrir explorador | `Ctrl+Shift+O` |
 | Guardar en el editor | `Ctrl+S` |
 | Cerrar editor | `Esc` o `Ctrl+W` |
-| Copiar / pegar | `Ctrl+Shift+C` / `Ctrl+Shift+V` |
+| Copiar / pegar | `Ctrl+Shift+C` / `Ctrl+Shift+V`, `Ctrl+Insert` / `Shift+Insert` |
 | Limpiar terminal | `Ctrl+Shift+K` |
+| Aumentar / reducir / restablecer letra | `Ctrl+=` / `Ctrl+-` / `Ctrl+0` |
+
+El tamaño de letra del terminal se puede cambiar en caliente con esos atajos.
+El valor se guarda automáticamente en `font_size` de `config.toml`; `0`
+restablece el valor por defecto (14 pt).
+
+`Shift+Enter` envía un linefeed (`LF`) en el terminal, que es lo que usan
+OpenCode, Claude Code y Codex para insertar un salto de línea en el prompt.
+`Ctrl+J` y `Alt+Enter` también funcionan como alternativas.
 
 ### Selector de shell
 

@@ -171,6 +171,9 @@ pub struct Pane {
     pub last_output: Instant,
     /// Revision of the `OSC 7501` records already consumed by the app.
     pub program_status_revision: u64,
+    /// The shell reports its directory through `OSC 7`/`OSC 9;9`, which is
+    /// more reliable than the process cwd on Windows PowerShell.
+    pub cwd_from_shell: bool,
 }
 
 impl Pane {
@@ -198,6 +201,7 @@ impl Pane {
             suggestion_armed: false,
             last_output: Instant::now(),
             program_status_revision: 0,
+            cwd_from_shell: false,
         })
     }
 

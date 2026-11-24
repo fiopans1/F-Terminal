@@ -11,6 +11,7 @@
 //! been received.
 
 use std::collections::HashMap;
+use std::path::PathBuf;
 
 use base64::Engine;
 use base64::engine::general_purpose::{STANDARD, STANDARD_NO_PAD};
@@ -82,6 +83,7 @@ pub struct ProgramStatus {
     scanner: OscScanner,
     replies: Vec<String>,
     notifications: Vec<ProgramNotification>,
+    cwd: Option<PathBuf>,
     revision: u64,
     tick: u64,
 }
@@ -116,6 +118,12 @@ impl ProgramStatus {
 
     pub fn take_notifications(&mut self) -> Vec<ProgramNotification> {
         std::mem::take(&mut self.notifications)
+    }
+
+    /// A working directory reported by the shell through `OSC 7` or the
+    /// ConEmu/Windows Terminal `OSC 9;9` sequence.
+    pub fn take_cwd(&mut self) -> Option<PathBuf> {
+        self.cwd.take()
     }
 
     /// Records in display order (root first). Orphan child records are
@@ -177,6 +185,10 @@ impl ProgramStatus {
 
         if let Some(rest) = body.strip_prefix("7501;") {
             self.handle_program_status(rest, bel);
+        } else if let Some(rest) = body.strip_prefix("7;") {
+            self.cwd = parse_file_uri(rest);
+        } else if let Some(rest) = body.strip_prefix("9;9;") {
+            self.cwd = parse_native_cwd(rest);
         } else if let Some(rest) = body.strip_prefix("9;") {
             if !rest.starts_with("4;") {
                 self.push_notification(ProgramNotification {
@@ -336,6 +348,87 @@ impl ProgramStatus {
             self.revision = self.revision.wrapping_add(1);
         }
     }
+}
+
+fn parse_file_uri(uri: &str) -> Option<PathBuf> {
+    let rest = uri.strip_prefix("file://")?;
+    let (_, path) = rest.split_once('/')?;
+    let decoded = percent_decode(&format!("/{path}"))?;
+    uri_path_to_native(&decoded)
+}
+
+#[cfg(not(windows))]
+fn parse_native_cwd(value: &str) -> Option<PathBuf> {
+    let path = PathBuf::from(value.trim());
+    path.is_absolute().then_some(path)
+}
+
+#[cfg(windows)]
+fn parse_native_cwd(value: &str) -> Option<PathBuf> {
+    let value = value.trim();
+    let path = PathBuf::from(value);
+    if !value.starts_with('/') && path.is_absolute() {
+        return Some(path);
+    }
+
+    // Git Bash/MSYS2 and Cygwin report POSIX paths even on Windows.
+    let unix = value.replace('\\', "/");
+    let rest = unix.strip_prefix('/')?;
+    let rest = rest.strip_prefix("cygdrive/").unwrap_or(rest);
+    let (drive, tail) = rest.split_once('/')?;
+    if drive.len() != 1 || !drive.as_bytes()[0].is_ascii_alphabetic() {
+        return None;
+    }
+    let candidate = PathBuf::from(format!(
+        "{}:\\{}",
+        drive.to_ascii_uppercase(),
+        tail.replace('/', "\\")
+    ));
+    candidate.exists().then_some(candidate)
+}
+
+fn percent_decode(input: &str) -> Option<String> {
+    let bytes = input.as_bytes();
+    let mut output = Vec::with_capacity(bytes.len());
+    let mut index = 0;
+    while index < bytes.len() {
+        if bytes[index] == b'%'
+            && index + 2 < bytes.len()
+            && let (Some(high), Some(low)) =
+                (hex_digit(bytes[index + 1]), hex_digit(bytes[index + 2]))
+        {
+            output.push(high << 4 | low);
+            index += 3;
+        } else {
+            output.push(bytes[index]);
+            index += 1;
+        }
+    }
+    String::from_utf8(output).ok()
+}
+
+fn hex_digit(byte: u8) -> Option<u8> {
+    match byte {
+        b'0'..=b'9' => Some(byte - b'0'),
+        b'a'..=b'f' => Some(byte - b'a' + 10),
+        b'A'..=b'F' => Some(byte - b'A' + 10),
+        _ => None,
+    }
+}
+
+#[cfg(not(windows))]
+fn uri_path_to_native(path: &str) -> Option<PathBuf> {
+    path.starts_with('/').then(|| PathBuf::from(path))
+}
+
+#[cfg(windows)]
+fn uri_path_to_native(path: &str) -> Option<PathBuf> {
+    let path = path.replace('/', "\\");
+    // file://HOST/C:/Users/... arrives as /C:/Users/...
+    let rest = path.strip_prefix('\\')?;
+    let bytes = rest.as_bytes();
+    let drive = bytes.len() >= 2 && bytes[1] == b':' && bytes[0].is_ascii_alphabetic();
+    drive.then(|| PathBuf::from(rest))
 }
 
 fn clean_notification_text(text: &str) -> Option<String> {
@@ -587,6 +680,74 @@ mod tests {
         let before = status.snapshot();
         feed(&mut status, "\x1b]7501;state=done:msg=!!!\x1b\\");
         assert_eq!(status.snapshot(), before);
+    }
+
+    #[cfg(not(windows))]
+    #[test]
+    fn parses_osc7_working_directory() {
+        let mut status = ProgramStatus::default();
+        feed(
+            &mut status,
+            "\x1b]7;file://localhost/home/me/My%20Project\x1b\\",
+        );
+        assert_eq!(
+            status.take_cwd(),
+            Some(std::path::PathBuf::from("/home/me/My Project"))
+        );
+        assert_eq!(status.take_cwd(), None);
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn parses_osc7_windows_drive_paths() {
+        let mut status = ProgramStatus::default();
+        feed(
+            &mut status,
+            "\x1b]7;file://HOST/C:/Users/me/My%20Project\x1b\\",
+        );
+        assert_eq!(
+            status.take_cwd(),
+            Some(std::path::PathBuf::from(r"C:\Users\me\My Project"))
+        );
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn parses_msys_and_cygwin_style_paths() {
+        let directory = std::env::temp_dir();
+        let text = directory.to_string_lossy().into_owned();
+        let Some((drive, rest)) = text.split_once(":\\") else {
+            return;
+        };
+        let expected = std::path::PathBuf::from(format!(
+            "{}:\\{}",
+            drive.to_ascii_uppercase(),
+            rest.trim_end_matches('\\')
+        ));
+        let posix = format!(
+            "/{}/{}",
+            drive.to_ascii_lowercase(),
+            rest.trim_end_matches('\\').replace('\\', "/")
+        );
+        assert_eq!(parse_native_cwd(&posix), Some(expected.clone()));
+
+        let cygwin = format!(
+            "/cygdrive/{}/{}",
+            drive.to_ascii_lowercase(),
+            rest.trim_end_matches('\\').replace('\\', "/")
+        );
+        assert_eq!(parse_native_cwd(&cygwin), Some(expected));
+    }
+
+    #[cfg(not(windows))]
+    #[test]
+    fn parses_osc9_legacy_working_directory() {
+        let mut status = ProgramStatus::default();
+        feed(&mut status, "\x1b]9;9;/tmp/project\x1b\\");
+        assert_eq!(
+            status.take_cwd(),
+            Some(std::path::PathBuf::from("/tmp/project"))
+        );
     }
 
     #[test]

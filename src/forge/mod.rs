@@ -2,7 +2,7 @@ pub mod github;
 pub mod gitlab;
 pub mod http;
 
-use crate::process::command;
+use crate::process::git_command;
 use std::path::{Path, PathBuf};
 
 use anyhow::{Context, Result, bail};
@@ -260,7 +260,7 @@ fn remote_url(repo: &Path) -> Result<String> {
 }
 
 fn git(repo: &Path, args: &[&str]) -> Result<String> {
-    let output = command("git")
+    let output = git_command()
         .arg("-C")
         .arg(repo)
         .args(args)

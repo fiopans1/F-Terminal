@@ -1,5 +1,10 @@
-use std::ffi::OsStr;
+use std::ffi::{OsStr, OsString};
 use std::process::Command;
+
+#[cfg(windows)]
+use std::path::PathBuf;
+#[cfg(windows)]
+use std::sync::OnceLock;
 
 /// Build a command for a console program.
 ///
@@ -23,4 +28,42 @@ pub fn command(program: impl AsRef<OsStr>) -> Command {
     {
         Command::new(program)
     }
+}
+
+/// Git command with a Windows fallback for installs that are not on the
+/// `PATH` visible to a GUI process.
+pub fn git_command() -> Command {
+    command(git_program())
+}
+
+fn git_program() -> OsString {
+    #[cfg(windows)]
+    {
+        static GIT: OnceLock<Option<PathBuf>> = OnceLock::new();
+        let resolved = GIT.get_or_init(|| {
+            let mut candidates = Vec::new();
+            for key in ["ProgramFiles", "ProgramFiles(x86)"] {
+                if let Some(root) = std::env::var_os(key) {
+                    let root = PathBuf::from(root);
+                    candidates.push(root.join(r"Git\cmd\git.exe"));
+                    candidates.push(root.join(r"Git\bin\git.exe"));
+                }
+            }
+            if let Some(local) = std::env::var_os("LOCALAPPDATA") {
+                candidates.push(PathBuf::from(local).join(r"Programs\Git\cmd\git.exe"));
+            }
+            if let Some(profile) = std::env::var_os("USERPROFILE") {
+                candidates.push(PathBuf::from(profile).join(r"scoop\apps\git\current\cmd\git.exe"));
+            }
+            if let Some(program_data) = std::env::var_os("ProgramData") {
+                candidates.push(PathBuf::from(program_data).join(r"chocolatey\bin\git.exe"));
+            }
+            candidates.into_iter().find(|path| path.is_file())
+        });
+        if let Some(path) = resolved {
+            return path.as_os_str().to_owned();
+        }
+    }
+
+    OsString::from("git")
 }

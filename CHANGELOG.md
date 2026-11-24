@@ -16,6 +16,12 @@ usa [Versionado Semántico](https://semver.org/lang/es/).
 - Agent Mode permite forzar un escaneo inmediato con `R`/`F5` o el botón
   **REFRESH**, y terminar el proceso seleccionado con `X`/`Supr` o **KILL PID**
   (confirmación en dos pasos; `SIGTERM` y después `SIGKILL` si es necesario).
+- Zoom del terminal con `Cmd/Ctrl+=`, `Cmd/Ctrl+-` y `Cmd/Ctrl+0`; el valor se
+  guarda en `font_size` y se aplica sin reiniciar.
+- `Shift+Enter` envía `LF` para insertar saltos de línea en agentes como
+  OpenCode, Claude Code y Codex; `Ctrl+Insert`/`Shift+Insert` copian y pegan.
+- El explorador de archivos tiene un botón para subir al directorio padre y
+  mantiene la navegación manual hasta que cambie el cwd del pane.
 - Nueva sección `[agents]` en `config.toml` (`enabled`, `show_external`,
   `poll_interval_ms`).
 - `Cmd+Shift+S` / `Ctrl+Shift+S` abre `config.toml` en el editor integrado; el
@@ -42,6 +48,11 @@ usa [Versionado Semántico](https://semver.org/lang/es/).
 
 ### Changed
 
+- Las releases estables de Windows requieren firma Authenticode: se firma el
+  ejecutable, el instalador y el desinstalador de Inno Setup, se verifica la
+  firma con `signtool` y el workflow falla si faltan los secretos del
+  certificado. Los tags prerelease (con `-`) pueden seguir siendo builds sin
+  firmar.
 - GitHub Dark es ahora el tema por defecto; la plantilla documenta todas las
   paletas disponibles.
 - El gestor Git usa `Cmd+Shift+M` / `Ctrl+Shift+M`; `Ctrl+Shift+G` queda libre
@@ -59,6 +70,14 @@ usa [Versionado Semántico](https://semver.org/lang/es/).
   directorio actual.
 - El watcher de procesos de Agent Mode se reinicia si no responde en 8 segundos
   o si su hilo terminó, en lugar de quedarse sin actualizar la lista.
+- En Windows, los prompts de PowerShell, cmd y Git Bash/MSYS2/Cygwin informan
+  la ruta por `OSC 9;9`. PowerShell no actualiza el cwd del proceso con
+  `Set-Location`, así que sin ese informe los splits, las pestañas nuevas, el
+  explorador y el footer Git se quedaban en la ruta inicial.
+- El footer Git usa una ruta de búsqueda de `git` compatible con instalaciones
+  de Git for Windows, Scoop y Chocolatey que no están en el `PATH` de la GUI.
+- Las ventanas de Code Review, Git y Agent Mode se pintan una vez ocultas antes
+  de mostrarse, evitando el destello blanco inicial en Windows.
 
 ## 0.1.0 - 2026-11-22
 

@@ -82,6 +82,19 @@ if ($env:WINDOWS_CERT_BASE64) {
     $env:WINDOWS_CERT_FILE = $CertificatePath
 }
 
+if ($env:REQUIRE_WINDOWS_SIGNING -eq "1" -and -not $env:WINDOWS_CERT_FILE) {
+    throw "Windows code signing is required for release tags. Configure WINDOWS_CERT_BASE64 and WINDOWS_CERT_PASSWORD in the repository secrets."
+}
+if ($env:WINDOWS_CERT_FILE -and -not (Test-Path $env:WINDOWS_CERT_FILE)) {
+    throw "WINDOWS_CERT_FILE does not exist: $($env:WINDOWS_CERT_FILE)"
+}
+
+$TimestampUrl = if ($env:WINDOWS_TIMESTAMP_URL) {
+    $env:WINDOWS_TIMESTAMP_URL
+} else {
+    "http://timestamp.digicert.com"
+}
+
 function Find-InnoSetup {
     $candidates = @()
     if ($env:INNO_SETUP_COMPILER) {
@@ -143,7 +156,7 @@ function Sign-File([string]$Path) {
     Write-Host "[package] signing $Path"
     $arguments = @(
         "sign", "/fd", "SHA256", "/td", "SHA256",
-        "/tr", "http://timestamp.digicert.com",
+        "/tr", $TimestampUrl,
         "/f", $env:WINDOWS_CERT_FILE
     )
     if ($env:WINDOWS_CERT_PASSWORD) {
@@ -156,7 +169,63 @@ function Sign-File([string]$Path) {
     }
 }
 
+function Verify-Signature([string]$Path) {
+    if (-not $env:WINDOWS_CERT_FILE) {
+        return
+    }
+    $signtool = Get-SignTool
+    if (-not $signtool) {
+        throw "WINDOWS_CERT_FILE is set but signtool.exe was not found."
+    }
+    Write-Host "[package] verifying signature for $Path"
+    & $signtool verify /pa /v $Path
+    if ($LASTEXITCODE -ne 0) {
+        throw "signature verification failed for $Path"
+    }
+}
+
 Sign-File $StagedExe
+Verify-Signature $StagedExe
+
+$SignToolDirective = ""
+$IsccSignArgs = @()
+if ($env:WINDOWS_CERT_FILE) {
+    $signtool = Get-SignTool
+    if (-not $signtool) {
+        throw "WINDOWS_CERT_FILE is set but signtool.exe was not found."
+    }
+
+    # Inno Setup signs the generated uninstaller during compilation. Use a
+    # tiny wrapper so the certificate password never appears on the ISCC
+    # command line (and therefore never in the build log).
+    $env:WINDOWS_SIGNTOOL = $signtool
+    $env:WINDOWS_TIMESTAMP_URL = $TimestampUrl
+    $wrapperLines = @(
+        'param([Parameter(ValueFromRemainingArguments = $true)][string[]]$Files)',
+        '$arguments = @(',
+        '    "sign", "/fd", "SHA256", "/td", "SHA256",',
+        '    "/tr", $env:WINDOWS_TIMESTAMP_URL,',
+        '    "/f", $env:WINDOWS_CERT_FILE',
+        ')',
+        'if ($env:WINDOWS_CERT_PASSWORD) {',
+        '    $arguments += @("/p", $env:WINDOWS_CERT_PASSWORD)',
+        '}',
+        '$arguments += $Files',
+        '& $env:WINDOWS_SIGNTOOL @arguments',
+        'exit $LASTEXITCODE'
+    )
+    $SignWrapper = Join-Path $BuildDir "sign-uninstaller.ps1"
+    [System.IO.File]::WriteAllText(
+        $SignWrapper,
+        (($wrapperLines -join "`r`n") + "`r`n"),
+        [System.Text.Encoding]::ASCII
+    )
+
+    # `$q` and `$f` are Inno placeholders for a quote and the file being signed.
+    $SignToolDirective = "SignTool=signtool`r`nSignedUninstaller=yes"
+    $signCommand = '$q' + (Join-Path $env:SystemRoot "System32\WindowsPowerShell\v1.0\powershell.exe") + '$q -NoProfile -ExecutionPolicy Bypass -File $q' + $SignWrapper + '$q $f'
+    $IsccSignArgs = @("/Ssigntool=$signCommand")
+}
 
 $Template = Get-Content -Raw (Join-Path $RepoRoot "scripts\windows\f-terminal.iss")
 $GeneratedIss = $Template
@@ -165,6 +234,7 @@ $GeneratedIss = $GeneratedIss.Replace("@VERSION_INFO@", $VersionInfo)
 $GeneratedIss = $GeneratedIss.Replace("@REPO_ROOT@", $RepoRoot)
 $GeneratedIss = $GeneratedIss.Replace("@SOURCE_EXE@", $StagedExe)
 $GeneratedIss = $GeneratedIss.Replace("@OUTPUT_DIR@", $Dist)
+$GeneratedIss = $GeneratedIss.Replace("@SIGNTOOL_DIRECTIVE@", $SignToolDirective)
 $GeneratedPath = Join-Path $BuildDir "f-terminal.generated.iss"
 [System.IO.File]::WriteAllText(
     $GeneratedPath,
@@ -173,7 +243,7 @@ $GeneratedPath = Join-Path $BuildDir "f-terminal.generated.iss"
 )
 
 Write-Host "[package] compiling Inno Setup installer"
-& $Iscc $GeneratedPath
+& $Iscc @IsccSignArgs $GeneratedPath
 if ($LASTEXITCODE -ne 0) {
     throw "Inno Setup compilation failed."
 }
@@ -183,7 +253,9 @@ if (-not (Test-Path $Setup)) {
     throw "Expected installer was not produced: $Setup"
 }
 
-Sign-File $Setup
+# Inno Setup signs Setup, its temporary self-copies and the uninstaller while
+# compiling (SignTool directive above). Only verify the final artifact here.
+Verify-Signature $Setup
 
 if ($env:WINDOWS_CERT_BASE64 -and (Test-Path $CertificatePath)) {
     Remove-Item -Force $CertificatePath

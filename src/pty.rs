@@ -9,6 +9,77 @@ use crate::event::UserEvent;
 use crate::shell::{CwdMode, TerminalProfile, wsl_directory};
 use crate::workspace::PaneId;
 
+/// PowerShell does not keep its process current directory in sync with
+/// `Set-Location`, so `sysinfo` cannot follow `cd`. Wrap the prompt so every
+/// prompt reports `$PWD` through the ConEmu/Windows Terminal `OSC 9;9`.
+#[cfg(windows)]
+fn profile_is(profile: &TerminalProfile, id: &str, programs: &[&str]) -> bool {
+    profile.id == id
+        || profile
+            .program
+            .file_name()
+            .and_then(|name| name.to_str())
+            .is_some_and(|name| {
+                programs
+                    .iter()
+                    .any(|candidate| name.eq_ignore_ascii_case(candidate))
+            })
+}
+
+#[cfg(windows)]
+fn configure_powershell_cwd(command: &mut CommandBuilder, profile: &TerminalProfile) {
+    let powershell = ["windows:pwsh", "windows:powershell"].iter().any(|id| {
+        profile_is(
+            profile,
+            id,
+            &["pwsh.exe", "powershell.exe", "pwsh", "powershell"],
+        )
+    });
+    if !powershell
+        || profile.args.iter().any(|arg| {
+            matches!(
+                arg.to_ascii_lowercase().as_str(),
+                "-command" | "-c" | "-file" | "-f"
+            )
+        })
+    {
+        return;
+    }
+
+    command.arg("-NoExit");
+    command.arg("-Command");
+    command.arg(
+        r#"$global:__ft_prompt = $function:prompt; function global:prompt { $__ft_loc = Get-Location; if ($__ft_loc.Provider.Name -eq 'FileSystem') { $__ft_esc = [char]27; [Console]::Write($__ft_esc + ']9;9;' + $__ft_loc.Path + $__ft_esc + '\') }; if ($global:__ft_prompt) { & $global:__ft_prompt } else { "PS $($__ft_loc.Path)> " } }"#,
+    );
+}
+
+#[cfg(windows)]
+fn configure_cmd_cwd(command: &mut CommandBuilder, profile: &TerminalProfile) {
+    if !profile_is(profile, "windows:cmd", &["cmd.exe"]) {
+        return;
+    }
+    let existing = std::env::var("PROMPT").unwrap_or_else(|_| "$P$G".to_owned());
+    command.env("PROMPT", format!("$E]9;9;$P$E\\{existing}"));
+}
+
+#[cfg(windows)]
+fn configure_bash_cwd(command: &mut CommandBuilder, profile: &TerminalProfile) {
+    let known = ["windows:git-bash", "windows:msys2", "windows:cygwin"]
+        .iter()
+        .any(|id| profile_is(profile, id, &["bash.exe"]));
+    if !known {
+        return;
+    }
+    let hook = r#"printf '\033]9;9;%s\033\\' "$PWD""#;
+    let existing = std::env::var("PROMPT_COMMAND").unwrap_or_default();
+    let value = if existing.trim().is_empty() {
+        hook.to_owned()
+    } else {
+        format!("{hook};{existing}")
+    };
+    command.env("PROMPT_COMMAND", value);
+}
+
 /// A PTY and the child process attached to it.
 pub struct Session {
     master: Box<dyn MasterPty + Send>,
@@ -38,6 +109,12 @@ impl Session {
         let mut command = CommandBuilder::new(&profile.program);
         for arg in &profile.args {
             command.arg(arg);
+        }
+        #[cfg(windows)]
+        {
+            configure_powershell_cwd(&mut command, profile);
+            configure_cmd_cwd(&mut command, profile);
+            configure_bash_cwd(&mut command, profile);
         }
         command.env("F_TERMINAL_PANE", pane.0.to_string());
 

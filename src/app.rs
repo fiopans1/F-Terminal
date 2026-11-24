@@ -1,6 +1,6 @@
 use std::collections::{HashMap, HashSet};
 use std::io::IsTerminal;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::sync::mpsc::Sender;
 use std::time::{Duration, Instant};
@@ -24,7 +24,7 @@ use crate::agents::{
 };
 use crate::complete;
 use crate::complete::history::History;
-use crate::config::{Config, RenderMode, config_path};
+use crate::config::{Config, RenderMode, config_path, save_font_size};
 use crate::editor::Editor;
 use crate::event::UserEvent;
 use crate::explorer::{FileExplorer, FileRow};
@@ -139,7 +139,8 @@ impl App {
         let attributes = Window::default_attributes()
             .with_title("Code Review — F-Terminal")
             .with_inner_size(LogicalSize::new(1280.0, 820.0))
-            .with_min_inner_size(LogicalSize::new(800.0, 500.0));
+            .with_min_inner_size(LogicalSize::new(800.0, 500.0))
+            .with_visible(false);
 
         let window = match event_loop.create_window(attributes) {
             Ok(window) => Arc::new(window),
@@ -154,15 +155,14 @@ impl App {
             return;
         };
 
-        let review = ReviewWindow::new(
+        let mut review = ReviewWindow::new(
             window,
             renderer,
             cwd,
             self.proxy.clone(),
             self.config.forge_tokens.clone(),
         );
-        review.focus();
-        review.request_redraw();
+        review.reveal(&self.config);
         log::info!("opened code review window");
         self.review = Some(review);
     }
@@ -176,7 +176,8 @@ impl App {
         let attributes = Window::default_attributes()
             .with_title("Git — F-Terminal")
             .with_inner_size(LogicalSize::new(1280.0, 820.0))
-            .with_min_inner_size(LogicalSize::new(900.0, 560.0));
+            .with_min_inner_size(LogicalSize::new(900.0, 560.0))
+            .with_visible(false);
 
         let window = match event_loop.create_window(attributes) {
             Ok(window) => Arc::new(window),
@@ -190,9 +191,8 @@ impl App {
             return;
         };
 
-        let git = GitWindow::new(window, renderer, cwd, self.proxy.clone());
-        git.focus();
-        git.request_redraw();
+        let mut git = GitWindow::new(window, renderer, cwd, self.proxy.clone());
+        git.reveal(&self.config);
         log::info!("opened git manager window");
         self.git = Some(git);
     }
@@ -206,7 +206,8 @@ impl App {
         let attributes = Window::default_attributes()
             .with_title("Agent Mode — F-Terminal")
             .with_inner_size(LogicalSize::new(980.0, 640.0))
-            .with_min_inner_size(LogicalSize::new(720.0, 460.0));
+            .with_min_inner_size(LogicalSize::new(720.0, 460.0))
+            .with_visible(false);
 
         let window = match event_loop.create_window(attributes) {
             Ok(window) => Arc::new(window),
@@ -222,14 +223,15 @@ impl App {
         };
 
         let agent = AgentWindow::new(window, renderer, self.proxy.clone());
-        agent.focus();
-        agent.request_redraw();
         log::info!("opened agent mode window");
         self.agent = Some(agent);
         if let Some(state) = &mut self.window {
             state.force_agent_refresh(&self.config);
         }
         self.sync_agent_window();
+        if let Some(agent) = &mut self.agent {
+            agent.reveal(&self.config);
+        }
     }
 
     fn focus_agent_pane(&mut self, pane: PaneId) {
@@ -420,6 +422,29 @@ impl ApplicationHandler<UserEvent> for App {
                 }
                 return;
             }
+            UserEvent::SetFontSize(size) => {
+                let size = size.clamp(6.0, 48.0);
+                if (self.config.font_size - size).abs() < f32::EPSILON {
+                    return;
+                }
+                self.config.font_size = size;
+                if let Some(state) = &mut self.window {
+                    state.apply_font_size(&self.config);
+                }
+                if let Some(review) = &mut self.review {
+                    review.apply_config(&self.config);
+                }
+                if let Some(git) = &mut self.git {
+                    git.apply_config(&self.config);
+                }
+                if let Some(agent) = &mut self.agent {
+                    agent.apply_config(&self.config);
+                }
+                if let Err(error) = save_font_size(size) {
+                    log::warn!("could not save font size: {error}");
+                }
+                return;
+            }
             UserEvent::KillAgent { pid } => {
                 if let Some(agent) = &mut self.agent {
                     agent.on_kill_requested(pid);
@@ -542,20 +567,22 @@ impl ApplicationHandler<UserEvent> for App {
                 return;
             }
             UserEvent::Menu(menu::Action::CodeReview) => {
-                let cwd = self
-                    .window
-                    .as_ref()
-                    .map(|window| window.focused_cwd())
-                    .unwrap_or_else(default_directory);
+                let cwd = if let Some(state) = &mut self.window {
+                    state.refresh_cwds(&self.config);
+                    state.focused_cwd()
+                } else {
+                    default_directory()
+                };
                 self.open_review_window(event_loop, cwd);
                 return;
             }
             UserEvent::Menu(menu::Action::GitManager) => {
-                let cwd = self
-                    .window
-                    .as_ref()
-                    .map(|window| window.focused_cwd())
-                    .unwrap_or_else(default_directory);
+                let cwd = if let Some(state) = &mut self.window {
+                    state.refresh_cwds(&self.config);
+                    state.focused_cwd()
+                } else {
+                    default_directory()
+                };
                 self.open_git_window(event_loop, cwd);
                 return;
             }
@@ -571,7 +598,11 @@ impl ApplicationHandler<UserEvent> for App {
         };
 
         match event {
-            UserEvent::PtyData { pane, bytes } => state.on_pty_data(pane, &bytes),
+            UserEvent::PtyData { pane, bytes } => {
+                if state.on_pty_data(pane, &bytes) {
+                    state.relayout(&self.config);
+                }
+            }
             UserEvent::PtyClosed { pane } => {
                 state.close_pane(pane, event_loop, &self.config);
             }
@@ -631,7 +662,8 @@ impl ApplicationHandler<UserEvent> for App {
             | UserEvent::AgentsDetected { .. }
             | UserEvent::RefreshAgents
             | UserEvent::KillAgent { .. }
-            | UserEvent::AgentKilled { .. } => {}
+            | UserEvent::AgentKilled { .. }
+            | UserEvent::SetFontSize(_) => {}
         }
     }
 
@@ -748,6 +780,8 @@ struct WindowState {
     hook_states: HashMap<PaneId, HookState>,
     agents_dirty: bool,
     explorer: FileExplorer,
+    explorer_pinned: bool,
+    explorer_pane: Option<PaneId>,
     editor: Option<Editor>,
     highlight_tx: Option<Sender<HighlightRequest>>,
     highlight_generation: u64,
@@ -957,6 +991,8 @@ impl WindowState {
             hook_states: HashMap::new(),
             agents_dirty: true,
             explorer: FileExplorer::empty(working_directory),
+            explorer_pinned: false,
+            explorer_pane: None,
             editor: None,
             highlight_tx,
             highlight_generation: 0,
@@ -1390,6 +1426,11 @@ impl WindowState {
         }
     }
 
+    fn apply_font_size(&mut self, config: &Config) {
+        self.renderer.refresh_font_metrics(config);
+        self.relayout(config);
+    }
+
     fn relayout(&mut self, config: &Config) {
         if self
             .diff_view
@@ -1431,6 +1472,7 @@ impl WindowState {
     }
 
     fn new_terminal_with(&mut self, profile_id: &str, config: &Config) {
+        self.refresh_cwds(config);
         let cwd = self.focused_cwd();
         let (tab_id, pane_id) = self.workspace.create_terminal();
         self.pending_spawns.insert(
@@ -1459,6 +1501,7 @@ impl WindowState {
     }
 
     fn split_focused(&mut self, direction: SplitDirection, config: &Config) {
+        self.refresh_cwds(config);
         let cwd = self.focused_cwd();
         let profile_id = self
             .workspace
@@ -1563,6 +1606,7 @@ impl WindowState {
     }
 
     fn dispatch_menu(&mut self, action: menu::Action, config: &Config) {
+        self.refresh_cwds(config);
         let cwd = self.focused_cwd();
         match action {
             menu::Action::Explorer => menu::open_explorer(&cwd),
@@ -1589,8 +1633,26 @@ impl WindowState {
     }
 
     fn sync_explorer_to_focused(&mut self) {
+        let focused = self.workspace.focused_pane();
+        if self.explorer_pane != focused {
+            self.explorer_pane = focused;
+            self.explorer_pinned = false;
+        }
+        if self.explorer_pinned {
+            return;
+        }
         let cwd = self.focused_cwd();
         self.explorer.set_root(cwd);
+    }
+
+    fn explorer_go_up(&mut self, config: &Config) {
+        let Some(parent) = self.explorer.root.parent().map(Path::to_path_buf) else {
+            return;
+        };
+        self.explorer.set_root(parent);
+        self.explorer_pane = self.workspace.focused_pane();
+        self.explorer_pinned = true;
+        self.relayout(config);
     }
 
     /// Poll the focused child process cwd so the file explorer and the menu
@@ -1599,6 +1661,9 @@ impl WindowState {
         let mut pids = Vec::new();
         for tab in &self.workspace.tabs {
             for pane in tab.panes.values() {
+                if pane.cwd_from_shell {
+                    continue;
+                }
                 if let Some(pid) = pane.session.process_id() {
                     pids.push(Pid::from_u32(pid));
                 }
@@ -1620,6 +1685,9 @@ impl WindowState {
         let mut updates = Vec::new();
         for tab in &self.workspace.tabs {
             for pane in tab.panes.values() {
+                if pane.cwd_from_shell {
+                    continue;
+                }
                 if let Some(pid) = pane.session.process_id()
                     && let Some(cwd) = system
                         .process(Pid::from_u32(pid))
@@ -1647,6 +1715,7 @@ impl WindowState {
 
         if let Some(cwd) = focused_cwd {
             log::debug!("focused cwd: {}", cwd.display());
+            self.explorer_pinned = false;
             self.explorer.set_root(cwd);
             if self.sidebar.mode == SidebarMode::Files {
                 self.relayout(config);
@@ -2245,6 +2314,7 @@ impl WindowState {
     }
 
     fn toggle_sidebar_mode(&mut self, config: &Config) {
+        self.refresh_cwds(config);
         self.sidebar.mode = match self.sidebar.mode {
             SidebarMode::Terminals => SidebarMode::Files,
             SidebarMode::Files => SidebarMode::Terminals,
@@ -2256,6 +2326,7 @@ impl WindowState {
         self.sidebar.hovered_profile = None;
 
         if self.sidebar.mode == SidebarMode::Files {
+            self.explorer_pinned = false;
             self.explorer.set_root(self.focused_cwd());
             self.explorer.rebuild();
         }
@@ -2287,7 +2358,10 @@ impl WindowState {
     }
 
     fn refresh_files(&mut self, config: &Config) {
-        self.explorer.set_root(self.focused_cwd());
+        self.refresh_cwds(config);
+        if !self.explorer_pinned {
+            self.explorer.set_root(self.focused_cwd());
+        }
         self.explorer.rebuild();
         self.relayout(config);
     }
@@ -3038,7 +3112,10 @@ impl WindowState {
                 | KeyCode::Digit6
                 | KeyCode::Digit7
                 | KeyCode::Digit8
-                | KeyCode::Digit9 => return false,
+                | KeyCode::Digit9
+                | KeyCode::Digit0
+                | KeyCode::Equal
+                | KeyCode::Minus => return false,
                 _ => return true,
             }
         }
@@ -3651,7 +3728,13 @@ impl WindowState {
                     self.window.request_redraw();
                     return true;
                 }
-                Key::Named(NamedKey::Tab) | Key::Named(NamedKey::Enter) => {
+                Key::Named(NamedKey::Tab) => {
+                    if !self.accept_completion(config, self.completion_selected) {
+                        self.refresh_completion(config);
+                    }
+                    return true;
+                }
+                Key::Named(NamedKey::Enter) if !shift && !alt => {
                     if !self.accept_completion(config, self.completion_selected) {
                         self.refresh_completion(config);
                     }
@@ -3781,8 +3864,9 @@ impl WindowState {
             && !self.modifiers.alt_key()
             && matches!(event.physical_key, PhysicalKey::Code(KeyCode::KeyD));
         let disarm = enter || escape || ctrl_c || ctrl_d;
+        let submit = enter && !self.modifiers.shift_key() && !self.modifiers.alt_key();
 
-        if enter {
+        if submit {
             self.capture_history(pane_id, config);
         }
         if disarm {
@@ -3909,6 +3993,35 @@ impl WindowState {
             return true;
         }
 
+        // Terminal zoom: Ctrl/Cmd plus, minus and zero.
+        let zoom_mod = if macos {
+            super_key && !ctrl && !alt
+        } else {
+            ctrl && !alt
+        };
+        if zoom_mod {
+            let size = match code {
+                KeyCode::Equal | KeyCode::NumpadAdd => Some(config.font_size + 1.0),
+                KeyCode::Minus | KeyCode::NumpadSubtract => Some(config.font_size - 1.0),
+                KeyCode::Digit0 | KeyCode::Numpad0 => Some(Config::default().font_size),
+                _ => None,
+            };
+            if let Some(size) = size {
+                let _ = self.proxy.send_event(UserEvent::SetFontSize(size));
+                return true;
+            }
+        }
+
+        // Windows/Linux copy and paste shortcuts used by most terminals.
+        if !alt && ctrl && !shift && code == KeyCode::Insert {
+            self.copy();
+            return true;
+        }
+        if !alt && !ctrl && shift && code == KeyCode::Insert {
+            self.paste();
+            return true;
+        }
+
         // Linux/Windows pane focus: Ctrl+Alt+Arrow.
         if !macos
             && ctrl
@@ -3931,16 +4044,19 @@ impl WindowState {
 
         match code {
             KeyCode::KeyO if shift => {
+                self.refresh_cwds(config);
                 menu::open_explorer(&self.focused_cwd());
                 true
             }
             KeyCode::KeyR if shift => {
+                self.refresh_cwds(config);
                 let _ = self.proxy.send_event(UserEvent::OpenCodeReview {
                     cwd: self.focused_cwd(),
                 });
                 true
             }
             KeyCode::KeyM if shift => {
+                self.refresh_cwds(config);
                 let _ = self.proxy.send_event(UserEvent::OpenGitManager {
                     cwd: self.focused_cwd(),
                 });
@@ -4215,6 +4331,7 @@ impl WindowState {
                         SidebarHit::ToggleProfiles => self.toggle_profile_menu(config),
                         SidebarHit::NewTerminal => self.new_terminal(config),
                         SidebarHit::RefreshFiles => self.refresh_files(config),
+                        SidebarHit::ExplorerUp => self.explorer_go_up(config),
                         SidebarHit::ToggleWorkspace(tab) => {
                             self.toggle_workspace(tab, config);
                         }
@@ -4621,13 +4738,13 @@ impl WindowState {
     // PTY / terminal events
     // ------------------------------------------------------------------
 
-    fn on_pty_data(&mut self, pane_id: PaneId, bytes: &[u8]) {
+    fn on_pty_data(&mut self, pane_id: PaneId, bytes: &[u8]) -> bool {
         let detected_present = self
             .detected_agents
             .iter()
             .any(|agent| agent.pane == Some(pane_id));
         let Some(pane) = self.workspace.pane_mut(pane_id) else {
-            return;
+            return false;
         };
         pane.terminal.feed(bytes);
         pane.last_output = Instant::now();
@@ -4641,9 +4758,21 @@ impl WindowState {
         }
         let notifications = pane.terminal.take_program_notifications();
         let agent_present = detected_present || pane.terminal.has_program_status();
+        let mut cwd_changed = false;
+        if let Some(cwd) = pane.terminal.take_cwd() {
+            pane.cwd_from_shell = true;
+            if pane.cwd.as_ref() != Some(&cwd) {
+                log::debug!("pane {} shell cwd: {}", pane_id.0, cwd.display());
+                pane.cwd = Some(cwd);
+                cwd_changed = true;
+            }
+        }
 
         let visible = self.workspace.is_pane_visible(pane_id);
         self.dirty_panes.insert(pane_id);
+        if cwd_changed {
+            self.request_git_status(pane_id);
+        }
 
         if status_changed || !notifications.is_empty() {
             self.agents_dirty = true;
@@ -4663,9 +4792,14 @@ impl WindowState {
             );
         }
 
-        if visible || status_changed {
+        let focused_cwd_changed = cwd_changed && self.workspace.focused_pane() == Some(pane_id);
+        if focused_cwd_changed {
+            self.explorer_pinned = false;
+        }
+        if visible || status_changed || cwd_changed {
             self.window.request_redraw();
         }
+        focused_cwd_changed
     }
 
     fn on_term_event(
@@ -5452,6 +5586,37 @@ impl WindowState {
         }
 
         if layout.mode == SidebarMode::Files {
+            let can_go_up = self.explorer.root.parent().is_some();
+            quads.push(Quad::rounded(
+                layout.back_button.x,
+                layout.back_button.y,
+                layout.back_button.width,
+                layout.back_button.height,
+                4.0 * scale,
+                to_linear(
+                    if can_go_up {
+                        theme.sidebar_hover
+                    } else {
+                        theme.background
+                    },
+                    1.0,
+                ),
+            ));
+            let back_font = ui_font_size * 0.9;
+            labels.push(Label {
+                text: "←".into(),
+                x: layout.back_button.x + (layout.back_button.width - back_font * 0.55) / 2.0,
+                y: layout.back_button.y + (layout.back_button.height - back_font * 1.35) / 2.0,
+                width: layout.back_button.width,
+                font_size: back_font,
+                color: if can_go_up {
+                    theme.accent
+                } else {
+                    theme.sidebar_text_dim
+                },
+                bold: false,
+            });
+
             let path_font = ui_font_size * 0.82;
             let path_line = path_font * 1.35;
             labels.push(Label {

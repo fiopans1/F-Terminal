@@ -93,12 +93,24 @@ jobs:
         shell: powershell
         run: choco install innosetup --yes --no-progress
 
+      - name: Check Windows signing secret
+        if: ${{ !contains(github.ref_name, '-') }}
+        shell: pwsh
+        env:
+          WINDOWS_CERT_BASE64: ${{ secrets.WINDOWS_CERT_BASE64 }}
+        run: |
+          if (-not $env:WINDOWS_CERT_BASE64) {
+            throw "Stable Windows installers must be signed. Configure WINDOWS_CERT_BASE64 and WINDOWS_CERT_PASSWORD in the repository secrets."
+          }
+
       - name: Build installer
         shell: powershell
         run: ./scripts/package-windows.ps1
         env:
           WINDOWS_CERT_BASE64: ${{ secrets.WINDOWS_CERT_BASE64 }}
           WINDOWS_CERT_PASSWORD: ${{ secrets.WINDOWS_CERT_PASSWORD }}
+          WINDOWS_TIMESTAMP_URL: ${{ vars.WINDOWS_TIMESTAMP_URL }}
+          REQUIRE_WINDOWS_SIGNING: ${{ contains(github.ref_name, '-') && '0' || '1' }}
 
       - uses: actions/upload-artifact@v4
         with:
