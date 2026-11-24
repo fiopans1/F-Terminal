@@ -8,10 +8,11 @@ use glyphon::{
 };
 
 use crate::config::Config;
+#[cfg(test)]
 use crate::layout::Rect;
 use crate::render::scene::{Label, Scene};
 use crate::term::color::Theme;
-use crate::term::frame::Frame;
+use crate::term::frame::Row;
 
 /// Size of a single terminal cell in physical pixels.
 #[derive(Clone, Copy, Debug)]
@@ -81,17 +82,45 @@ impl SharedText {
     }
 }
 
+#[derive(Clone, Debug, PartialEq, Eq, Hash)]
+struct MeasureKey {
+    text: String,
+    font_bits: u32,
+    bold: bool,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Hash)]
+struct LabelKey {
+    text: String,
+    font_bits: u32,
+    width_bits: u32,
+    color: u32,
+    bold: bool,
+}
+
 /// Glyphon based text renderer. Terminal panes each keep a shaped buffer so
-/// their text can be reused between frames; sidebar labels get short-lived
-/// buffers because there are only a handful of them.
+/// their text can be reused between frames. Chrome labels are cached by
+/// content and style because they repeat across frames.
+struct PaneTextBuffers {
+    rows: Vec<Buffer>,
+    cols: usize,
+    width_bits: u32,
+}
+
 pub struct TextPipeline {
     shared: Rc<RefCell<SharedText>>,
     format: wgpu::TextureFormat,
     viewport: Viewport,
-    pane_buffers: HashMap<u64, Buffer>,
+    pane_buffers: HashMap<u64, PaneTextBuffers>,
+    measure_cache: HashMap<MeasureKey, f32>,
+    label_cache: HashMap<LabelKey, usize>,
+    label_buffers: Vec<Buffer>,
     metrics: CellMetrics,
     font_size: f32,
 }
+
+const MEASURE_CACHE_LIMIT: usize = 512;
+const LABEL_CACHE_LIMIT: usize = 512;
 
 impl TextPipeline {
     pub fn new(
@@ -123,6 +152,9 @@ impl TextPipeline {
             format,
             viewport,
             pane_buffers: HashMap::new(),
+            measure_cache: HashMap::new(),
+            label_cache: HashMap::new(),
+            label_buffers: Vec::new(),
             metrics,
             font_size,
         }
@@ -150,6 +182,15 @@ impl TextPipeline {
 
     /// Shape a short UI string and return its width in physical pixels.
     pub fn measure_ui_text(&mut self, text: &str, font_size: f32, bold: bool) -> f32 {
+        let key = MeasureKey {
+            text: text.to_owned(),
+            font_bits: font_size.to_bits(),
+            bold,
+        };
+        if let Some(width) = self.measure_cache.get(&key) {
+            return *width;
+        }
+
         let line_height = (font_size * 1.35).max(1.0);
         let mut shared = self.shared.borrow_mut();
         let SharedText {
@@ -168,10 +209,15 @@ impl TextPipeline {
         buffer.set_text(text, &attrs, Shaping::Basic, None);
         buffer.shape_until_scroll(font_system, false);
 
-        buffer
+        let width = buffer
             .layout_runs()
             .map(|run| run.line_w)
-            .fold(0.0, f32::max)
+            .fold(0.0, f32::max);
+        if self.measure_cache.len() >= MEASURE_CACHE_LIMIT {
+            self.measure_cache.clear();
+        }
+        self.measure_cache.insert(key, width);
+        width
     }
 
     pub fn update_viewport(&mut self, queue: &wgpu::Queue, width: u32, height: u32) {
@@ -195,6 +241,9 @@ impl TextPipeline {
         self.font_size = font_size;
         self.metrics = metrics;
         self.pane_buffers.clear();
+        self.measure_cache.clear();
+        self.label_cache.clear();
+        self.label_buffers.clear();
     }
 
     pub fn prepare(
@@ -209,6 +258,9 @@ impl TextPipeline {
             format,
             viewport,
             pane_buffers,
+            measure_cache: _,
+            label_cache,
+            label_buffers,
             metrics,
             font_size,
         } = self;
@@ -225,26 +277,63 @@ impl TextPipeline {
         pane_buffers.retain(|id, _| scene.panes.iter().any(|pane| pane.id == *id));
 
         for pane in &scene.panes {
-            let needs_fill = pane.dirty || !pane_buffers.contains_key(&pane.id);
-            if !needs_fill {
-                continue;
+            let width_bits = pane.content.width.to_bits();
+            let reset = pane_buffers.get(&pane.id).is_none_or(|buffers| {
+                buffers.cols != pane.frame.cols
+                    || buffers.rows.len() != pane.frame.rows.len()
+                    || buffers.width_bits != width_bits
+            });
+            if reset {
+                let rows = pane
+                    .frame
+                    .rows
+                    .iter()
+                    .map(|_| new_row_buffer(font_system, *font_size, metrics.height))
+                    .collect();
+                pane_buffers.insert(
+                    pane.id,
+                    PaneTextBuffers {
+                        rows,
+                        cols: pane.frame.cols,
+                        width_bits,
+                    },
+                );
             }
 
-            let buffer = pane_buffers.entry(pane.id).or_insert_with(|| {
-                let mut buffer = Buffer::new(font_system, Metrics::new(*font_size, metrics.height));
-                buffer.set_wrap(Wrap::None);
-                buffer
-            });
-
-            fill_pane_buffer(
-                buffer,
-                pane.frame,
-                font_system,
+            if !pane.dirty && !reset {
+                continue;
+            }
+            let Some(buffers) = pane_buffers.get_mut(&pane.id) else {
+                continue;
+            };
+            let style = RowBufferStyle {
                 family,
-                *font_size,
-                *metrics,
+                font_size: *font_size,
+                metrics: *metrics,
+                width: pane.content.width,
                 theme,
-            );
+            };
+            let dirty_rows = if reset {
+                None
+            } else {
+                pane.dirty_rows.as_ref()
+            };
+            match dirty_rows {
+                Some(rows) => {
+                    for row in rows {
+                        if let (Some(buffer), Some(source)) =
+                            (buffers.rows.get_mut(*row), pane.frame.rows.get(*row))
+                        {
+                            fill_row_buffer(buffer, source, font_system, style);
+                        }
+                    }
+                }
+                None => {
+                    for (buffer, source) in buffers.rows.iter_mut().zip(&pane.frame.rows) {
+                        fill_row_buffer(buffer, source, font_system, style);
+                    }
+                }
+            }
         }
 
         let mut ghost_buffers = Vec::with_capacity(scene.panes.len());
@@ -274,15 +363,63 @@ impl TextPipeline {
             ghost_layouts.push((left, top, width, ghost.color));
         }
 
-        let mut label_buffers = Vec::with_capacity(scene.labels.len());
+        if label_cache.len() >= LABEL_CACHE_LIMIT {
+            label_cache.clear();
+            label_buffers.clear();
+        }
+        let mut label_indices = Vec::with_capacity(scene.labels.len());
         for label in &scene.labels {
-            label_buffers.push(build_label_buffer(font_system, label, ui_family));
+            let color = ((label.color.r as u32) << 16)
+                | ((label.color.g as u32) << 8)
+                | label.color.b as u32;
+            let key = LabelKey {
+                text: label.text.clone(),
+                font_bits: label.font_size.to_bits(),
+                width_bits: label.width.to_bits(),
+                color,
+                bold: label.bold,
+            };
+            let index = if let Some(index) = label_cache.get(&key) {
+                *index
+            } else {
+                let index = label_buffers.len();
+                label_buffers.push(build_label_buffer(font_system, label, ui_family));
+                label_cache.insert(key, index);
+                index
+            };
+            label_indices.push(index);
         }
 
-        let pane_areas = scene.panes.iter().filter_map(|pane| {
-            let buffer = pane_buffers.get(&pane.id)?;
-            Some(pane_text_area(buffer, pane.content, theme))
-        });
+        let mut pane_areas = Vec::new();
+        for pane in &scene.panes {
+            let Some(buffers) = pane_buffers.get(&pane.id) else {
+                continue;
+            };
+            for (row_index, buffer) in buffers.rows.iter().enumerate() {
+                let top = pane.content.y + row_index as f32 * metrics.height;
+                if top + metrics.height > pane.content.bottom() + 0.5 {
+                    break;
+                }
+                pane_areas.push(TextArea {
+                    buffer,
+                    left: pane.content.x,
+                    top,
+                    scale: 1.0,
+                    bounds: TextBounds {
+                        left: pane.content.x.floor() as i32,
+                        top: top.floor() as i32,
+                        right: pane.content.right().ceil() as i32,
+                        bottom: (top + metrics.height).ceil() as i32,
+                    },
+                    default_color: Color::rgb(
+                        theme.foreground.r,
+                        theme.foreground.g,
+                        theme.foreground.b,
+                    ),
+                    custom_glyphs: &[],
+                });
+            }
+        }
         let ghost_areas =
             ghost_buffers
                 .iter()
@@ -304,8 +441,15 @@ impl TextPipeline {
         let label_areas = scene
             .labels
             .iter()
-            .zip(label_buffers.iter())
-            .map(|(label, buffer)| label_text_area(buffer, label));
+            .zip(label_indices.iter())
+            .map(|(label, index)| {
+                label_text_area(
+                    label_buffers
+                        .get(*index)
+                        .expect("label cache index must be valid"),
+                    label,
+                )
+            });
 
         let bundle = atlases.entry(*format).or_insert_with(|| {
             let mut atlas = TextAtlas::new(device, queue, cache, *format);
@@ -320,7 +464,7 @@ impl TextPipeline {
             font_system,
             &mut bundle.atlas,
             viewport,
-            pane_areas.chain(ghost_areas).chain(label_areas),
+            pane_areas.into_iter().chain(ghost_areas).chain(label_areas),
             swash_cache,
         ) {
             log::error!("text prepare failed: {error}");
@@ -345,20 +489,36 @@ impl TextPipeline {
     }
 }
 
-fn fill_pane_buffer(
-    buffer: &mut Buffer,
-    frame: &Frame,
-    font_system: &mut FontSystem,
-    family: &str,
+fn new_row_buffer(font_system: &mut FontSystem, font_size: f32, line_height: f32) -> Buffer {
+    let mut buffer = Buffer::new(font_system, Metrics::new(font_size, line_height));
+    buffer.set_wrap(Wrap::None);
+    buffer
+}
+
+#[derive(Clone, Copy)]
+struct RowBufferStyle<'a> {
+    family: &'a str,
     font_size: f32,
     metrics: CellMetrics,
-    theme: &Theme,
-) {
-    let text_width = (frame.cols as f32 * metrics.width).max(1.0);
-    let text_height = (frame.rows.len().max(1) as f32 * metrics.height).max(1.0);
+    width: f32,
+    theme: &'a Theme,
+}
 
+fn fill_row_buffer(
+    buffer: &mut Buffer,
+    row: &Row,
+    font_system: &mut FontSystem,
+    style: RowBufferStyle<'_>,
+) {
+    let RowBufferStyle {
+        family,
+        font_size,
+        metrics,
+        width,
+        theme,
+    } = style;
     buffer.set_metrics(Metrics::new(font_size, metrics.height));
-    buffer.set_size(Some(text_width), Some(text_height));
+    buffer.set_size(Some(width.max(1.0)), Some(metrics.height));
 
     let default_attrs = Attrs::new().family(Family::Name(family)).color(Color::rgb(
         theme.foreground.r,
@@ -366,51 +526,32 @@ fn fill_pane_buffer(
         theme.foreground.b,
     ));
 
-    let mut spans: Vec<(&str, Attrs)> = Vec::with_capacity(frame.rows.len() * 2 + 1);
-    if frame.rows.is_empty() {
-        spans.push((" ", default_attrs.clone()));
+    if row.text.is_empty() {
+        buffer.set_text(" ", &default_attrs, Shaping::Basic, None);
+        buffer.shape_until_scroll(font_system, false);
+        return;
     }
 
-    for (row_index, row) in frame.rows.iter().enumerate() {
-        for run in &row.runs {
-            let Some(text) = row.text.get(run.range.clone()) else {
-                continue;
-            };
-            if text.is_empty() {
-                continue;
-            }
-            let attrs = Attrs::new().family(Family::Name(family)).color(Color::rgb(
-                run.color.r,
-                run.color.g,
-                run.color.b,
-            ));
-            spans.push((text, attrs));
+    let mut spans: Vec<(&str, Attrs)> = Vec::with_capacity(row.runs.len().max(1));
+    for run in &row.runs {
+        let Some(text) = row.text.get(run.range.clone()) else {
+            continue;
+        };
+        if text.is_empty() {
+            continue;
         }
-
-        if row_index + 1 < frame.rows.len() {
-            spans.push(("\n", default_attrs.clone()));
-        }
+        let attrs = Attrs::new().family(Family::Name(family)).color(Color::rgb(
+            run.color.r,
+            run.color.g,
+            run.color.b,
+        ));
+        spans.push((text, attrs));
     }
-
+    if spans.is_empty() {
+        spans.push((row.text.as_str(), default_attrs.clone()));
+    }
     buffer.set_rich_text(spans, &default_attrs, Shaping::Basic, None);
     buffer.shape_until_scroll(font_system, false);
-}
-
-fn pane_text_area<'a>(buffer: &'a Buffer, content: Rect, theme: &Theme) -> TextArea<'a> {
-    TextArea {
-        buffer,
-        left: content.x,
-        top: content.y,
-        scale: 1.0,
-        bounds: TextBounds {
-            left: content.x.floor() as i32,
-            top: content.y.floor() as i32,
-            right: content.right().ceil() as i32,
-            bottom: content.bottom().ceil() as i32,
-        },
-        default_color: Color::rgb(theme.foreground.r, theme.foreground.g, theme.foreground.b),
-        custom_glyphs: &[],
-    }
 }
 
 fn build_label_buffer(font_system: &mut FontSystem, label: &Label, ui_family: &str) -> Buffer {
@@ -739,6 +880,7 @@ mod tests {
                     content: Rect::new(4.0, 4.0, 220.0, 50.0),
                     frame: &left,
                     dirty: true,
+                    dirty_rows: None,
                     ghost: None,
                 },
                 PaneLayer {
@@ -746,6 +888,7 @@ mod tests {
                     content: Rect::new(234.0, 4.0, 220.0, 50.0),
                     frame: &right,
                     dirty: true,
+                    dirty_rows: None,
                     ghost: None,
                 },
             ],
@@ -828,6 +971,7 @@ mod tests {
                 content: Rect::new(4.0, 4.0, 180.0, 60.0),
                 frame: &first_frame,
                 dirty: true,
+                dirty_rows: None,
                 ghost: None,
             }],
             labels: vec![],
@@ -839,6 +983,7 @@ mod tests {
                 content: Rect::new(4.0, 4.0, 180.0, 60.0),
                 frame: &second_frame,
                 dirty: true,
+                dirty_rows: None,
                 ghost: None,
             }],
             labels: vec![],

@@ -82,6 +82,24 @@ welcome.
 - La terminal principal sigue usable mientras Code Review, el gestor Git o
   Agent Mode están abiertos.
 
+### Rendimiento
+
+- El render de terminal reutiliza el frame de cada pane y usa el daño por
+  líneas de alacritty: una tecla o una línea nueva no obligan a reconstruir ni
+  re-shapear toda la pantalla.
+- El autocompletado se cachea por línea/cwd, no se ejecuta en redraws ajenos y
+  ordena/trunca antes de materializar candidatos innecesarios.
+- Las etiquetas de la interfaz y las medidas de texto se cachean; las ramas
+  largas se truncan con búsqueda binaria.
+- Git, Code Review, el explorador y el resaltado trabajan fuera del hilo UI.
+  La lista local de Code Review y los snapshots de Git se cargan de forma
+  asíncrona; los PR/MR se piden solo al abrir su pestaña.
+- El polling de Git se agrupa por cwd, tiene backoff y no se solapa. El watcher
+  de agentes evita pedir `cwd` para todos los procesos y comparte snapshots por
+  `Arc`.
+- Las ventanas minimizadas/ocluidas no preparan escenas que no se van a
+  presentar.
+
 ---
 
 ## Stack

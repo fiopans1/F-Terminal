@@ -21,6 +21,8 @@ pub struct PaneLayer<'a> {
     pub frame: &'a Frame,
     /// Whether the text buffer needs to be reshaped.
     pub dirty: bool,
+    /// Rows that need reshaping when `dirty` is true. `None` means all rows.
+    pub dirty_rows: Option<Vec<usize>>,
     /// Optional inline completion ghost text.
     pub ghost: Option<GhostText>,
 }

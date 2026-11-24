@@ -22,6 +22,8 @@ use crate::term::color::{Theme, to_linear};
 use crate::term::frame::Frame;
 use crate::ui::{self, ButtonKind, ButtonSpec, Tokens};
 
+const STATUS_POLL_INTERVAL: Duration = Duration::from_secs(3);
+
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum LeftTab {
     Changes,
@@ -89,6 +91,14 @@ enum ChangeRowKind {
 enum RefRowKind {
     Section(&'static str),
     Target(RefTarget),
+}
+
+/// How much of the window a completed Git operation invalidates.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum RefreshScope {
+    Status,
+    WorkingDetail,
+    Full,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Default)]
@@ -206,6 +216,12 @@ pub struct GitWindow {
     detail_request: u64,
     operation_request: u64,
     busy: Option<String>,
+    operation_scope: RefreshScope,
+    status_in_flight: bool,
+    focused: bool,
+    change_row_kinds: Vec<ChangeRowKind>,
+    ref_row_kinds: Vec<RefRowKind>,
+    detail_due: Option<Instant>,
     toast: Option<(String, bool, Instant)>,
     last_status_poll: Instant,
     dialog: Option<Dialog>,
@@ -222,7 +238,7 @@ impl GitWindow {
         directory: PathBuf,
         proxy: EventLoopProxy<UserEvent>,
     ) -> Self {
-        let mut window = Self {
+        Self {
             window,
             renderer,
             proxy,
@@ -253,6 +269,12 @@ impl GitWindow {
             detail_request: 0,
             operation_request: 0,
             busy: None,
+            operation_scope: RefreshScope::Status,
+            status_in_flight: false,
+            focused: true,
+            change_row_kinds: Vec::new(),
+            ref_row_kinds: Vec::new(),
+            detail_due: None,
             toast: None,
             last_status_poll: Instant::now(),
             dialog: None,
@@ -260,9 +282,7 @@ impl GitWindow {
             modifiers: ModifiersState::empty(),
             cursor: PhysicalPosition::new(0.0, 0.0),
             close_requested: false,
-        };
-        window.start_snapshot();
-        window
+        }
     }
 
     pub fn window_id(&self) -> WindowId {
@@ -283,6 +303,9 @@ impl GitWindow {
     }
 
     pub fn reveal(&mut self, config: &Config) {
+        if self.snapshot.is_none() && self.error.is_none() {
+            self.start_snapshot();
+        }
         self.draw(config);
         self.window.set_visible(true);
         self.draw(config);
@@ -300,6 +323,7 @@ impl GitWindow {
                 self.renderer.set_scale_factor(scale_factor, config);
                 self.window.request_redraw();
             }
+            WindowEvent::Occluded(false) => self.window.request_redraw(),
             WindowEvent::RedrawRequested => self.draw(config),
             WindowEvent::ModifiersChanged(modifiers) => {
                 self.modifiers = modifiers.state();
@@ -315,7 +339,15 @@ impl GitWindow {
             WindowEvent::MouseWheel { delta, .. } => {
                 self.on_wheel(delta, config);
             }
-            WindowEvent::Focused(true) => self.poll(),
+            WindowEvent::Focused(focused) => {
+                self.focused = focused;
+                if focused {
+                    self.last_status_poll = Instant::now()
+                        .checked_sub(STATUS_POLL_INTERVAL)
+                        .unwrap_or_else(Instant::now);
+                    self.poll();
+                }
+            }
             _ => {}
         }
     }
@@ -330,16 +362,37 @@ impl GitWindow {
             self.window.request_redraw();
         }
 
-        if now.duration_since(self.last_status_poll) >= Duration::from_secs(2) {
+        if let Some(due) = self.detail_due
+            && now >= due
+        {
+            self.detail_due = None;
+            self.start_detail();
+        }
+
+        if !self.focused || self.window.is_minimized().unwrap_or(false) {
+            return;
+        }
+
+        if now.duration_since(self.last_status_poll) >= STATUS_POLL_INTERVAL {
             self.last_status_poll = now;
             self.start_status_poll();
         }
     }
 
     pub fn next_wake(&self) -> Duration {
-        Duration::from_secs(2)
-            .saturating_sub(Instant::now().duration_since(self.last_status_poll))
-            .max(Duration::from_millis(250))
+        if !self.focused || self.window.is_minimized().unwrap_or(false) {
+            return Duration::from_secs(5);
+        }
+        let now = Instant::now();
+        let status = STATUS_POLL_INTERVAL
+            .saturating_sub(now.duration_since(self.last_status_poll))
+            .max(Duration::from_millis(250));
+        self.detail_due
+            .map(|due| {
+                due.saturating_duration_since(now)
+                    .max(Duration::from_millis(16))
+            })
+            .map_or(status, |detail| status.min(detail))
     }
 
     pub fn apply_snapshot(
@@ -370,6 +423,7 @@ impl GitWindow {
 
                 self.snapshot = Some(snapshot);
                 self.error = None;
+                self.rebuild_row_kinds();
                 self.restore_selection(previous_change, previous_ref, previous_hash, was_working);
                 self.last_status_poll = Instant::now();
 
@@ -395,6 +449,7 @@ impl GitWindow {
         if request_id != self.status_request {
             return;
         }
+        self.status_in_flight = false;
         let Ok(status) = result else {
             return;
         };
@@ -419,6 +474,7 @@ impl GitWindow {
             snapshot.status = status;
             changed
         };
+        self.rebuild_row_kinds();
 
         self.restore_selection(previous_change, previous_ref, previous_hash, was_working);
 
@@ -472,9 +528,10 @@ impl GitWindow {
         }
 
         let was_commit = self.busy.as_deref() == Some("Confirmando");
+        let scope = std::mem::replace(&mut self.operation_scope, RefreshScope::Status);
         self.busy = None;
 
-        match result {
+        let succeeded = match result {
             Ok(message) => {
                 log::info!("git operation finished: {message}");
                 if was_commit {
@@ -482,14 +539,35 @@ impl GitWindow {
                     self.amend = false;
                 }
                 self.toast = Some((message, false, Instant::now()));
+                true
             }
             Err(error) => {
                 log::warn!("git operation failed: {error}");
                 self.toast = Some((error, true, Instant::now()));
+                false
+            }
+        };
+
+        // Abandon a poll that may have started before the mutation.
+        self.status_in_flight = false;
+
+        if !succeeded {
+            // Re-sync only the cheap status after a failure. A failed commit
+            // can still have changed hooks or the index, so a full snapshot is
+            // not needed unless the branch actually moved.
+            self.start_status_poll();
+        } else {
+            match scope {
+                RefreshScope::Status => self.start_status_poll(),
+                RefreshScope::WorkingDetail => {
+                    self.start_status_poll();
+                    if self.detail_target == DetailTarget::Working {
+                        self.start_detail();
+                    }
+                }
+                RefreshScope::Full => self.start_snapshot(),
             }
         }
-
-        self.start_snapshot();
         self.window.request_redraw();
     }
 
@@ -520,7 +598,7 @@ impl GitWindow {
     }
 
     fn start_status_poll(&mut self) {
-        if self.busy.is_some() {
+        if self.busy.is_some() || self.status_in_flight {
             return;
         }
         let Some(repo) = self.snapshot.as_ref().map(|snapshot| snapshot.repo.clone()) else {
@@ -529,6 +607,7 @@ impl GitWindow {
 
         self.status_request = self.status_request.wrapping_add(1);
         let request_id = self.status_request;
+        self.status_in_flight = true;
         let proxy = self.proxy.clone();
         let window_id = self.window.id();
 
@@ -544,11 +623,13 @@ impl GitWindow {
             });
 
         if spawned.is_err() {
+            self.status_in_flight = false;
             log::warn!("failed to start the git status poller");
         }
     }
 
     fn start_detail(&mut self) {
+        self.detail_due = None;
         let Some(repo) = self.snapshot.as_ref().map(|snapshot| snapshot.repo.clone()) else {
             return;
         };
@@ -618,6 +699,7 @@ impl GitWindow {
 
         self.operation_request = self.operation_request.wrapping_add(1);
         let request_id = self.operation_request;
+        self.operation_scope = refresh_scope(&action);
         let label = action.label().to_owned();
         self.busy = Some(label.clone());
         self.toast = None;
@@ -833,7 +915,9 @@ impl GitWindow {
         let index = index.min(self.commit_count());
         if self.selected_history != index {
             self.selected_history = index;
-            self.start_detail();
+            // Rapid arrow presses should only load the commit the user lands
+            // on, not every intermediate selection.
+            self.detail_due = Some(Instant::now() + Duration::from_millis(120));
         }
         self.focus = Focus::History;
         self.window.request_redraw();
@@ -2060,17 +2144,16 @@ impl GitWindow {
         actions
     }
 
-    fn build_change_rows(&mut self, area: Rect, scale: f32) -> (Vec<(ChangeRowKind, Rect)>, usize) {
-        let row_height = ui::px(32.0, scale);
-        let visible = (area.height / row_height).floor().max(1.0) as usize;
-        let mut rows = Vec::new();
+    fn rebuild_row_kinds(&mut self) {
+        self.change_row_kinds.clear();
+        self.ref_row_kinds.clear();
         let Some(snapshot) = &self.snapshot else {
-            return (rows, visible);
+            return;
         };
 
-        let mut kinds = Vec::new();
-        kinds.push(ChangeRowKind::Section("Preparados"));
-        kinds.extend(
+        self.change_row_kinds
+            .push(ChangeRowKind::Section("Preparados"));
+        self.change_row_kinds.extend(
             snapshot
                 .status
                 .entries
@@ -2079,8 +2162,9 @@ impl GitWindow {
                 .filter(|(_, entry)| entry.staged)
                 .map(|(index, _)| ChangeRowKind::Entry(ListKind::Staged, index)),
         );
-        kinds.push(ChangeRowKind::Section("Cambios"));
-        kinds.extend(
+        self.change_row_kinds
+            .push(ChangeRowKind::Section("Cambios"));
+        self.change_row_kinds.extend(
             snapshot
                 .status
                 .entries
@@ -2090,10 +2174,41 @@ impl GitWindow {
                 .map(|(index, _)| ChangeRowKind::Entry(ListKind::Unstaged, index)),
         );
 
+        self.ref_row_kinds.push(RefRowKind::Section("Ramas"));
+        self.ref_row_kinds.extend(
+            (0..snapshot.refs.local_branches.len())
+                .map(|index| RefRowKind::Target(RefTarget::Local(index))),
+        );
+        self.ref_row_kinds.push(RefRowKind::Section("Remotos"));
+        self.ref_row_kinds.extend(
+            (0..snapshot.refs.remote_branches.len())
+                .map(|index| RefRowKind::Target(RefTarget::Remote(index))),
+        );
+        self.ref_row_kinds.push(RefRowKind::Section("Tags"));
+        self.ref_row_kinds.extend(
+            (0..snapshot.refs.tags.len()).map(|index| RefRowKind::Target(RefTarget::Tag(index))),
+        );
+        if !snapshot.refs.stashes.is_empty() {
+            self.ref_row_kinds.push(RefRowKind::Section("Stash"));
+            self.ref_row_kinds.extend(
+                (0..snapshot.refs.stashes.len())
+                    .map(|index| RefRowKind::Target(RefTarget::Stash(index))),
+            );
+        }
+    }
+
+    fn build_change_rows(&mut self, area: Rect, scale: f32) -> (Vec<(ChangeRowKind, Rect)>, usize) {
+        let row_height = ui::px(32.0, scale);
+        let visible = (area.height / row_height).floor().max(1.0) as usize;
+        let mut rows = Vec::new();
+        if self.snapshot.is_none() {
+            return (rows, visible);
+        }
+
         let selected = self.selected_change.and_then(|selected| {
-            kinds
-                .iter()
-                .position(|kind| matches!(kind, ChangeRowKind::Entry(list, value) if (*list, *value) == selected))
+            self.change_row_kinds.iter().position(|kind| {
+                matches!(kind, ChangeRowKind::Entry(list, value) if (*list, *value) == selected)
+            })
         });
         if let Some(position) = selected {
             if position < self.changes_offset {
@@ -2103,13 +2218,20 @@ impl GitWindow {
                 self.changes_offset = position + 1 - visible;
             }
         }
-        self.changes_offset = self.changes_offset.min(kinds.len().saturating_sub(visible));
+        let len = self.change_row_kinds.len();
+        self.changes_offset = self.changes_offset.min(len.saturating_sub(visible));
 
         let start = self.changes_offset;
-        let end = (start + visible).min(kinds.len());
-        for (position, kind) in kinds.into_iter().enumerate().take(end).skip(start) {
+        let end = (start + visible).min(len);
+        for (position, kind) in self
+            .change_row_kinds
+            .iter()
+            .enumerate()
+            .take(end)
+            .skip(start)
+        {
             rows.push((
-                kind,
+                *kind,
                 Rect::new(
                     area.x + 6.0 * scale,
                     area.y + (position - start) as f32 * row_height,
@@ -2126,35 +2248,12 @@ impl GitWindow {
         let row_height = ui::px(32.0, scale);
         let visible = (area.height / row_height).floor().max(1.0) as usize;
         let mut rows = Vec::new();
-        let Some(snapshot) = &self.snapshot else {
+        if self.snapshot.is_none() {
             return (rows, visible);
-        };
-
-        let mut kinds = Vec::new();
-        kinds.push(RefRowKind::Section("Ramas"));
-        kinds.extend(
-            (0..snapshot.refs.local_branches.len())
-                .map(|index| RefRowKind::Target(RefTarget::Local(index))),
-        );
-        kinds.push(RefRowKind::Section("Remotos"));
-        kinds.extend(
-            (0..snapshot.refs.remote_branches.len())
-                .map(|index| RefRowKind::Target(RefTarget::Remote(index))),
-        );
-        kinds.push(RefRowKind::Section("Tags"));
-        kinds.extend(
-            (0..snapshot.refs.tags.len()).map(|index| RefRowKind::Target(RefTarget::Tag(index))),
-        );
-        if !snapshot.refs.stashes.is_empty() {
-            kinds.push(RefRowKind::Section("Stash"));
-            kinds.extend(
-                (0..snapshot.refs.stashes.len())
-                    .map(|index| RefRowKind::Target(RefTarget::Stash(index))),
-            );
         }
 
         let selected = self.selected_ref.and_then(|target| {
-            kinds
+            self.ref_row_kinds
                 .iter()
                 .position(|kind| matches!(kind, RefRowKind::Target(value) if *value == target))
         });
@@ -2166,13 +2265,14 @@ impl GitWindow {
                 self.refs_offset = position + 1 - visible;
             }
         }
-        self.refs_offset = self.refs_offset.min(kinds.len().saturating_sub(visible));
+        let len = self.ref_row_kinds.len();
+        self.refs_offset = self.refs_offset.min(len.saturating_sub(visible));
 
         let start = self.refs_offset;
-        let end = (start + visible).min(kinds.len());
-        for (position, kind) in kinds.into_iter().enumerate().take(end).skip(start) {
+        let end = (start + visible).min(len);
+        for (position, kind) in self.ref_row_kinds.iter().enumerate().take(end).skip(start) {
             rows.push((
-                kind,
+                *kind,
                 Rect::new(
                     area.x + 6.0 * scale,
                     area.y + (position - start) as f32 * row_height,
@@ -2298,6 +2398,9 @@ impl GitWindow {
     }
 
     fn draw(&mut self, config: &Config) {
+        if self.window.is_minimized().unwrap_or(false) {
+            return;
+        }
         let theme = &config.theme;
         let scale = self.renderer.scale_factor() as f32;
         let metrics = self.renderer.cell_metrics();
@@ -2349,6 +2452,7 @@ impl GitWindow {
                 content: *area,
                 frame,
                 dirty: true,
+                dirty_rows: None,
                 ghost: None,
             });
         }
@@ -3644,6 +3748,28 @@ fn entry_paths(entry: &StatusEntry) -> Vec<String> {
         paths.push(original.clone());
     }
     paths
+}
+
+fn refresh_scope(action: &GitAction) -> RefreshScope {
+    match action {
+        GitAction::Stage { .. }
+        | GitAction::StageAll
+        | GitAction::Unstage { .. }
+        | GitAction::UnstageAll => RefreshScope::Status,
+        GitAction::Discard { .. } => RefreshScope::WorkingDetail,
+        GitAction::Commit { .. }
+        | GitAction::Checkout { .. }
+        | GitAction::CreateBranch { .. }
+        | GitAction::DeleteBranch { .. }
+        | GitAction::Fetch
+        | GitAction::Pull
+        | GitAction::Push { .. }
+        | GitAction::StashSave { .. }
+        | GitAction::StashPop { .. }
+        | GitAction::StashDrop { .. }
+        | GitAction::Merge { .. }
+        | GitAction::AbortMerge => RefreshScope::Full,
+    }
 }
 
 fn file_status_code(status: FileStatus) -> &'static str {

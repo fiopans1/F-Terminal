@@ -326,8 +326,7 @@ fn scan(
         true,
         ProcessRefreshKind::nothing()
             .with_cmd(UpdateKind::Always)
-            .with_exe(UpdateKind::Always)
-            .with_cwd(UpdateKind::Always),
+            .with_exe(UpdateKind::Always),
     );
 
     let mut children: HashMap<u32, Vec<u32>> = HashMap::new();
@@ -357,12 +356,12 @@ fn scan(
             let Some(process) = system.process(Pid::from_u32(pid)) else {
                 continue;
             };
-            if let Some(kind) = detect_process(process) {
+            if let Some(kind) = detect_process(process, true) {
                 panes.push(DetectedAgent {
                     pane: Some(*pane),
                     pid,
                     kind,
-                    cwd: process.cwd().map(Path::to_path_buf),
+                    cwd: None,
                     started: process.start_time(),
                 });
                 // Descendants of an agent are its subagents or helper
@@ -382,15 +381,37 @@ fn scan(
             if inside.contains(&pid) || roots.contains_key(&pid) {
                 continue;
             }
-            if let Some(kind) = detect_process(process) {
+            if let Some(kind) = detect_process(process, false) {
                 external.push(DetectedAgent {
                     pane: None,
                     pid,
                     kind,
-                    cwd: process.cwd().map(Path::to_path_buf),
+                    cwd: None,
                     started: process.start_time(),
                 });
             }
+        }
+    }
+
+    // `cwd` is only needed for agents that are actually displayed. Refreshing
+    // it for every process makes the global scan substantially more expensive
+    // on macOS and Windows.
+    let detected_pids: Vec<Pid> = panes
+        .iter()
+        .chain(external.iter())
+        .map(|agent| Pid::from_u32(agent.pid))
+        .collect();
+    if !detected_pids.is_empty() {
+        system.refresh_processes_specifics(
+            ProcessesToUpdate::Some(&detected_pids),
+            false,
+            ProcessRefreshKind::nothing().with_cwd(UpdateKind::Always),
+        );
+        for agent in panes.iter_mut().chain(external.iter_mut()) {
+            agent.cwd = system
+                .process(Pid::from_u32(agent.pid))
+                .and_then(|process| process.cwd())
+                .map(Path::to_path_buf);
         }
     }
 
@@ -399,7 +420,26 @@ fn scan(
     (panes, external)
 }
 
-fn detect_process(process: &sysinfo::Process) -> Option<AgentKind> {
+fn detect_process(process: &sysinfo::Process, allow_any_name: bool) -> Option<AgentKind> {
+    // External scans see every process on the machine. Avoid allocating the
+    // full command line unless the process name/executable could plausibly be
+    // an agent or one of its common interpreters/wrappers. Processes inside a
+    // pane always get the full command-line scan.
+    if !allow_any_name {
+        let name = process.name().to_string_lossy().to_ascii_lowercase();
+        let exe = process
+            .exe()
+            .and_then(Path::file_name)
+            .map(|name| name.to_string_lossy().to_ascii_lowercase());
+        let direct = kind_from_binary(&name).is_some()
+            || exe
+                .as_deref()
+                .is_some_and(|exe| kind_from_binary(exe).is_some());
+        if !direct && !is_wrapper_name(&name) && !exe.as_deref().is_some_and(is_wrapper_name) {
+            return None;
+        }
+    }
+
     let cmd: Vec<String> = process
         .cmd()
         .iter()
@@ -409,6 +449,36 @@ fn detect_process(process: &sysinfo::Process) -> Option<AgentKind> {
     // `opencode serve --service` is the shared backend for all sessions, not
     // an interactive agent.
     (!is_service_process(&kind, &cmd)).then_some(kind)
+}
+
+fn is_wrapper_name(name: &str) -> bool {
+    let name = name.strip_suffix(".exe").unwrap_or(name);
+    matches!(
+        name,
+        "node"
+            | "bun"
+            | "deno"
+            | "java"
+            | "python"
+            | "python3"
+            | "pythonw"
+            | "npx"
+            | "pnpm"
+            | "npm"
+            | "yarn"
+            | "sh"
+            | "bash"
+            | "zsh"
+            | "fish"
+            | "cmd"
+            | "powershell"
+            | "pwsh"
+            | "uv"
+            | "uvx"
+            | "ruby"
+            | "perl"
+    ) || name.starts_with("python")
+        || name.starts_with("node")
 }
 
 fn is_service_process(kind: &AgentKind, cmd: &[String]) -> bool {
@@ -535,6 +605,9 @@ impl HookLog {
         }
         if metadata.len() > 2 * 1024 * 1024 {
             self.offset = metadata.len();
+            return Vec::new();
+        }
+        if metadata.len() <= self.offset {
             return Vec::new();
         }
 

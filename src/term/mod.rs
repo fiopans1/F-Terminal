@@ -7,7 +7,7 @@ use alacritty_terminal::grid::{Dimensions, Scroll};
 use alacritty_terminal::index::{Point, Side};
 use alacritty_terminal::selection::{Selection, SelectionType};
 use alacritty_terminal::term::cell::Flags;
-use alacritty_terminal::term::{Config as TermConfig, Term, TermMode};
+use alacritty_terminal::term::{Config as TermConfig, Term, TermDamage, TermMode};
 use winit::event_loop::EventLoopProxy;
 
 use crate::event::UserEvent;
@@ -174,6 +174,44 @@ impl Terminal {
 
     pub fn frame(&self, theme: &Theme) -> Frame {
         frame::build(&self.term, theme)
+    }
+
+    /// Update a cached frame using alacritty's per-line damage. Returns the
+    /// viewport rows that changed. A full rebuild is forced when the display
+    /// is scrolled back or the grid dimensions no longer match.
+    pub fn update_frame(&mut self, theme: &Theme, frame: &mut Frame) -> Vec<usize> {
+        let screen_lines = self.term.screen_lines();
+        let cols = self.term.columns();
+        let display_offset = self.term.grid().display_offset();
+        if display_offset != 0 || frame.cols != cols || frame.rows.len() != screen_lines {
+            *frame = frame::build(&self.term, theme);
+            self.term.reset_damage();
+            return (0..screen_lines).collect();
+        }
+
+        let damage = self.term.damage();
+        let mut full = false;
+        let rows: Vec<usize> = match damage {
+            TermDamage::Full => {
+                full = true;
+                Vec::new()
+            }
+            TermDamage::Partial(lines) => lines
+                .map(|line| line.line)
+                .filter(|line| *line < screen_lines)
+                .collect(),
+        };
+        self.term.reset_damage();
+
+        if full {
+            *frame = frame::build(&self.term, theme);
+            return (0..screen_lines).collect();
+        }
+        if rows.is_empty() {
+            return rows;
+        }
+        frame::update_rows(&self.term, theme, frame, &rows);
+        rows
     }
 
     pub fn start_selection(&mut self, point: Point, side: Side) {

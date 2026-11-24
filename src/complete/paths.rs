@@ -1,8 +1,8 @@
 use std::fs;
 use std::path::{Path, PathBuf};
-use std::time::{Duration, Instant};
+use std::time::{Duration, Instant, SystemTime};
 
-const CACHE_TTL: Duration = Duration::from_secs(2);
+const CACHE_TTL: Duration = Duration::from_secs(5);
 const MAX_DIR_ENTRIES: usize = 2_000;
 const MAX_CANDIDATES: usize = 100;
 
@@ -16,6 +16,7 @@ struct DirEntry {
 struct CachedDir {
     path: PathBuf,
     loaded: Instant,
+    modified: Option<SystemTime>,
     entries: Vec<DirEntry>,
 }
 
@@ -98,14 +99,19 @@ impl PathCache {
     }
 
     fn entries(&mut self, directory: &Path) -> &[DirEntry] {
-        let fresh = self
-            .cached
-            .as_ref()
-            .is_some_and(|cached| cached.path == directory && cached.loaded.elapsed() < CACHE_TTL);
+        let modified = fs::metadata(directory)
+            .and_then(|metadata| metadata.modified())
+            .ok();
+        let fresh = self.cached.as_ref().is_some_and(|cached| {
+            cached.path == directory
+                && cached.loaded.elapsed() < CACHE_TTL
+                && (cached.modified.is_none() || modified.is_none() || cached.modified == modified)
+        });
         if !fresh {
             self.cached = Some(CachedDir {
                 path: directory.to_path_buf(),
                 loaded: Instant::now(),
+                modified,
                 entries: read_directory(directory),
             });
         }

@@ -51,7 +51,7 @@ pub struct Candidate {
     pub score: u32,
 }
 
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, PartialEq, Eq)]
 pub struct Options {
     pub history: bool,
     pub commands: bool,
@@ -165,14 +165,13 @@ impl Engine {
                 );
             }
             if let Some(index) = &self.commands {
-                for name in index {
-                    push_command(
-                        &mut candidates,
-                        &mut seen,
-                        name,
-                        &parsed.current_text,
-                        Kind::Command,
-                    );
+                let prefix = parsed.current_text.as_str();
+                let start = index.partition_point(|name| name.as_str() < prefix);
+                for name in &index[start..] {
+                    if !name.starts_with(prefix) {
+                        break;
+                    }
+                    push_command(&mut candidates, &mut seen, name, prefix, Kind::Command);
                 }
             }
         }

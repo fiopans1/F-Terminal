@@ -24,6 +24,11 @@ usa [Versionado Semántico](https://semver.org/lang/es/).
 - Rediseño de las ventanas Git, Code Review y Agentes: carcasa común, escala
   tipográfica legible, botones y foco consistentes, scrollbars, estados vacíos
   accionables y copy en español. El tema Foundry estrena la nueva identidad.
+- Optimización del camino caliente de terminal: frames por pane reutilizados,
+  actualización por líneas dañadas, buffers de texto por fila, caché de
+  etiquetas/medidas y autocompletado cacheado. Git, Code Review, explorador y
+  agentes reducen procesos, polling y clones; Code Review y los snapshots Git
+  cargan en segundo plano y los PR/MR se piden de forma lazy.
 - El explorador de archivos tiene un botón para subir al directorio padre y
   mantiene la navegación manual hasta que cambie el cwd del pane.
 - Nueva sección `[agents]` en `config.toml` (`enabled`, `show_external`,

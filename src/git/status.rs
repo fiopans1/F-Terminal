@@ -62,23 +62,17 @@ pub struct StatusSnapshot {
     pub behind: usize,
     pub detached: bool,
     pub entries: Vec<StatusEntry>,
+    pub staged_count: usize,
+    pub unstaged_count: usize,
 }
 
 impl StatusSnapshot {
-    pub fn staged(&self) -> impl Iterator<Item = &StatusEntry> {
-        self.entries.iter().filter(|entry| entry.staged)
-    }
-
-    pub fn unstaged(&self) -> impl Iterator<Item = &StatusEntry> {
-        self.entries.iter().filter(|entry| entry.unstaged)
-    }
-
     pub fn staged_count(&self) -> usize {
-        self.staged().count()
+        self.staged_count
     }
 
     pub fn unstaged_count(&self) -> usize {
-        self.unstaged().count()
+        self.unstaged_count
     }
 }
 
@@ -155,6 +149,12 @@ pub fn parse(text: &str) -> StatusSnapshot {
         };
 
         if let Some(entry) = entry {
+            if entry.staged {
+                snapshot.staged_count += 1;
+            }
+            if entry.unstaged {
+                snapshot.unstaged_count += 1;
+            }
             snapshot.entries.push(entry);
         }
     }

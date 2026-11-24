@@ -307,27 +307,16 @@ impl Renderer {
         let width = self.config.width;
         let height = self.config.height;
 
-        self.text
-            .update_viewport(self.gpu.queue.as_ref(), width, height);
-        self.text.prepare(
-            self.gpu.device.as_ref(),
-            self.gpu.queue.as_ref(),
-            scene,
-            theme,
-        );
-
-        self.quads.clear();
-        for quad in &scene.quads {
-            self.quads.push(*quad);
-        }
-        self.quads
-            .prepare(self.gpu.device.as_ref(), self.gpu.queue.as_ref());
-
         let frame_texture = match self.surface.get_current_texture() {
             wgpu::CurrentSurfaceTexture::Success(frame) => frame,
             wgpu::CurrentSurfaceTexture::Suboptimal(frame) => frame,
-            wgpu::CurrentSurfaceTexture::Timeout | wgpu::CurrentSurfaceTexture::Occluded => {
+            wgpu::CurrentSurfaceTexture::Timeout => {
                 self.window.request_redraw();
+                return Ok(());
+            }
+            wgpu::CurrentSurfaceTexture::Occluded => {
+                // The next visible/focus event will ask for a redraw. Do not
+                // build and shape a scene that cannot be presented.
                 return Ok(());
             }
             wgpu::CurrentSurfaceTexture::Outdated => {
@@ -351,6 +340,24 @@ impl Renderer {
                 anyhow::bail!("surface validation error");
             }
         };
+
+        // Acquire the surface first: when it is occluded or the compositor is
+        // not ready, avoid rebuilding/shaping the whole scene for nothing.
+        self.text
+            .update_viewport(self.gpu.queue.as_ref(), width, height);
+        self.text.prepare(
+            self.gpu.device.as_ref(),
+            self.gpu.queue.as_ref(),
+            scene,
+            theme,
+        );
+
+        self.quads.clear();
+        for quad in &scene.quads {
+            self.quads.push(*quad);
+        }
+        self.quads
+            .prepare(self.gpu.device.as_ref(), self.gpu.queue.as_ref());
 
         let view = frame_texture
             .texture

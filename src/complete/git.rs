@@ -4,8 +4,9 @@ use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
-const CACHE_TTL: Duration = Duration::from_secs(2);
+const CACHE_TTL: Duration = Duration::from_secs(3);
 const MAX_CACHED_REPOS: usize = 2;
+const MAX_CACHED_ROOTS: usize = 8;
 const MAX_REFS: usize = 2_000;
 const MAX_REF_BYTES: usize = 256 * 1024;
 
@@ -94,11 +95,21 @@ struct CacheEntry {
 #[derive(Default)]
 pub struct RefsCache {
     entries: Vec<CacheEntry>,
+    roots: Vec<(PathBuf, PathBuf)>,
 }
 
 impl RefsCache {
     pub fn get(&mut self, cwd: &Path) -> Option<Arc<Refs>> {
-        let root = find_repo_root(cwd)?;
+        let root = if let Some((_, root)) = self.roots.iter().find(|(path, _)| path == cwd) {
+            root.clone()
+        } else {
+            let root = find_repo_root(cwd)?;
+            self.roots.push((cwd.to_path_buf(), root.clone()));
+            if self.roots.len() > MAX_CACHED_ROOTS {
+                self.roots.remove(0);
+            }
+            root
+        };
         if let Some(entry) = self
             .entries
             .iter()

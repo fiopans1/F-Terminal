@@ -1,4 +1,5 @@
 use std::fs;
+use std::io::Read;
 use std::path::{Path, PathBuf};
 
 use anyhow::{Context, Result, bail};
@@ -88,6 +89,16 @@ pub struct ReviewDetail {
     pub deletions: usize,
 }
 
+/// The lightweight part of a review window: repository identity and the list
+/// of local reviews. Loading this in a worker keeps the UI responsive while
+/// Git inspects a cold or large repository.
+#[derive(Clone, Debug)]
+pub struct ReviewList {
+    pub repo: PathBuf,
+    pub reviews: Vec<ReviewSummary>,
+    pub forge: Option<ForgeKind>,
+}
+
 /// State for the Code Review window.
 pub struct CodeReview {
     pub repo: PathBuf,
@@ -109,52 +120,54 @@ pub struct CodeReview {
 }
 
 impl CodeReview {
-    pub fn open(start: PathBuf, tokens: ForgeTokens) -> Self {
-        match repository_root(&start) {
-            Ok(repo) => {
-                let (reviews, error) = match load_reviews(&repo) {
-                    Ok(reviews) => (reviews, None),
-                    Err(error) => (Vec::new(), Some(format!("{error:#}"))),
-                };
-                let forge = forge::detect(&repo).ok().map(|remote| remote.kind);
+    /// Build the window state without touching Git. The list is filled by a
+    /// worker through [`Self::apply_list`].
+    pub fn pending(start: PathBuf, tokens: ForgeTokens) -> Self {
+        Self {
+            repo: start,
+            reviews: Vec::new(),
+            selected: 0,
+            list_offset: 0,
+            detail: None,
+            loading: false,
+            scroll_row: 0,
+            scroll_col: 0,
+            error: None,
+            generation: 0,
+            forge: None,
+            tokens,
+            pull_requests: Vec::new(),
+            prs_loading: false,
+            prs_loaded: false,
+            prs_error: None,
+        }
+    }
 
-                Self {
-                    repo,
-                    reviews,
-                    selected: 0,
-                    list_offset: 0,
-                    detail: None,
-                    loading: false,
-                    scroll_row: 0,
-                    scroll_col: 0,
-                    error,
-                    generation: 0,
-                    forge,
-                    tokens,
-                    pull_requests: Vec::new(),
-                    prs_loading: false,
-                    prs_loaded: false,
-                    prs_error: None,
-                }
+    pub fn apply_list(&mut self, result: std::result::Result<ReviewList, String>) {
+        let previous_kind = self.current_summary().map(|summary| summary.kind.clone());
+        self.loading = false;
+        self.detail = None;
+        self.generation = 0;
+        self.scroll_row = 0;
+        self.scroll_col = 0;
+        self.list_offset = 0;
+
+        match result {
+            Ok(list) => {
+                self.repo = list.repo;
+                self.reviews = list.reviews;
+                self.forge = list.forge;
+                self.selected = previous_kind
+                    .and_then(|kind| self.reviews.iter().position(|review| review.kind == kind))
+                    .unwrap_or(0)
+                    .min(self.reviews.len().saturating_sub(1));
+                self.error = None;
             }
-            Err(error) => Self {
-                repo: start,
-                reviews: Vec::new(),
-                selected: 0,
-                list_offset: 0,
-                detail: None,
-                loading: false,
-                scroll_row: 0,
-                scroll_col: 0,
-                error: Some(format!("{error:#}")),
-                generation: 0,
-                forge: None,
-                tokens,
-                pull_requests: Vec::new(),
-                prs_loading: false,
-                prs_loaded: false,
-                prs_error: None,
-            },
+            Err(error) => {
+                self.reviews.clear();
+                self.selected = 0;
+                self.error = Some(error);
+            }
         }
     }
 
@@ -216,31 +229,6 @@ impl CodeReview {
         self.scroll_col = 0;
         self.error = None;
     }
-
-    pub fn refresh(&mut self) {
-        let selected_kind = self.current_summary().map(|summary| summary.kind.clone());
-        self.generation = 0;
-        self.error = None;
-        self.detail = None;
-        self.loading = false;
-        self.scroll_row = 0;
-        self.scroll_col = 0;
-
-        match load_reviews(&self.repo) {
-            Ok(reviews) => {
-                self.reviews = reviews;
-                self.selected = selected_kind
-                    .and_then(|kind| self.reviews.iter().position(|review| review.kind == kind))
-                    .unwrap_or(0)
-                    .min(self.reviews.len().saturating_sub(1));
-                self.list_offset = 0;
-            }
-            Err(error) => {
-                self.reviews.clear();
-                self.error = Some(format!("{error:#}"));
-            }
-        }
-    }
 }
 
 pub fn load_detail(
@@ -276,14 +264,22 @@ pub fn load_detail(
         }
     };
 
-    if diff.lines().count() > MAX_DIFF_LINES {
-        let mut truncated: String = diff
-            .lines()
-            .take(MAX_DIFF_LINES)
-            .collect::<Vec<_>>()
-            .join("\n");
-        truncated.push_str("\n... diff truncated ...\n");
-        diff = truncated;
+    let mut newlines = 0usize;
+    let mut cutoff = None;
+    for (offset, byte) in diff.bytes().enumerate() {
+        if byte == b'\n' {
+            newlines += 1;
+            if newlines >= MAX_DIFF_LINES {
+                cutoff = Some(offset + 1);
+                break;
+            }
+        }
+    }
+    if let Some(cutoff) = cutoff
+        && cutoff < diff.len()
+    {
+        diff.truncate(cutoff);
+        diff.push_str("... diff truncated ...\n");
     }
 
     let detail = parse_diff(&diff, summary.clone());
@@ -304,6 +300,18 @@ fn repository_root(start: &Path) -> Result<PathBuf> {
         bail!("no es un repositorio Git: {}", start.display());
     }
     Ok(PathBuf::from(root))
+}
+
+/// Resolve the repository, local review list and forge in one worker job.
+pub fn load_list(start: &Path) -> Result<ReviewList> {
+    let repo = repository_root(start)?;
+    let reviews = load_reviews(&repo)?;
+    let forge = forge::detect(&repo).ok().map(|remote| remote.kind);
+    Ok(ReviewList {
+        repo,
+        reviews,
+        forge,
+    })
 }
 
 fn load_reviews(repo: &Path) -> Result<Vec<ReviewSummary>> {
@@ -406,10 +414,17 @@ fn untracked_diff(repo: &Path) -> Result<String> {
             continue;
         };
         let file = repo.join(path);
-        let Ok(bytes) = fs::read(&file) else {
+        let Ok(file) = fs::File::open(&file) else {
             continue;
         };
-        if bytes.len() > MAX_UNTRACKED_BYTES || bytes.contains(&0) {
+        let mut bytes = Vec::new();
+        if file
+            .take(MAX_UNTRACKED_BYTES as u64 + 1)
+            .read_to_end(&mut bytes)
+            .is_err()
+            || bytes.len() > MAX_UNTRACKED_BYTES
+            || bytes.contains(&0)
+        {
             diff.push_str(&format!(
                 "diff --git a/{path} b/{path}\nnew file mode 100644\n--- /dev/null\n+++ b/{path}\n@@ -0,0 +1 @@\n+[archivo sin seguimiento omitido]\n"
             ));

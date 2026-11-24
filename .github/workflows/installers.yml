@@ -91,8 +91,16 @@ jobs:
       - uses: Swatinem/rust-cache@v2
 
       - name: Install Inno Setup
-        shell: powershell
-        run: choco install innosetup --yes --no-progress
+        shell: pwsh
+        run: |
+          $candidates = @(
+            "${env:ProgramFiles(x86)}\Inno Setup 6\ISCC.exe",
+            "$env:ProgramFiles\Inno Setup 6\ISCC.exe",
+            "$env:LOCALAPPDATA\Programs\Inno Setup 6\ISCC.exe"
+          )
+          if (-not ($candidates | Where-Object { $_ -and (Test-Path $_) })) {
+            choco install innosetup --yes --no-progress
+          }
 
       - name: Select Windows signing mode
         id: signing
@@ -247,8 +255,12 @@ jobs:
       - name: Install packaging tools
         shell: bash
         run: |
-          sudo apt-get update
-          sudo apt-get install -y dpkg-dev rpm file
+          if ! command -v dpkg-deb >/dev/null 2>&1 \
+            || ! command -v rpm >/dev/null 2>&1 \
+            || ! command -v file >/dev/null 2>&1; then
+            sudo apt-get update
+            sudo apt-get install -y dpkg-dev rpm file
+          fi
 
       - name: Build DEB and RPM
         shell: bash

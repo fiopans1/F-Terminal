@@ -314,20 +314,33 @@ impl ProgramStatus {
             self.records.remove(&oldest);
         }
 
-        self.records.insert(
-            id.clone(),
-            ProgramRecord {
-                id,
-                app,
-                state,
-                kind: kind.filter(|_| state == ProgramState::Blocked),
-                progress: progress
-                    .filter(|_| matches!(state, ProgramState::Working | ProgramState::Blocked)),
-                title,
-                message,
-                touched,
-            },
-        );
+        let next = ProgramRecord {
+            id,
+            app,
+            state,
+            kind: kind.filter(|_| state == ProgramState::Blocked),
+            progress: progress
+                .filter(|_| matches!(state, ProgramState::Working | ProgramState::Blocked)),
+            title,
+            message,
+            touched,
+        };
+
+        // Heartbeats often repeat the same visible state. Refresh the ordering
+        // timestamp without invalidating the whole agent snapshot.
+        if let Some(existing) = self.records.get_mut(&next.id)
+            && existing.app == next.app
+            && existing.state == next.state
+            && existing.kind == next.kind
+            && existing.progress == next.progress
+            && existing.title == next.title
+            && existing.message == next.message
+        {
+            existing.touched = touched;
+            return;
+        }
+
+        self.records.insert(next.id.clone(), next);
         self.revision = self.revision.wrapping_add(1);
     }
 
@@ -513,7 +526,13 @@ struct OscScanner {
 }
 
 impl OscScanner {
-    fn feed(&mut self, bytes: &[u8], frames: &mut Vec<(Vec<u8>, bool)>, resets: &mut usize) {
+    fn feed(&mut self, mut bytes: &[u8], frames: &mut Vec<(Vec<u8>, bool)>, resets: &mut usize) {
+        if self.state == ScanState::Ground {
+            let Some(start) = bytes.iter().position(|byte| *byte == 0x1b) else {
+                return;
+            };
+            bytes = &bytes[start..];
+        }
         for &byte in bytes {
             match self.state {
                 ScanState::Ground => {

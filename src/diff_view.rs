@@ -1,9 +1,106 @@
 use crate::layout::Rect;
 use crate::render::CellMetrics;
 use crate::render::quads::Quad;
-use crate::review::{DiffLineKind, FileDiff};
+use crate::review::{DiffLineKind, FileDiff, FileStatus, ReviewDetail};
 use crate::term::color::{Theme, to_linear};
 use crate::term::frame::{Frame, Row, Run};
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum DiffRowKind {
+    File,
+    Add,
+    Remove,
+    Context,
+    Hunk,
+    Meta,
+    Separator,
+}
+
+#[derive(Clone, Debug)]
+pub(crate) struct DiffRow {
+    pub kind: DiffRowKind,
+    pub text: String,
+}
+
+/// Flatten a review detail into display rows. This is pure and can run on a
+/// worker before the result reaches the UI thread.
+pub(crate) fn build_diff_rows(detail: &ReviewDetail) -> Vec<DiffRow> {
+    let mut rows = Vec::new();
+
+    for (index, file) in detail.files.iter().enumerate() {
+        if index > 0 {
+            rows.push(DiffRow {
+                kind: DiffRowKind::Separator,
+                text: String::new(),
+            });
+        }
+
+        let status = match file.status {
+            FileStatus::Modified => "M",
+            FileStatus::Added => "A",
+            FileStatus::Deleted => "D",
+            FileStatus::Renamed => "R",
+            FileStatus::Binary => "B",
+        };
+        let path = match &file.old_path {
+            Some(old) if old != &file.path => format!("{old} → {}", file.path),
+            _ => file.path.clone(),
+        };
+        let stats = if file.binary {
+            "binary".to_owned()
+        } else {
+            format!("+{} -{}", file.additions, file.deletions)
+        };
+        rows.push(DiffRow {
+            kind: DiffRowKind::File,
+            text: format!("{status}  {path}   {stats}"),
+        });
+
+        if file.binary {
+            rows.push(DiffRow {
+                kind: DiffRowKind::Meta,
+                text: "Archivo binario".to_owned(),
+            });
+            continue;
+        }
+
+        for line in &file.lines {
+            let text = match line.kind {
+                DiffLineKind::Add => {
+                    format!(
+                        "{:>5} {:>5} + {}",
+                        "",
+                        line.new.unwrap_or_default(),
+                        line.text
+                    )
+                }
+                DiffLineKind::Remove => format!(
+                    "{:>5} {:>5} - {}",
+                    line.old.unwrap_or_default(),
+                    "",
+                    line.text
+                ),
+                DiffLineKind::Context => format!(
+                    "{:>5} {:>5}   {}",
+                    line.old.unwrap_or_default(),
+                    line.new.unwrap_or_default(),
+                    line.text
+                ),
+                DiffLineKind::Hunk | DiffLineKind::Meta => line.text.clone(),
+            };
+            let kind = match line.kind {
+                DiffLineKind::Add => DiffRowKind::Add,
+                DiffLineKind::Remove => DiffRowKind::Remove,
+                DiffLineKind::Context => DiffRowKind::Context,
+                DiffLineKind::Hunk => DiffRowKind::Hunk,
+                DiffLineKind::Meta => DiffRowKind::Meta,
+            };
+            rows.push(DiffRow { kind, text });
+        }
+    }
+
+    rows
+}
 
 /// Build a renderable frame for one side of a unified diff.
 pub fn build_file_frame(

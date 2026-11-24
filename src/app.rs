@@ -25,6 +25,7 @@ use crate::agents::{
 use crate::complete;
 use crate::complete::history::History;
 use crate::config::{Config, RenderMode, config_path, save_font_size};
+use crate::diff_view::{DiffRow, DiffRowKind, build_diff_rows};
 use crate::editor::Editor;
 use crate::event::UserEvent;
 use crate::explorer::{FileExplorer, FileRow};
@@ -39,7 +40,7 @@ use crate::menu;
 use crate::render::quads::Quad;
 use crate::render::scene::{GhostText, Label, PaneLayer, Scene};
 use crate::render::{CellMetrics, Renderer, SharedRenderResources, grid_size_for};
-use crate::review::{self, DiffLineKind, FileStatus, ReviewDetail, ReviewKind, ReviewSummary};
+use crate::review::{self, ReviewDetail, ReviewKind, ReviewSummary};
 use crate::review_window::ReviewWindow;
 use crate::shell::{ShellCatalog, TerminalProfile};
 use crate::sidebar::{
@@ -50,6 +51,8 @@ use crate::term::frame::{Background, Cursor, CursorShapeKind, Frame, Row, Run};
 use crate::term::program_status::{BlockKind, ProgramRecord, ProgramState};
 use crate::ui;
 use crate::workspace::{CloseOutcome, Pane, PaneId, SplitDirection, TabId, Workspace};
+
+const GIT_STATUS_POLL_INTERVAL: Duration = Duration::from_secs(3);
 
 pub struct App {
     proxy: EventLoopProxy<UserEvent>,
@@ -157,16 +160,18 @@ impl App {
             return;
         };
 
-        let mut review = ReviewWindow::new(
+        let review = ReviewWindow::new(
             window,
             renderer,
             cwd,
             self.proxy.clone(),
             self.config.forge_tokens.clone(),
         );
-        review.reveal(&self.config);
-        log::info!("opened code review window");
         self.review = Some(review);
+        if let Some(review) = &mut self.review {
+            review.reveal(&self.config);
+        }
+        log::info!("opened code review window");
     }
 
     fn open_git_window(&mut self, event_loop: &ActiveEventLoop, cwd: PathBuf) {
@@ -194,10 +199,12 @@ impl App {
             return;
         };
 
-        let mut git = GitWindow::new(window, renderer, cwd, self.proxy.clone());
-        git.reveal(&self.config);
-        log::info!("opened git manager window");
+        let git = GitWindow::new(window, renderer, cwd, self.proxy.clone());
         self.git = Some(git);
+        if let Some(git) = &mut self.git {
+            git.reveal(&self.config);
+        }
+        log::info!("opened git manager window");
     }
 
     fn open_agent_window(&mut self, event_loop: &ActiveEventLoop) {
@@ -498,6 +505,18 @@ impl ApplicationHandler<UserEvent> for App {
                 }
                 return;
             }
+            UserEvent::ReviewListLoaded {
+                window_id,
+                request_id,
+                result,
+            } => {
+                if let Some(review) = &mut self.review
+                    && review.window_id() == window_id
+                {
+                    review.apply_list(request_id, result);
+                }
+                return;
+            }
             UserEvent::ReviewLoaded {
                 window_id,
                 request_id,
@@ -619,8 +638,8 @@ impl ApplicationHandler<UserEvent> for App {
                 revision,
                 spans,
             } => state.on_highlight(generation, revision, spans),
-            UserEvent::GitStatus { pane, cwd, status } => {
-                state.on_git_status(pane, cwd, status);
+            UserEvent::GitStatus { panes, cwd, status } => {
+                state.on_git_status(panes, cwd, status);
             }
             UserEvent::BranchesLoaded { pane, cwd, result } => {
                 state.on_branches_loaded(pane, cwd, result);
@@ -650,11 +669,17 @@ impl ApplicationHandler<UserEvent> for App {
             UserEvent::ShellProfiles(profiles) => {
                 state.on_shell_profiles(profiles, &self.config);
             }
-            UserEvent::ExplorerLoaded { root, rows, error } => {
-                state.on_explorer_loaded(root, rows, error, &self.config);
+            UserEvent::ExplorerLoaded {
+                root,
+                scan_id,
+                rows,
+                error,
+            } => {
+                state.on_explorer_loaded(root, scan_id, rows, error, &self.config);
             }
             UserEvent::OpenCodeReview { .. }
             | UserEvent::OpenGitManager { .. }
+            | UserEvent::ReviewListLoaded { .. }
             | UserEvent::ReviewLoaded { .. }
             | UserEvent::PullRequestsLoaded { .. }
             | UserEvent::GitSnapshotLoaded { .. }
@@ -776,7 +801,7 @@ struct WindowState {
     last_agent_poll: Instant,
     detected_agents: Vec<DetectedAgent>,
     external_agents: Vec<DetectedAgent>,
-    agent_snapshot: AgentSnapshot,
+    agent_snapshot: Arc<AgentSnapshot>,
     agent_times: HashMap<AgentId, u64>,
     seen_agents: HashSet<AgentId>,
     agent_notifications: HashMap<PaneId, PaneNotification>,
@@ -784,6 +809,7 @@ struct WindowState {
     hook_states: HashMap<PaneId, HookState>,
     agents_dirty: bool,
     explorer: FileExplorer,
+    explorer_scan_id: u64,
     explorer_pinned: bool,
     explorer_pane: Option<PaneId>,
     editor: Option<Editor>,
@@ -793,6 +819,12 @@ struct WindowState {
     highlight_revision_seen: u64,
     highlight_due: Option<Instant>,
     dirty_panes: HashSet<PaneId>,
+    frame_cache: HashMap<PaneId, Arc<Frame>>,
+    frame_dominant: HashMap<PaneId, Rgb>,
+    editor_frame_cache: Option<Arc<Frame>>,
+    diff_frame_cache: Option<Arc<Frame>>,
+    quad_scratch: Vec<Quad>,
+    label_scratch: Vec<Label>,
     editor_dirty: bool,
     last_cwd_poll: Instant,
     last_git_poll: Instant,
@@ -820,6 +852,8 @@ struct CompletionView {
     col: usize,
     /// Command text after the prompt, used to reject stale suggestions.
     line: String,
+    cwd: PathBuf,
+    options: complete::Options,
     candidates: Vec<complete::Candidate>,
     typed_line: usize,
     typed_token: usize,
@@ -873,22 +907,8 @@ struct BranchMenuLayout {
     message: Option<Rect>,
 }
 
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-enum DiffRowKind {
-    File,
-    Add,
-    Remove,
-    Context,
-    Hunk,
-    Meta,
-    Separator,
-}
-
-#[derive(Clone, Debug)]
-struct DiffRow {
-    kind: DiffRowKind,
-    text: String,
-}
+type FrameEntry = (PaneId, Rect, Arc<Frame>, Rgb, Option<Vec<usize>>);
+type BuiltFrame = (PaneId, Arc<Frame>, Rgb, Option<Vec<PromptTrim>>);
 
 #[derive(Clone, Debug)]
 struct DiffView {
@@ -988,7 +1008,7 @@ impl WindowState {
                 .unwrap_or_else(Instant::now),
             detected_agents: Vec::new(),
             external_agents: Vec::new(),
-            agent_snapshot: AgentSnapshot::default(),
+            agent_snapshot: Arc::new(AgentSnapshot::default()),
             agent_times: HashMap::new(),
             seen_agents: HashSet::new(),
             agent_notifications: HashMap::new(),
@@ -996,6 +1016,7 @@ impl WindowState {
             hook_states: HashMap::new(),
             agents_dirty: true,
             explorer: FileExplorer::empty(working_directory),
+            explorer_scan_id: 0,
             explorer_pinned: false,
             explorer_pane: None,
             editor: None,
@@ -1005,6 +1026,12 @@ impl WindowState {
             highlight_revision_seen: 0,
             highlight_due: None,
             dirty_panes: HashSet::new(),
+            frame_cache: HashMap::new(),
+            frame_dominant: HashMap::new(),
+            editor_frame_cache: None,
+            diff_frame_cache: None,
+            quad_scratch: Vec::new(),
+            label_scratch: Vec::new(),
             editor_dirty: false,
             last_cwd_poll: Instant::now(),
             last_git_poll: Instant::now(),
@@ -1095,7 +1122,12 @@ impl WindowState {
             .name("explorer-scan".into())
             .spawn(move || {
                 let (rows, error) = FileExplorer::scan(&root, &HashSet::new());
-                let _ = proxy.send_event(UserEvent::ExplorerLoaded { root, rows, error });
+                let _ = proxy.send_event(UserEvent::ExplorerLoaded {
+                    root,
+                    scan_id: 0,
+                    rows,
+                    error,
+                });
             })
         {
             log::warn!("failed to start the explorer scan worker: {error}");
@@ -1132,6 +1164,7 @@ impl WindowState {
                 self.renderer.set_scale_factor(scale_factor, config);
                 self.relayout(config);
             }
+            WindowEvent::Occluded(false) => self.window.request_redraw(),
             WindowEvent::RedrawRequested => self.on_redraw(config),
             WindowEvent::ModifiersChanged(modifiers) => {
                 self.modifiers = modifiers.state();
@@ -1172,7 +1205,7 @@ impl WindowState {
                 if focused {
                     let now = Instant::now();
                     self.last_cwd_poll = now.checked_sub(Duration::from_millis(750)).unwrap_or(now);
-                    self.last_git_poll = now.checked_sub(Duration::from_secs(2)).unwrap_or(now);
+                    self.last_git_poll = now.checked_sub(GIT_STATUS_POLL_INTERVAL).unwrap_or(now);
                 }
 
                 let send_focus = self
@@ -1437,6 +1470,10 @@ impl WindowState {
     }
 
     fn relayout(&mut self, config: &Config) {
+        // Pane frames do not depend on the viewport position; terminal content
+        // changes are invalidated through `dirty_panes`/`Term::damage`.
+        self.editor_frame_cache = None;
+        self.diff_frame_cache = None;
         if self
             .diff_view
             .as_ref()
@@ -1647,14 +1684,18 @@ impl WindowState {
             return;
         }
         let cwd = self.focused_cwd();
-        self.explorer.set_root(cwd);
+        if self.explorer.prepare_root(cwd) {
+            self.request_explorer_scan();
+        }
     }
 
     fn explorer_go_up(&mut self, config: &Config) {
         let Some(parent) = self.explorer.root.parent().map(Path::to_path_buf) else {
             return;
         };
-        self.explorer.set_root(parent);
+        if self.explorer.prepare_root(parent) {
+            self.request_explorer_scan();
+        }
         self.explorer_pane = self.workspace.focused_pane();
         self.explorer_pinned = true;
         self.relayout(config);
@@ -1721,7 +1762,9 @@ impl WindowState {
         if let Some(cwd) = focused_cwd {
             log::debug!("focused cwd: {}", cwd.display());
             self.explorer_pinned = false;
-            self.explorer.set_root(cwd);
+            if self.explorer.prepare_root(cwd) {
+                self.request_explorer_scan();
+            }
             if self.sidebar.mode == SidebarMode::Files {
                 self.relayout(config);
             }
@@ -1733,30 +1776,42 @@ impl WindowState {
     }
 
     fn request_git_status(&mut self, pane_id: PaneId) {
-        if self.git_in_flight.contains(&pane_id) {
-            return;
-        }
-
         let Some(pane) = self.workspace.pane(pane_id) else {
             return;
         };
         let cwd = pane.cwd.clone().unwrap_or_else(default_directory);
+        self.request_git_status_group(vec![pane_id], cwd);
+    }
 
-        self.git_in_flight.insert(pane_id);
+    fn request_git_status_group(&mut self, panes: Vec<PaneId>, cwd: PathBuf) {
+        let pending: Vec<PaneId> = panes
+            .into_iter()
+            .filter(|pane_id| !self.git_in_flight.contains(pane_id))
+            .collect();
+        if pending.is_empty() {
+            return;
+        }
+        for pane_id in &pending {
+            self.git_in_flight.insert(*pane_id);
+        }
+
         let proxy = self.proxy.clone();
+        let event_panes = pending.clone();
         let spawned = std::thread::Builder::new()
             .name("git-status".into())
             .spawn(move || {
                 let status = git_status::inspect(&cwd);
                 let _ = proxy.send_event(UserEvent::GitStatus {
-                    pane: pane_id,
+                    panes: event_panes,
                     cwd,
                     status,
                 });
             });
 
         if spawned.is_err() {
-            self.git_in_flight.remove(&pane_id);
+            for pane_id in &pending {
+                self.git_in_flight.remove(pane_id);
+            }
         }
     }
 
@@ -1764,43 +1819,51 @@ impl WindowState {
         self.git_in_flight
             .retain(|pane_id| self.workspace.pane(*pane_id).is_some());
 
-        let panes: Vec<PaneId> = self.view.panes.iter().map(|pane| pane.id).collect();
-        for pane_id in panes {
-            self.request_git_status(pane_id);
+        // Several splits commonly share a directory. Inspect each distinct cwd
+        // once and fan the result out to every pane in that group.
+        let mut groups: HashMap<PathBuf, Vec<PaneId>> = HashMap::new();
+        for pane_layout in &self.view.panes {
+            let Some(pane) = self.workspace.pane(pane_layout.id) else {
+                continue;
+            };
+            let cwd = pane.cwd.clone().unwrap_or_else(default_directory);
+            groups.entry(cwd).or_default().push(pane_layout.id);
+        }
+        for (cwd, panes) in groups {
+            self.request_git_status_group(panes, cwd);
         }
     }
 
-    fn on_git_status(&mut self, pane_id: PaneId, cwd: PathBuf, status: Option<GitStatus>) {
-        self.git_in_flight.remove(&pane_id);
+    fn on_git_status(&mut self, panes: Vec<PaneId>, cwd: PathBuf, status: Option<GitStatus>) {
+        let mut changed_visible = false;
+        let mut retry = Vec::new();
 
-        let Some(pane) = self.workspace.pane(pane_id) else {
-            return;
-        };
-        if pane.cwd.as_ref() != Some(&cwd) {
-            // The shell moved while the request was running; try the new cwd.
-            self.request_git_status(pane_id);
-            return;
-        }
+        for pane_id in &panes {
+            self.git_in_flight.remove(pane_id);
+            let Some(pane) = self.workspace.pane(*pane_id) else {
+                continue;
+            };
+            if pane.cwd.as_ref() != Some(&cwd) {
+                // The shell moved while the request was running; try again
+                // with the pane's current directory.
+                retry.push(*pane_id);
+                continue;
+            }
 
-        let changed = pane.git_status != status;
-        if changed {
-            match &status {
-                Some(status) => log::debug!(
-                    "pane {} git: {} +{} -{}",
-                    pane_id.0,
-                    status.branch,
-                    status.additions,
-                    status.deletions
-                ),
-                None => log::debug!("pane {} is not in a git repository", pane_id.0),
+            let changed = pane.git_status != status;
+            if changed && self.view.panes.iter().any(|view| view.id == *pane_id) {
+                changed_visible = true;
+            }
+            if let Some(pane) = self.workspace.pane_mut(*pane_id) {
+                pane.git_status = status.clone();
             }
         }
-        if let Some(pane) = self.workspace.pane_mut(pane_id) {
-            pane.git_status = status;
-        }
 
-        if changed && self.view.panes.iter().any(|pane| pane.id == pane_id) {
+        if changed_visible {
             self.window.request_redraw();
+        }
+        for pane_id in retry {
+            self.request_git_status(pane_id);
         }
     }
 
@@ -2041,6 +2104,19 @@ impl WindowState {
             .spawn(move || {
                 let result = crate::git::repository_root(&thread_cwd)
                     .and_then(|root| review::load_detail(&root, &summary, &Default::default()))
+                    .map(|detail| {
+                        let rows = build_diff_rows(&detail);
+                        let max_cols = rows
+                            .iter()
+                            .map(|row| row.text.chars().count())
+                            .max()
+                            .unwrap_or(0);
+                        crate::event::WorkingDiffPayload {
+                            detail,
+                            rows,
+                            max_cols,
+                        }
+                    })
                     .map_err(|error| format!("{error:#}"));
                 let _ = proxy.send_event(UserEvent::WorkingDiffLoaded {
                     pane: pane_id,
@@ -2064,7 +2140,7 @@ impl WindowState {
         pane_id: PaneId,
         cwd: PathBuf,
         generation: u64,
-        result: Result<ReviewDetail, String>,
+        result: Result<crate::event::WorkingDiffPayload, String>,
     ) {
         let Some(diff) = self.diff_view.as_mut() else {
             return;
@@ -2075,22 +2151,17 @@ impl WindowState {
 
         diff.loading = false;
         match result {
-            Ok(detail) => {
-                diff.rows = build_diff_rows(&detail);
-                diff.max_cols = diff
-                    .rows
-                    .iter()
-                    .map(|row| row.text.chars().count())
-                    .max()
-                    .unwrap_or(0);
+            Ok(payload) => {
+                diff.rows = payload.rows;
+                diff.max_cols = payload.max_cols;
                 diff.scroll_row = 0;
                 diff.scroll_col = 0;
                 log::debug!(
                     "working diff loaded: {} file(s), {} row(s)",
-                    detail.files.len(),
+                    payload.detail.files.len(),
                     diff.rows.len()
                 );
-                diff.detail = Some(detail);
+                diff.detail = Some(payload.detail);
                 diff.error = None;
             }
             Err(error) => {
@@ -2332,8 +2403,8 @@ impl WindowState {
 
         if self.sidebar.mode == SidebarMode::Files {
             self.explorer_pinned = false;
-            self.explorer.set_root(self.focused_cwd());
-            self.explorer.rebuild();
+            self.explorer.prepare_root(self.focused_cwd());
+            self.request_explorer_scan();
         }
 
         self.relayout(config);
@@ -2365,9 +2436,9 @@ impl WindowState {
     fn refresh_files(&mut self, config: &Config) {
         self.refresh_cwds(config);
         if !self.explorer_pinned {
-            self.explorer.set_root(self.focused_cwd());
+            self.explorer.prepare_root(self.focused_cwd());
         }
-        self.explorer.rebuild();
+        self.request_explorer_scan();
         self.relayout(config);
     }
 
@@ -2377,7 +2448,8 @@ impl WindowState {
         };
 
         if row.is_dir {
-            self.explorer.toggle(&row.path);
+            self.explorer.toggle_expanded(&row.path);
+            self.request_explorer_scan();
             self.relayout(config);
         } else {
             self.open_file(row.path, config);
@@ -2891,10 +2963,10 @@ impl WindowState {
                 .then_with(|| a.pid.cmp(&b.pid))
         });
 
-        self.agent_snapshot = AgentSnapshot {
+        self.agent_snapshot = Arc::new(AgentSnapshot {
             rows,
             generated: Some(now),
-        };
+        });
         self.agents_dirty = false;
         log::debug!(
             "agent snapshot: {} row(s), {} need attention",
@@ -2918,7 +2990,7 @@ impl WindowState {
             self.refresh_cwds(config);
         }
 
-        if now.duration_since(self.last_git_poll) >= Duration::from_millis(2000) {
+        if now.duration_since(self.last_git_poll) >= GIT_STATUS_POLL_INTERVAL {
             self.last_git_poll = now;
             self.refresh_git_statuses();
         }
@@ -3428,11 +3500,12 @@ impl WindowState {
     fn on_explorer_loaded(
         &mut self,
         root: PathBuf,
+        scan_id: u64,
         rows: Vec<FileRow>,
         error: Option<String>,
         config: &Config,
     ) {
-        if self.explorer.root != root || !self.explorer.rows.is_empty() {
+        if scan_id != self.explorer_scan_id || self.explorer.root != root {
             return;
         }
 
@@ -3440,6 +3513,35 @@ impl WindowState {
         if self.sidebar.mode == SidebarMode::Files {
             self.relayout(config);
         }
+    }
+
+    fn request_explorer_scan(&mut self) {
+        self.explorer_scan_id = self.explorer_scan_id.wrapping_add(1);
+        let scan_id = self.explorer_scan_id;
+        let root = self.explorer.root.clone();
+        let expanded = self.explorer.expanded().clone();
+        let proxy = self.proxy.clone();
+        let spawned = std::thread::Builder::new()
+            .name("explorer-scan".into())
+            .spawn(move || {
+                let (rows, error) = FileExplorer::scan(&root, &expanded);
+                let _ = proxy.send_event(UserEvent::ExplorerLoaded {
+                    root,
+                    scan_id,
+                    rows,
+                    error,
+                });
+            });
+        if spawned.is_err() {
+            // Keep the UI usable if the worker cannot start.
+            self.explorer.rebuild();
+        }
+    }
+
+    fn invalidate_pane_frame(&mut self, pane_id: PaneId) {
+        self.frame_cache.remove(&pane_id);
+        self.frame_dominant.remove(&pane_id);
+        self.prompt_trims.remove(&pane_id);
     }
 
     fn clear_completion(&mut self) {
@@ -3459,26 +3561,21 @@ impl WindowState {
             return;
         };
 
-        let Some((input, command, cwd, is_fish, armed)) =
-            self.workspace.pane(pane_id).and_then(|pane| {
-                let input = pane.terminal.input_line()?;
-                let prefix = complete::line::extract_command(&input)?;
-                Some((
-                    input,
-                    prefix.command,
-                    pane.cwd.clone().unwrap_or_else(default_directory),
-                    self.shells.get(&pane.profile_id).is_some_and(|profile| {
-                        profile.short.eq_ignore_ascii_case("fish")
-                            || profile.name.eq_ignore_ascii_case("fish")
-                    }),
-                    pane.suggestion_armed,
-                ))
-            })
-        else {
-            self.clear_completion();
-            return;
+        let (armed, is_fish) = {
+            let Some(pane) = self.workspace.pane(pane_id) else {
+                self.clear_completion();
+                return;
+            };
+            let is_fish = self.shells.get(&pane.profile_id).is_some_and(|profile| {
+                profile.short.eq_ignore_ascii_case("fish")
+                    || profile.name.eq_ignore_ascii_case("fish")
+            });
+            (pane.suggestion_armed, is_fish)
         };
 
+        // Most redraws (terminal output, hover, footer updates) do not need
+        // to inspect the cursor line at all. Keep the expensive grid scan and
+        // completion engine for frames where a suggestion is actually armed.
         if !armed && !self.completion_open {
             self.clear_completion();
             return;
@@ -3492,6 +3589,17 @@ impl WindowState {
             self.clear_completion();
             return;
         }
+
+        let Some((input, command, cwd)) = self.workspace.pane(pane_id).and_then(|pane| {
+            let input = pane.terminal.input_line()?;
+            let prefix = complete::line::extract_command(&input)?;
+            let cwd = pane.cwd.clone().unwrap_or_else(default_directory);
+            Some((input, prefix.command, cwd))
+        }) else {
+            self.clear_completion();
+            return;
+        };
+
         if command.trim().is_empty() && !self.completion_open {
             self.clear_completion();
             return;
@@ -3504,43 +3612,47 @@ impl WindowState {
             git: config.completion_git,
             is_fish,
         };
+
+        // A redraw can be caused by mouse movement, output in another pane or
+        // a footer update. If the command, cwd and options are unchanged, the
+        // candidate list is still valid and only the cursor position needs to
+        // be refreshed.
+        if let Some(view) = &mut self.completion_view
+            && view.pane == pane_id
+            && view.line == command
+            && view.cwd == cwd
+            && view.options == options
+        {
+            view.row = input.row;
+            view.col = input.col;
+            view.right_limit = input.right_limit;
+            return;
+        }
+
         let completion = self.completion.completion(&command, &cwd, &options);
         if completion.candidates.is_empty() {
             self.clear_completion();
             return;
         }
 
-        let same_line = self
-            .completion_view
-            .as_ref()
-            .is_some_and(|view| view.pane == pane_id && view.line == command);
-        if !same_line {
-            log::debug!(
-                "completion: {:?} -> {} candidate(s)",
-                command,
-                completion.candidates.len()
-            );
-        }
+        log::debug!(
+            "completion: {:?} -> {} candidate(s)",
+            command,
+            completion.candidates.len()
+        );
         self.completion_view = Some(CompletionView {
             pane: pane_id,
             row: input.row,
             col: input.col,
             line: command,
+            cwd,
+            options,
             candidates: completion.candidates,
             typed_line: completion.typed_line,
             typed_token: completion.typed_token,
             right_limit: input.right_limit,
         });
-        if same_line {
-            let count = self
-                .completion_view
-                .as_ref()
-                .map(|view| view.candidates.len())
-                .unwrap_or(0);
-            self.completion_selected = self.completion_selected.min(count.saturating_sub(1));
-        } else {
-            self.completion_selected = 0;
-        }
+        self.completion_selected = 0;
     }
 
     fn ghost_candidate(&self, config: &Config) -> Option<&complete::Candidate> {
@@ -3895,21 +4007,28 @@ impl WindowState {
             };
             pane.terminal.scroll(scroll);
             self.dirty_panes.insert(pane_id);
+            self.invalidate_pane_frame(pane_id);
             self.window.request_redraw();
             return;
         }
 
         if let Some(bytes) = input::encode_key(&event, self.modifiers, mode, config.option_as_meta)
-            && let Some(pane) = self.workspace.pane_mut(pane_id)
         {
-            if pane.terminal.display_offset() > 0 {
-                pane.terminal.scroll(Scroll::Bottom);
-                self.dirty_panes.insert(pane_id);
-                self.window.request_redraw();
+            let mut scrolled_back = false;
+            if let Some(pane) = self.workspace.pane_mut(pane_id) {
+                if pane.terminal.display_offset() > 0 {
+                    pane.terminal.scroll(Scroll::Bottom);
+                    scrolled_back = true;
+                }
+                pane.session.write(&bytes);
+                if !disarm {
+                    pane.suggestion_armed = true;
+                }
             }
-            pane.session.write(&bytes);
-            if !disarm {
-                pane.suggestion_armed = true;
+            if scrolled_back {
+                self.dirty_panes.insert(pane_id);
+                self.invalidate_pane_frame(pane_id);
+                self.window.request_redraw();
             }
         }
     }
@@ -4258,6 +4377,8 @@ impl WindowState {
                 && let Some(pane) = self.workspace.pane_mut(pane_id)
             {
                 pane.terminal.update_selection(point, side);
+                self.dirty_panes.insert(pane_id);
+                self.invalidate_pane_frame(pane_id);
                 self.window.request_redraw();
             }
             return;
@@ -4477,6 +4598,8 @@ impl WindowState {
 
                 self.last_click = Some((now, point, pane_id));
                 self.selecting = Some(pane_id);
+                self.dirty_panes.insert(pane_id);
+                self.invalidate_pane_frame(pane_id);
                 self.window.request_redraw();
             }
             ElementState::Released => {
@@ -4492,6 +4615,8 @@ impl WindowState {
 
                 if empty && let Some(pane) = self.workspace.pane_mut(pane_id) {
                     pane.terminal.clear_selection();
+                    self.dirty_panes.insert(pane_id);
+                    self.invalidate_pane_frame(pane_id);
                 }
                 self.window.request_redraw();
             }
@@ -4618,6 +4743,7 @@ impl WindowState {
             if let Some(pane) = self.workspace.pane_mut(pane_id) {
                 pane.terminal.scroll(Scroll::Delta(whole_rows as i32));
                 self.dirty_panes.insert(pane_id);
+                self.invalidate_pane_frame(pane_id);
                 self.window.request_redraw();
             }
         }
@@ -4892,6 +5018,9 @@ impl WindowState {
     }
 
     fn on_redraw(&mut self, config: &Config) {
+        if self.window.is_minimized().unwrap_or(false) {
+            return;
+        }
         let theme = &config.theme;
         let scale = self.renderer.scale_factor() as f32;
         let metrics = self.renderer.cell_metrics();
@@ -4905,10 +5034,56 @@ impl WindowState {
         };
         let focused = tab.focused;
 
-        let mut frames: Vec<(PaneId, Rect, Frame)> = Vec::with_capacity(self.view.panes.len());
-        let mut prompt_trims = Vec::new();
+        // Frames are expensive to build (one String and several Vecs per
+        // visible row). Reuse the cached frame for panes whose content did not
+        // change; UI-only redraws (hover, footer, agent state) then carry no
+        // terminal-grid work.
+        let mut frames: Vec<FrameEntry> = Vec::with_capacity(self.view.panes.len());
+        let mut built: Vec<BuiltFrame> = Vec::new();
         for pane_layout in &self.view.panes {
-            if let Some(pane) = self.workspace.pane(pane_layout.id) {
+            let pane_id = pane_layout.id;
+            let Some(pane) = self.workspace.pane(pane_id) else {
+                continue;
+            };
+            let is_dirty = self.dirty_panes.contains(&pane_id);
+            let has_cache = self.frame_cache.contains_key(&pane_id);
+            let can_update = config.show_user_in_prompt && is_dirty && has_cache;
+
+            let (frame, dominant, dirty_rows) = if !is_dirty && has_cache {
+                let frame = self
+                    .frame_cache
+                    .get(&pane_id)
+                    .cloned()
+                    .expect("frame cache checked above");
+                let dominant = self
+                    .frame_dominant
+                    .get(&pane_id)
+                    .copied()
+                    .unwrap_or_else(|| dominant_background(&frame));
+                (frame, dominant, None)
+            } else if can_update {
+                let mut frame = self
+                    .frame_cache
+                    .remove(&pane_id)
+                    .expect("cached frame checked above");
+                let old_dominant = self
+                    .frame_dominant
+                    .get(&pane_id)
+                    .copied()
+                    .unwrap_or_else(|| dominant_background(&frame));
+                let rows = self
+                    .workspace
+                    .pane_mut(pane_id)
+                    .map(|pane| pane.terminal.update_frame(theme, Arc::make_mut(&mut frame)))
+                    .unwrap_or_default();
+                let dominant = if rows.is_empty() {
+                    old_dominant
+                } else {
+                    dominant_background(&frame)
+                };
+                built.push((pane_id, frame.clone(), dominant, None));
+                (frame, dominant, Some(rows))
+            } else {
                 let mut frame = pane.terminal.frame(theme);
                 let trims = if pane.terminal.mode().contains(TermMode::ALT_SCREEN) {
                     Vec::new()
@@ -4918,14 +5093,31 @@ impl WindowState {
                 for trim in &trims {
                     trim_prompt_row(&mut frame, trim.row, trim.columns);
                 }
-                if !trims.is_empty() {
-                    prompt_trims.push((pane_layout.id, trims));
+                let dominant = dominant_background(&frame);
+                let frame = Arc::new(frame);
+                built.push((pane_id, frame.clone(), dominant, Some(trims.clone())));
+                (frame, dominant, None)
+            };
+            frames.push((pane_id, pane_layout.content, frame, dominant, dirty_rows));
+        }
+        for (pane_id, frame, dominant, trims) in built {
+            self.frame_cache.insert(pane_id, frame);
+            self.frame_dominant.insert(pane_id, dominant);
+            if let Some(trims) = trims {
+                if trims.is_empty() {
+                    self.prompt_trims.remove(&pane_id);
+                } else {
+                    self.prompt_trims.insert(pane_id, trims);
                 }
-                frames.push((pane_layout.id, pane_layout.content, frame));
             }
         }
-        self.prompt_trims.clear();
-        self.prompt_trims.extend(prompt_trims);
+        let visible_panes: HashSet<PaneId> = self.view.panes.iter().map(|pane| pane.id).collect();
+        self.frame_cache
+            .retain(|pane_id, _| visible_panes.contains(pane_id));
+        self.frame_dominant
+            .retain(|pane_id, _| visible_panes.contains(pane_id));
+        self.prompt_trims
+            .retain(|pane_id, _| visible_panes.contains(pane_id));
 
         let editor_frame = if self.diff_view.is_some() {
             None
@@ -4934,25 +5126,52 @@ impl WindowState {
                 .as_ref()
                 .zip(self.view.editor)
                 .map(|(editor, layout)| {
-                    (
-                        layout.text,
-                        build_editor_frame(editor, layout.text, metrics, theme),
-                    )
+                    let cached = (!self.editor_dirty)
+                        .then(|| self.editor_frame_cache.clone())
+                        .flatten();
+                    let frame = if let Some(frame) = cached {
+                        frame
+                    } else {
+                        let frame =
+                            Arc::new(build_editor_frame(editor, layout.text, metrics, theme));
+                        self.editor_frame_cache = Some(frame.clone());
+                        frame
+                    };
+                    (layout.text, frame)
                 })
         };
 
-        let mut quads: Vec<Quad> = Vec::new();
-        let mut labels: Vec<Label> = Vec::new();
+        let mut quads = std::mem::take(&mut self.quad_scratch);
+        quads.clear();
+        let mut labels = std::mem::take(&mut self.label_scratch);
+        labels.clear();
 
         let diff_frame = self
             .diff_view
             .as_ref()
             .zip(self.view.editor)
             .map(|(diff, layout)| {
-                (
-                    layout.text,
-                    build_diff_frame(diff, layout.text, metrics, theme, &mut quads),
-                )
+                let cached = (!self.editor_dirty)
+                    .then(|| self.diff_frame_cache.clone())
+                    .flatten();
+                let rebuilt = cached.is_none();
+                let frame = if let Some(frame) = cached {
+                    frame
+                } else {
+                    let frame = Arc::new(build_diff_frame(
+                        diff,
+                        layout.text,
+                        metrics,
+                        theme,
+                        &mut quads,
+                    ));
+                    self.diff_frame_cache = Some(frame.clone());
+                    frame
+                };
+                if !rebuilt {
+                    push_diff_background_quads(diff, layout.text, metrics, theme, &mut quads);
+                }
+                (layout.text, frame)
             });
 
         self.build_sidebar_chrome(
@@ -4992,7 +5211,7 @@ impl WindowState {
         // full-screen TUIs that set their own SGR background. This keeps the
         // padding, footer and row-rounding strip flush with the TUI instead of
         // showing the app frame.
-        for (id, _, frame) in &frames {
+        for (id, _, _, dominant, _) in &frames {
             let Some(pane_layout) = self.view.panes.iter().find(|pane| pane.id == *id) else {
                 continue;
             };
@@ -5002,11 +5221,11 @@ impl WindowState {
                 outer.y,
                 outer.width,
                 outer.height,
-                to_linear(dominant_background(frame), 1.0),
+                to_linear(*dominant, 1.0),
             ));
         }
 
-        for (_, content, frame) in &frames {
+        for (_, content, frame, _, _) in &frames {
             for (row_index, row) in frame.rows.iter().enumerate() {
                 let y = content.y + row_index as f32 * metrics.height;
                 for background in &row.backgrounds {
@@ -5023,11 +5242,11 @@ impl WindowState {
             }
         }
 
-        for (_, content, frame) in &frames {
+        for (_, content, frame, _, _) in &frames {
             push_cursor_quads(&mut quads, *content, frame, metrics, theme);
         }
         if let Some((content, frame)) = &editor_frame {
-            push_cursor_quads(&mut quads, *content, frame, metrics, theme);
+            push_cursor_quads(&mut quads, *content, frame.as_ref(), metrics, theme);
         }
 
         let mut footer_hits = Vec::with_capacity(self.view.panes.len());
@@ -5172,8 +5391,10 @@ impl WindowState {
             && let Some(pane_layout) = self.view.panes.iter().find(|pane| pane.id == menu.pane)
         {
             let layout = branch_menu_layout(menu, anchor, pane_layout.outer, scale, ui_font_size);
-            if let Some((_, content, frame)) = frames.iter_mut().find(|(id, _, _)| *id == menu.pane)
+            if let Some((_, content, frame, _, _)) =
+                frames.iter_mut().find(|(id, _, _, _, _)| *id == menu.pane)
             {
+                let frame = Arc::make_mut(frame);
                 let rect = layout.rect;
                 let row_start = (((rect.y - content.y) / metrics.height).floor() as isize)
                     .clamp(0, frame.rows.len() as isize - 1)
@@ -5206,8 +5427,10 @@ impl WindowState {
         let mut popup_occlusion = branch_occlusion;
         if self.completion_open
             && let Some(view) = &self.completion_view
-            && let Some((_, content, frame)) = frames.iter_mut().find(|(id, _, _)| *id == view.pane)
+            && let Some((_, content, frame, _, _)) =
+                frames.iter_mut().find(|(id, _, _, _, _)| *id == view.pane)
         {
+            let frame = Arc::make_mut(frame);
             let layout = popup_layout(
                 PopupGeometry {
                     content: *content,
@@ -5323,11 +5546,12 @@ impl WindowState {
 
         let mut scene_panes: Vec<PaneLayer<'_>> = frames
             .iter()
-            .map(|(id, content, frame)| PaneLayer {
+            .map(|(id, content, frame, _, dirty_rows)| PaneLayer {
                 id: id.0,
                 content: *content,
-                frame,
+                frame: frame.as_ref(),
                 dirty: self.dirty_panes.contains(id),
+                dirty_rows: dirty_rows.clone(),
                 ghost: if Some(*id) == ghost_pane {
                     ghost.clone()
                 } else {
@@ -5339,8 +5563,9 @@ impl WindowState {
             scene_panes.push(PaneLayer {
                 id: 0,
                 content: *content,
-                frame,
+                frame: frame.as_ref(),
                 dirty: self.editor_dirty,
+                dirty_rows: None,
                 ghost: None,
             });
         }
@@ -5354,6 +5579,13 @@ impl WindowState {
         if let Err(error) = self.renderer.render(&scene, theme) {
             log::error!("render failed: {error:#}");
         }
+        let Scene {
+            panes: _,
+            labels,
+            quads,
+        } = scene;
+        self.label_scratch = labels;
+        self.quad_scratch = quads;
 
         self.dirty_panes.clear();
         self.editor_dirty = false;
@@ -5361,11 +5593,11 @@ impl WindowState {
         let ime_target = match self.focus {
             Focus::Editor => editor_frame
                 .as_ref()
-                .map(|(content, frame)| (*content, frame)),
+                .map(|(content, frame)| (*content, frame.as_ref())),
             Focus::Terminal => frames
                 .iter()
-                .find(|(id, _, _)| *id == focused)
-                .map(|(_, content, frame)| (*content, frame)),
+                .find(|(id, _, _, _, _)| *id == focused)
+                .map(|(_, content, frame, _, _)| (*content, frame.as_ref())),
             Focus::Diff => None,
         };
 
@@ -6200,84 +6432,6 @@ fn branch_menu_layout(
     }
 }
 
-fn build_diff_rows(detail: &ReviewDetail) -> Vec<DiffRow> {
-    let mut rows = Vec::new();
-
-    for (index, file) in detail.files.iter().enumerate() {
-        if index > 0 {
-            rows.push(DiffRow {
-                kind: DiffRowKind::Separator,
-                text: String::new(),
-            });
-        }
-
-        let status = match file.status {
-            FileStatus::Modified => "M",
-            FileStatus::Added => "A",
-            FileStatus::Deleted => "D",
-            FileStatus::Renamed => "R",
-            FileStatus::Binary => "B",
-        };
-        let path = match &file.old_path {
-            Some(old) if old != &file.path => format!("{old} → {}", file.path),
-            _ => file.path.clone(),
-        };
-        let stats = if file.binary {
-            "binary".to_owned()
-        } else {
-            format!("+{} -{}", file.additions, file.deletions)
-        };
-        rows.push(DiffRow {
-            kind: DiffRowKind::File,
-            text: format!("{status}  {path}   {stats}"),
-        });
-
-        if file.binary {
-            rows.push(DiffRow {
-                kind: DiffRowKind::Meta,
-                text: "Archivo binario".to_owned(),
-            });
-            continue;
-        }
-
-        for line in &file.lines {
-            let text = match line.kind {
-                DiffLineKind::Add => {
-                    format!(
-                        "{:>5} {:>5} + {}",
-                        "",
-                        line.new.unwrap_or_default(),
-                        line.text
-                    )
-                }
-                DiffLineKind::Remove => format!(
-                    "{:>5} {:>5} - {}",
-                    line.old.unwrap_or_default(),
-                    "",
-                    line.text
-                ),
-                DiffLineKind::Context => format!(
-                    "{:>5} {:>5}   {}",
-                    line.old.unwrap_or_default(),
-                    line.new.unwrap_or_default(),
-                    line.text
-                ),
-                DiffLineKind::Hunk | DiffLineKind::Meta => line.text.clone(),
-            };
-            let kind = match line.kind {
-                DiffLineKind::Add => DiffRowKind::Add,
-                DiffLineKind::Remove => DiffRowKind::Remove,
-                DiffLineKind::Context => DiffRowKind::Context,
-                DiffLineKind::Hunk => DiffRowKind::Hunk,
-                DiffLineKind::Meta => DiffRowKind::Meta,
-            };
-            rows.push(DiffRow { kind, text });
-        }
-    }
-
-    rows
-}
-
 fn build_diff_frame(
     diff: &DiffView,
     area: Rect,
@@ -6362,6 +6516,42 @@ fn build_diff_frame(
         cols,
         cursor: None,
         background: theme.background,
+    }
+}
+
+/// Background quads for the visible diff rows. Kept separate from the text
+/// frame so a cached frame still gets its row backgrounds.
+fn push_diff_background_quads(
+    diff: &DiffView,
+    area: Rect,
+    metrics: CellMetrics,
+    theme: &Theme,
+    quads: &mut Vec<Quad>,
+) {
+    let rows = (area.height / metrics.height).floor().max(1.0) as usize;
+    let start = diff.scroll_row.min(diff.rows.len().saturating_sub(rows));
+    for index in 0..rows {
+        let Some(row) = diff.rows.get(start + index) else {
+            continue;
+        };
+        let background = match row.kind {
+            DiffRowKind::File => Some(theme.sidebar_active),
+            DiffRowKind::Add => Some(theme.diff_add_background),
+            DiffRowKind::Remove => Some(theme.diff_remove_background),
+            DiffRowKind::Context
+            | DiffRowKind::Hunk
+            | DiffRowKind::Meta
+            | DiffRowKind::Separator => None,
+        };
+        if let Some(background) = background {
+            quads.push(Quad::new(
+                area.x,
+                area.y + index as f32 * metrics.height,
+                area.width,
+                metrics.height,
+                to_linear(background, 1.0),
+            ));
+        }
     }
 }
 
@@ -6757,17 +6947,22 @@ fn truncate_to_width(
         return text.to_owned();
     }
 
-    let mut chars: Vec<char> = text.chars().collect();
-    while !chars.is_empty() {
-        chars.pop();
-        let mut candidate: String = chars.iter().collect();
+    let chars: Vec<char> = text.chars().collect();
+    let mut low = 0usize;
+    let mut high = chars.len();
+    let mut best = String::new();
+    while low < high {
+        let middle = (low + high) / 2;
+        let mut candidate: String = chars[..middle].iter().collect();
         candidate.push('…');
         if renderer.measure_ui_text(&candidate, font_size, bold) <= max_width {
-            return candidate;
+            best = candidate;
+            low = middle + 1;
+        } else {
+            high = middle;
         }
     }
-
-    String::new()
+    best
 }
 
 fn push_branch_icon(quads: &mut Vec<Quad>, x: f32, y: f32, size: f32, scale: f32, color: Rgb) {
@@ -7286,6 +7481,7 @@ fn digit_index(code: KeyCode) -> Option<usize> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::review::{DiffLineKind, FileStatus};
 
     fn candidate(label: &str) -> complete::Candidate {
         complete::Candidate {

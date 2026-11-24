@@ -4,6 +4,7 @@ use alacritty_terminal::event::Event;
 use winit::window::WindowId;
 
 use crate::complete::history::History;
+use crate::diff_view::DiffRow;
 use crate::explorer::FileRow;
 use crate::forge::RemoteChange;
 use crate::git::refs::BranchInfo;
@@ -11,9 +12,16 @@ use crate::git::{Snapshot, StatusSnapshot};
 use crate::git_status::GitStatus;
 use crate::highlight::StyledSpan;
 use crate::menu::Action;
-use crate::review::ReviewDetail;
+use crate::review::{ReviewDetail, ReviewList};
 use crate::shell::TerminalProfile;
 use crate::workspace::PaneId;
+
+#[derive(Debug)]
+pub struct WorkingDiffPayload {
+    pub detail: ReviewDetail,
+    pub rows: Vec<DiffRow>,
+    pub max_cols: usize,
+}
 
 /// Events sent from background threads (PTY readers, terminal event proxy)
 /// into the winit event loop. Every event is tagged with the pane that
@@ -36,6 +44,7 @@ pub enum UserEvent {
     /// Initial directory scan for the file explorer sidebar.
     ExplorerLoaded {
         root: PathBuf,
+        scan_id: u64,
         rows: Vec<FileRow>,
         error: Option<String>,
     },
@@ -73,6 +82,12 @@ pub enum UserEvent {
     OpenCodeReview { cwd: PathBuf },
     /// Request to open the Git manager window for a directory.
     OpenGitManager { cwd: PathBuf },
+    /// Local review list loaded in the background.
+    ReviewListLoaded {
+        window_id: WindowId,
+        request_id: u64,
+        result: Result<ReviewList, String>,
+    },
     /// Code review diff loaded in the background.
     ReviewLoaded {
         window_id: WindowId,
@@ -85,9 +100,9 @@ pub enum UserEvent {
         request_id: u64,
         result: Result<Vec<RemoteChange>, String>,
     },
-    /// Git branch and diff stats for a terminal pane.
+    /// Git branch and diff stats for one or more terminal panes sharing a cwd.
     GitStatus {
-        pane: PaneId,
+        panes: Vec<PaneId>,
         cwd: PathBuf,
         status: Option<GitStatus>,
     },
@@ -109,7 +124,7 @@ pub enum UserEvent {
         pane: PaneId,
         cwd: PathBuf,
         generation: u64,
-        result: Result<ReviewDetail, String>,
+        result: Result<WorkingDiffPayload, String>,
     },
     /// Full repository snapshot for the Git manager window.
     GitSnapshotLoaded {

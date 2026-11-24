@@ -61,13 +61,17 @@ impl FileExplorer {
         self.error = error;
     }
 
-    pub fn set_root(&mut self, root: PathBuf) {
+    /// Change root without walking the directory. Returns whether the root
+    /// changed; callers can then request an asynchronous scan.
+    pub fn prepare_root(&mut self, root: PathBuf) -> bool {
         if self.root == root {
-            return;
+            return false;
         }
         self.root = root;
         self.expanded.clear();
-        self.rebuild();
+        self.rows.clear();
+        self.error = None;
+        true
     }
 
     pub fn rebuild(&mut self) {
@@ -76,13 +80,23 @@ impl FileExplorer {
         self.error = error;
     }
 
-    pub fn toggle(&mut self, path: &Path) {
+    /// Toggle a folder without scanning; callers can request a worker scan.
+    pub fn toggle_expanded(&mut self, path: &Path) {
         if self.expanded.contains(path) {
             self.expanded.remove(path);
         } else {
             self.expanded.insert(path.to_path_buf());
         }
+    }
+
+    #[cfg(test)]
+    pub fn toggle(&mut self, path: &Path) {
+        self.toggle_expanded(path);
         self.rebuild();
+    }
+
+    pub fn expanded(&self) -> &HashSet<PathBuf> {
+        &self.expanded
     }
 
     pub fn display_root(&self) -> String {

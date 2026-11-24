@@ -73,7 +73,11 @@ pub struct ReviewWindow {
     pr_offset: usize,
     reviewed: HashSet<String>,
     request_id: u64,
+    list_request_id: u64,
+    list_loading: bool,
     prs_request_id: u64,
+    pr_filtered: Vec<usize>,
+    pr_search_text: Vec<String>,
     close_requested: bool,
 }
 
@@ -85,10 +89,10 @@ impl ReviewWindow {
         proxy: EventLoopProxy<UserEvent>,
         tokens: ForgeTokens,
     ) -> Self {
-        let mut window = Self {
+        Self {
             window,
             renderer,
-            review: CodeReview::open(directory, tokens),
+            review: CodeReview::pending(directory, tokens),
             proxy,
             modifiers: ModifiersState::empty(),
             cursor: PhysicalPosition::new(0.0, 0.0),
@@ -102,11 +106,13 @@ impl ReviewWindow {
             pr_offset: 0,
             reviewed: HashSet::new(),
             request_id: 0,
+            list_request_id: 0,
+            list_loading: false,
             prs_request_id: 0,
+            pr_filtered: Vec::new(),
+            pr_search_text: Vec::new(),
             close_requested: false,
-        };
-        window.start_prs_load();
-        window
+        }
     }
 
     pub fn window_id(&self) -> WindowId {
@@ -127,6 +133,12 @@ impl ReviewWindow {
     }
 
     pub fn reveal(&mut self, config: &Config) {
+        if !self.list_loading && self.review.reviews.is_empty() && self.review.error.is_none() {
+            // Start only after the window is registered with the event loop;
+            // otherwise a fast worker could reply before the event handler can
+            // route the result back to this window.
+            self.start_list_load();
+        }
         self.draw(config);
         self.window.set_visible(true);
         self.draw(config);
@@ -144,6 +156,7 @@ impl ReviewWindow {
                 self.renderer.set_scale_factor(scale_factor, config);
                 self.window.request_redraw();
             }
+            WindowEvent::Occluded(false) => self.window.request_redraw(),
             WindowEvent::RedrawRequested => self.draw(config),
             WindowEvent::ModifiersChanged(modifiers) => {
                 self.modifiers = modifiers.state();
@@ -159,6 +172,28 @@ impl ReviewWindow {
             WindowEvent::MouseWheel { delta, .. } => self.on_wheel(delta, config),
             _ => {}
         }
+    }
+
+    pub fn apply_list(
+        &mut self,
+        request_id: u64,
+        result: std::result::Result<crate::review::ReviewList, String>,
+    ) {
+        if request_id != self.list_request_id {
+            return;
+        }
+        self.list_loading = false;
+        self.review.apply_list(result);
+        log::info!(
+            "review list loaded: {} review(s)",
+            self.review.reviews.len()
+        );
+        self.reviewed.clear();
+        self.selected_file = 0;
+        self.file_offset = 0;
+        self.review.scroll_row = 0;
+        self.review.scroll_col = 0;
+        self.window.request_redraw();
     }
 
     pub fn apply_detail(
@@ -202,6 +237,7 @@ impl ReviewWindow {
         }
 
         self.review.apply_pull_requests(result);
+        self.rebuild_pr_search_text();
         self.pr_selected = 0;
         self.pr_offset = 0;
         self.window.request_redraw();
@@ -210,7 +246,7 @@ impl ReviewWindow {
     fn refresh_current(&mut self) {
         match self.mode {
             ListMode::Local => {
-                self.review.refresh();
+                self.start_list_load();
                 self.reviewed.clear();
                 self.selected_file = 0;
                 self.file_offset = 0;
@@ -222,6 +258,34 @@ impl ReviewWindow {
                 self.pr_offset = 0;
             }
         }
+    }
+
+    fn start_list_load(&mut self) {
+        self.list_request_id = self.list_request_id.wrapping_add(1);
+        let request_id = self.list_request_id;
+        self.list_loading = true;
+        self.review.error = None;
+
+        let start = self.review.repo.clone();
+        let proxy = self.proxy.clone();
+        let window_id = self.window.id();
+        let spawned = std::thread::Builder::new()
+            .name("review-list".into())
+            .spawn(move || {
+                let result = review::load_list(&start).map_err(|error| format!("{error:#}"));
+                let _ = proxy.send_event(UserEvent::ReviewListLoaded {
+                    window_id,
+                    request_id,
+                    result,
+                });
+            });
+
+        if let Err(error) = spawned {
+            self.list_loading = false;
+            self.review.error = Some(format!("No se pudo cargar Code Review: {error}"));
+        }
+
+        self.window.request_redraw();
     }
 
     fn start_prs_load(&mut self) {
@@ -259,22 +323,13 @@ impl ReviewWindow {
         self.window.request_redraw();
     }
 
-    fn filtered_prs(&self) -> Vec<usize> {
-        let terms: Vec<String> = self
-            .search
-            .split_whitespace()
-            .map(|term| term.to_lowercase())
-            .collect();
-
-        self.review
+    fn rebuild_pr_search_text(&mut self) {
+        self.pr_search_text = self
+            .review
             .pull_requests
             .iter()
-            .enumerate()
-            .filter(|(_, pull)| {
-                if terms.is_empty() {
-                    return true;
-                }
-                let haystack = format!(
+            .map(|pull| {
+                format!(
                     "{} {} {} {} {} {}",
                     pull.id_label(),
                     pull.id,
@@ -283,17 +338,38 @@ impl ReviewWindow {
                     pull.source_branch,
                     pull.target_branch
                 )
-                .to_lowercase();
-                terms.iter().all(|term| haystack.contains(term))
+                .to_lowercase()
             })
+            .collect();
+        self.rebuild_pr_filter();
+    }
+
+    fn rebuild_pr_filter(&mut self) {
+        let terms: Vec<String> = self
+            .search
+            .split_whitespace()
+            .map(|term| term.to_lowercase())
+            .collect();
+
+        self.pr_filtered = self
+            .pr_search_text
+            .iter()
+            .enumerate()
+            .filter(|(_, haystack)| terms.iter().all(|term| haystack.contains(term)))
             .map(|(index, _)| index)
-            .collect()
+            .collect();
+
+        if self.mode == ListMode::PullRequests {
+            self.pr_selected = self
+                .pr_selected
+                .min(self.pr_filtered.len().saturating_sub(1));
+        }
     }
 
     fn item_count(&self) -> usize {
         match self.mode {
             ListMode::Local => self.review.reviews.len(),
-            ListMode::PullRequests => self.filtered_prs().len(),
+            ListMode::PullRequests => self.pr_filtered.len(),
         }
     }
 
@@ -341,6 +417,7 @@ impl ReviewWindow {
     }
 
     fn reset_pr_selection(&mut self) {
+        self.rebuild_pr_filter();
         self.pr_selected = 0;
         self.pr_offset = 0;
         self.reset_selection();
@@ -368,13 +445,11 @@ impl ReviewWindow {
     fn selected_summary(&self) -> Option<ReviewSummary> {
         match self.mode {
             ListMode::Local => self.review.reviews.get(self.review.selected).cloned(),
-            ListMode::PullRequests => {
-                let filtered = self.filtered_prs();
-                filtered
-                    .get(self.pr_selected)
-                    .and_then(|index| self.review.pull_requests.get(*index))
-                    .map(RemoteChange::to_review)
-            }
+            ListMode::PullRequests => self
+                .pr_filtered
+                .get(self.pr_selected)
+                .and_then(|index| self.review.pull_requests.get(*index))
+                .map(RemoteChange::to_review),
         }
     }
 
@@ -1023,6 +1098,9 @@ impl ReviewWindow {
     }
 
     fn draw(&mut self, config: &Config) {
+        if self.window.is_minimized().unwrap_or(false) {
+            return;
+        }
         let theme = &config.theme;
         let scale = self.renderer.scale_factor() as f32;
         let metrics = self.renderer.cell_metrics();
@@ -1250,12 +1328,6 @@ impl ReviewWindow {
             });
         }
 
-        let filtered = if self.mode == ListMode::PullRequests {
-            self.filtered_prs()
-        } else {
-            Vec::new()
-        };
-
         for (position, rect) in &layout.review_rows {
             let (title, subtitle) = match self.mode {
                 ListMode::Local => {
@@ -1265,7 +1337,8 @@ impl ReviewWindow {
                     (summary.title.clone(), summary.subtitle.clone())
                 }
                 ListMode::PullRequests => {
-                    let Some(pull) = filtered
+                    let Some(pull) = self
+                        .pr_filtered
                         .get(*position)
                         .and_then(|index| self.review.pull_requests.get(*index))
                     else {
@@ -1374,7 +1447,7 @@ impl ReviewWindow {
             }
         }
         if self.mode == ListMode::Local && layout.review_rows.is_empty() {
-            if self.review.loading {
+            if self.list_loading || self.review.loading {
                 ui::skeleton_rows(&mut quads, layout.list_area, 4, theme, scale);
             } else {
                 ui::empty_state(
@@ -1614,6 +1687,7 @@ impl ReviewWindow {
                     content: *area,
                     frame,
                     dirty: true,
+                    dirty_rows: None,
                     ghost: None,
                 });
             }
@@ -1678,6 +1752,9 @@ impl ReviewWindow {
                     "Elige un pull request",
                     "Selecciona un pull request o merge request de la izquierda y pulsa Enter.",
                 ),
+                ListMode::Local if self.list_loading => {
+                    ("Cargando reviews…", "Leyendo commits y cambios locales.")
+                }
                 ListMode::Local if self.review.loading => {
                     ("Cargando review…", "Leyendo commits y cambios locales.")
                 }

@@ -92,7 +92,7 @@ pub struct AgentWindow {
     proxy: EventLoopProxy<UserEvent>,
     modifiers: ModifiersState,
     cursor: PhysicalPosition<f64>,
-    snapshot: AgentSnapshot,
+    snapshot: Arc<AgentSnapshot>,
     filter: Filter,
     selected: Option<AgentId>,
     hovered: Option<AgentId>,
@@ -113,7 +113,7 @@ impl AgentWindow {
             proxy,
             modifiers: ModifiersState::empty(),
             cursor: PhysicalPosition::new(0.0, 0.0),
-            snapshot: AgentSnapshot::default(),
+            snapshot: Arc::new(AgentSnapshot::default()),
             filter: Filter::All,
             selected: None,
             hovered: None,
@@ -159,10 +159,12 @@ impl AgentWindow {
         self.window.request_redraw();
     }
 
-    pub fn apply_snapshot(&mut self, snapshot: AgentSnapshot) {
+    pub fn apply_snapshot(&mut self, snapshot: Arc<AgentSnapshot>) {
+        if Arc::ptr_eq(&self.snapshot, &snapshot) {
+            return;
+        }
         let selected = self.selected.clone();
-        let changed = self.snapshot != snapshot;
-        let generated_changed = self.snapshot.generated != snapshot.generated;
+        let changed = self.snapshot.rows != snapshot.rows;
         self.snapshot = snapshot;
         self.window.set_title(&format!(
             "Agentes — {} activos · {} requieren atención",
@@ -185,12 +187,15 @@ impl AgentWindow {
             self.kill_armed = None;
         }
         self.clamp_selection();
-        if changed || generated_changed {
+        if changed {
             self.window.request_redraw();
         }
     }
 
     pub fn tick(&mut self) {
+        if self.window.is_minimized().unwrap_or(false) {
+            return;
+        }
         if self.last_tick.elapsed() >= Duration::from_secs(1) {
             self.last_tick = Instant::now();
             if self
@@ -227,6 +232,7 @@ impl AgentWindow {
                 self.renderer.set_scale_factor(scale_factor, config);
                 self.window.request_redraw();
             }
+            WindowEvent::Occluded(false) => self.window.request_redraw(),
             WindowEvent::RedrawRequested => self.draw(config),
             WindowEvent::ModifiersChanged(modifiers) => {
                 self.modifiers = modifiers.state();
@@ -436,10 +442,19 @@ impl AgentWindow {
     }
 
     fn filtered(&self) -> Vec<&AgentRow> {
+        self.filtered_indices()
+            .into_iter()
+            .map(|index| &self.snapshot.rows[index])
+            .collect()
+    }
+
+    fn filtered_indices(&self) -> Vec<usize> {
         self.snapshot
             .rows
             .iter()
-            .filter(|row| self.filter.matches(row))
+            .enumerate()
+            .filter(|(_, row)| self.filter.matches(row))
+            .map(|(index, _)| index)
             .collect()
     }
 
@@ -679,6 +694,9 @@ impl AgentWindow {
     }
 
     fn draw(&mut self, config: &Config) {
+        if self.window.is_minimized().unwrap_or(false) {
+            return;
+        }
         let theme = &config.theme;
         let scale = self.renderer.scale_factor() as f32;
         let ui_font = self.renderer.physical(config.ui_font_size);
@@ -944,7 +962,7 @@ impl AgentWindow {
         labels: &mut Vec<Label>,
     ) {
         let scale = tokens.scale;
-        let rows: Vec<AgentRow> = self.filtered().into_iter().cloned().collect();
+        let rows = self.filtered_indices();
         if rows.is_empty() {
             if self.snapshot.rows.is_empty()
                 && self
@@ -973,10 +991,10 @@ impl AgentWindow {
             .floor()
             .max(1.0) as usize;
         self.scroll = self.scroll.min(rows.len().saturating_sub(visible));
-        let selected_index = self
-            .selected
-            .as_ref()
-            .and_then(|id| rows.iter().position(|row| &row.id == id));
+        let selected_index = self.selected.as_ref().and_then(|id| {
+            rows.iter()
+                .position(|index| &self.snapshot.rows[*index].id == id)
+        });
         if let Some(index) = selected_index {
             if index < self.scroll {
                 self.scroll = index;
@@ -985,7 +1003,8 @@ impl AgentWindow {
             }
         }
 
-        for (offset, row) in rows.iter().enumerate().skip(self.scroll).take(visible) {
+        for (offset, index) in rows.iter().enumerate().skip(self.scroll).take(visible) {
+            let row = &self.snapshot.rows[*index];
             let y = layout.list_rows.y + (offset - self.scroll) as f32 * layout.row_height;
             let rect = Rect::new(
                 layout.list.x + 8.0 * scale,
