@@ -276,7 +276,7 @@ fn decode_wsl_output(bytes: &[u8]) -> String {
 fn wsl_env() -> Vec<(String, String)> {
     vec![(
         "WSLENV".to_owned(),
-        "TERM/u:COLORTERM/u:TERM_PROGRAM/u".to_owned(),
+        "TERM/u:COLORTERM/u:TERM_PROGRAM/u:MISE_TRUSTED_CONFIG_PATHS/p".to_owned(),
     )]
 }
 
@@ -314,4 +314,20 @@ fn find_program(name: &str) -> Option<PathBuf> {
     }
 
     None
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn wsl_env_exposes_the_mise_trust_path() {
+        let env = wsl_env();
+        let value = env
+            .iter()
+            .find(|(key, _)| key == "WSLENV")
+            .map(|(_, value)| value.as_str())
+            .unwrap();
+        assert!(value.contains("MISE_TRUSTED_CONFIG_PATHS/p"));
+    }
 }

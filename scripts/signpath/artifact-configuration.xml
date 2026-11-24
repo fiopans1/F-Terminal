@@ -1,0 +1,20 @@
+<!--
+Default SignPath artifact configuration for F-Terminal.
+
+Use it for both Windows signing requests:
+  - windows-app-unsigned (contains f-terminal.exe)
+  - windows-installer-unsigned (contains F-Terminal-Setup-*.exe)
+
+Both GitHub artifacts are ZIP files with one executable at the root.
+Paste this configuration into SignPath and mark it as the project default.
+-->
+<artifact-configuration xmlns="http://signpath.io/artifact-configuration/v1">
+  <zip-file>
+    <pe-file-set>
+      <include path="*.exe" max-matches="unbounded" />
+      <for-each>
+        <authenticode-sign />
+      </for-each>
+    </pe-file-set>
+  </zip-file>
+</artifact-configuration>

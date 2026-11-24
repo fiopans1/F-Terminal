@@ -53,6 +53,9 @@ usa [Versionado Semántico](https://semver.org/lang/es/).
   firma con `signtool` y el workflow falla si faltan los secretos del
   certificado. Los tags prerelease (con `-`) pueden seguir siendo builds sin
   firmar.
+- Integración de firma con SignPath Foundation preparada y desactivada hasta
+  configurar sus secretos y variables. Incluye política de firma
+  (`CODE_SIGNING.md`) y artifact configuration de ejemplo.
 - GitHub Dark es ahora el tema por defecto; la plantilla documenta todas las
   paletas disponibles.
 - El gestor Git usa `Cmd+Shift+M` / `Ctrl+Shift+M`; `Ctrl+Shift+G` queda libre
@@ -76,6 +79,9 @@ usa [Versionado Semántico](https://semver.org/lang/es/).
   explorador y el footer Git se quedaban en la ruta inicial.
 - El footer Git usa una ruta de búsqueda de `git` compatible con instalaciones
   de Git for Windows, Scoop y Chocolatey que no están en el `PATH` de la GUI.
+- Los panes WSL marcan el directorio inicial como `MISE_TRUSTED_CONFIG_PATHS`
+  para que `mise` no bloquee la apertura con el aviso de `mise trust`. Se puede
+  desactivar con `F_TERMINAL_WSL_TRUST_MISE=0`.
 - Las ventanas de Code Review, Git y Agent Mode se pintan una vez ocultas antes
   de mostrarse, evitando el destello blanco inicial en Windows.
 
