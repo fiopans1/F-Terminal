@@ -39,6 +39,7 @@ impl Session {
         for arg in &profile.args {
             command.arg(arg);
         }
+        command.env("F_TERMINAL_PANE", pane.0.to_string());
 
         match profile.cwd_mode {
             CwdMode::Native => {

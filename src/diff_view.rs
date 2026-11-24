@@ -82,5 +82,6 @@ pub fn build_file_frame(
         rows: frame_rows,
         cols,
         cursor: None,
+        background: theme.background,
     }
 }

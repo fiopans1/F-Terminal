@@ -577,6 +577,7 @@ mod tests {
             }],
             cols: 10,
             cursor: None,
+            background: theme.background,
         }
     }
 

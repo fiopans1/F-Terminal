@@ -26,8 +26,13 @@ pub struct Config {
     pub font_size: f32,
     /// Line height as a multiple of the font size.
     pub line_height: f32,
-    /// Padding around the terminal text area, in logical pixels.
+    /// Padding around the terminal text area, in logical pixels. Zero keeps
+    /// full-screen TUIs flush with the pane edges.
     pub padding: f32,
+    /// Extra inset on the left side of the terminal grid, in logical pixels.
+    pub padding_left: f32,
+    /// Show the `user@host` prefix of the shell prompt.
+    pub show_user_in_prompt: bool,
     /// Sidebar width in logical pixels.
     pub sidebar_width: f32,
     /// Sidebar label size in logical points.
@@ -56,6 +61,28 @@ pub struct Config {
     pub render_mode: RenderMode,
     /// Optional GitHub/GitLab tokens from the config file.
     pub forge_tokens: ForgeTokens,
+    /// Agent discovery and Agent Mode settings.
+    pub agents: AgentsConfig,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct AgentsConfig {
+    /// Enable process-tree discovery and Agent Mode.
+    pub enabled: bool,
+    /// Include agents running outside F-Terminal (read-only).
+    pub show_external: bool,
+    /// Process scan interval in milliseconds.
+    pub poll_interval_ms: u64,
+}
+
+impl Default for AgentsConfig {
+    fn default() -> Self {
+        Self {
+            enabled: true,
+            show_external: true,
+            poll_interval_ms: 2_000,
+        }
+    }
 }
 
 impl Default for Config {
@@ -64,14 +91,16 @@ impl Default for Config {
             font_family: None,
             font_size: 14.0,
             line_height: 1.3,
-            padding: 10.0,
+            padding: 0.0,
+            padding_left: 8.0,
+            show_user_in_prompt: true,
             sidebar_width: 210.0,
             ui_font_size: 12.5,
             shell: None,
             // On macOS Option is used for characters like @ and accents on
             // non-US layouts, so keep composition enabled by default there.
             option_as_meta: cfg!(not(target_os = "macos")),
-            theme: Theme::tokyo_night(),
+            theme: Theme::github_dark(),
             scrollback_lines: 6_000,
             hidden_scrollback_lines: 3_000,
             scrollback_budget_mb: 0,
@@ -83,6 +112,7 @@ impl Default for Config {
             completion_min_chars: 2,
             render_mode: RenderMode::Shared,
             forge_tokens: ForgeTokens::default(),
+            agents: AgentsConfig::default(),
         }
     }
 }
@@ -144,6 +174,8 @@ struct FileConfig {
     render: FileRender,
     #[serde(default)]
     forge: FileForge,
+    #[serde(default)]
+    agents: FileAgents,
 }
 
 #[derive(Deserialize, Default)]
@@ -152,6 +184,8 @@ struct FileAppearance {
     font_size: Option<f32>,
     line_height: Option<f32>,
     padding: Option<f32>,
+    padding_left: Option<f32>,
+    show_user_in_prompt: Option<bool>,
     sidebar_width: Option<f32>,
     ui_font_size: Option<f32>,
     option_as_meta: Option<bool>,
@@ -194,6 +228,13 @@ struct FileForgeToken {
     token: Option<String>,
 }
 
+#[derive(Deserialize, Default)]
+struct FileAgents {
+    enabled: Option<bool>,
+    show_external: Option<bool>,
+    poll_interval_ms: Option<u64>,
+}
+
 impl FileConfig {
     fn merge(self) -> Config {
         let defaults = Config::default();
@@ -206,6 +247,16 @@ impl FileConfig {
         config.font_size = number(self.appearance.font_size, defaults.font_size, 6.0, 48.0);
         config.line_height = number(self.appearance.line_height, defaults.line_height, 0.8, 2.5);
         config.padding = number(self.appearance.padding, defaults.padding, 0.0, 64.0);
+        config.padding_left = number(
+            self.appearance.padding_left,
+            defaults.padding_left,
+            0.0,
+            64.0,
+        );
+        config.show_user_in_prompt = self
+            .appearance
+            .show_user_in_prompt
+            .unwrap_or(defaults.show_user_in_prompt);
         config.sidebar_width = number(
             self.appearance.sidebar_width,
             defaults.sidebar_width,
@@ -223,8 +274,10 @@ impl FileConfig {
         }
         if let Some(theme) = self.appearance.theme {
             let normalized = theme.trim().to_ascii_lowercase();
-            if normalized != "tokyo-night" && normalized != "tokyo_night" {
-                log::warn!("unknown theme {theme:?}; using tokyo-night");
+            if let Some(palette) = Theme::from_name(&normalized) {
+                config.theme = palette;
+            } else {
+                log::warn!("unknown theme {theme:?}; using github-dark");
             }
         }
 
@@ -288,6 +341,19 @@ impl FileConfig {
             gitlab: clean_token(self.forge.gitlab.token),
         };
 
+        config.agents = AgentsConfig {
+            enabled: self.agents.enabled.unwrap_or(defaults.agents.enabled),
+            show_external: self
+                .agents
+                .show_external
+                .unwrap_or(defaults.agents.show_external),
+            poll_interval_ms: self
+                .agents
+                .poll_interval_ms
+                .unwrap_or(defaults.agents.poll_interval_ms)
+                .clamp(500, 10_000),
+        };
+
         config
     }
 }
@@ -306,7 +372,7 @@ fn clean_token(token: Option<String>) -> Option<String> {
     })
 }
 
-fn config_path() -> Option<PathBuf> {
+pub fn config_path() -> Option<PathBuf> {
     if let Some(path) = std::env::var_os("F_TERMINAL_CONFIG") {
         let path = PathBuf::from(path);
         if !path.as_os_str().is_empty() {
@@ -364,11 +430,18 @@ fn default_template() -> String {
 # font_family = "SF Mono"
 font_size = 14.0
 line_height = 1.3
-padding = 10.0
+# No inset around the terminal grid; keeps TUIs edge-to-edge.
+padding = 0.0
+# Extra left inset for terminal text (logical pixels).
+padding_left = 8.0
+# Set to false to hide the user@host prefix from the shell prompt.
+show_user_in_prompt = true
 sidebar_width = 210.0
 ui_font_size = 12.5
 option_as_meta = {option_as_meta}
-theme = "tokyo-night"
+# Temas: tokyo-night, catppuccin-mocha, dracula, nord, gruvbox-dark,
+# one-dark, solarized-dark, github-dark, kanagawa.
+theme = "github-dark"
 
 [terminal]
 # History per pane in the active session.
@@ -390,6 +463,14 @@ completion_min_chars = 2
 # "isolated" gives every window its own renderer.
 mode = "shared"
 
+[agents]
+# Discover coding agents in panes and answer OSC 7501 status queries.
+enabled = true
+# Also list agents running outside F-Terminal (read-only).
+show_external = true
+# Process-tree scan interval in milliseconds (500-10000).
+poll_interval_ms = 2000
+
 [shell]
 # default = "zsh"
 
@@ -409,12 +490,18 @@ mod tests {
     #[test]
     fn empty_config_uses_defaults() {
         let config = Config::from_toml("").unwrap();
+        assert_eq!(config.padding, 0.0);
+        assert_eq!(config.padding_left, 8.0);
+        assert!(config.show_user_in_prompt);
         assert_eq!(config.scrollback_lines, 6_000);
         assert_eq!(config.hidden_scrollback_lines, 3_000);
         assert_eq!(config.scrollback_budget_mb, 0);
         assert_eq!(config.render_mode, RenderMode::Shared);
         assert!(config.completions);
         assert_eq!(config.completion_min_chars, 2);
+        assert!(config.agents.enabled);
+        assert!(config.agents.show_external);
+        assert_eq!(config.agents.poll_interval_ms, 2_000);
     }
 
     #[test]
@@ -424,6 +511,9 @@ mod tests {
 font_size = 18.0
 sidebar_width = 250.0
 option_as_meta = true
+show_user_in_prompt = false
+theme = "dracula"
+padding_left = 12.0
 
 [terminal]
 scrollback_lines = 10000
@@ -434,6 +524,11 @@ completion_min_chars = 5
 
 [render]
 mode = "isolated"
+
+[agents]
+enabled = false
+show_external = false
+poll_interval_ms = 100
 
 [shell]
 default = "bash"
@@ -448,12 +543,18 @@ token = "glpat_test"
         assert_eq!(config.font_size, 18.0);
         assert_eq!(config.sidebar_width, 250.0);
         assert!(config.option_as_meta);
+        assert!(!config.show_user_in_prompt);
+        assert_eq!(config.theme.background, Theme::dracula().background);
+        assert_eq!(config.padding_left, 12.0);
         assert_eq!(config.scrollback_lines, 10_000);
         assert_eq!(config.hidden_scrollback_lines, 10_000);
         assert_eq!(config.scrollback_budget_mb, 128);
         assert!(!config.completions);
         assert_eq!(config.completion_min_chars, 5);
         assert_eq!(config.render_mode, RenderMode::Isolated);
+        assert!(!config.agents.enabled);
+        assert!(!config.agents.show_external);
+        assert_eq!(config.agents.poll_interval_ms, 500);
         assert_eq!(config.shell.as_deref(), Some("bash"));
         assert_eq!(config.forge_tokens.github.as_deref(), Some("ghp_test"));
         assert_eq!(config.forge_tokens.gitlab.as_deref(), Some("glpat_test"));
@@ -500,6 +601,9 @@ hidden_scrollback_lines = 0
         assert_eq!(config.font_size, defaults.font_size);
         assert_eq!(config.line_height, defaults.line_height);
         assert_eq!(config.padding, defaults.padding);
+        assert_eq!(config.padding_left, defaults.padding_left);
+        assert_eq!(config.show_user_in_prompt, defaults.show_user_in_prompt);
+        assert_eq!(config.theme.background, defaults.theme.background);
         assert_eq!(config.sidebar_width, defaults.sidebar_width);
         assert_eq!(config.ui_font_size, defaults.ui_font_size);
         assert_eq!(config.option_as_meta, defaults.option_as_meta);
@@ -512,6 +616,7 @@ hidden_scrollback_lines = 0
         assert_eq!(config.completions, defaults.completions);
         assert_eq!(config.completion_min_chars, defaults.completion_min_chars);
         assert_eq!(config.render_mode, defaults.render_mode);
+        assert_eq!(config.agents, defaults.agents);
         assert!(config.font_family.is_none());
         assert!(config.shell.is_none());
         assert!(config.forge_tokens.github.is_none());

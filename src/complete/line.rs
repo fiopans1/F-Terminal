@@ -13,6 +13,62 @@ pub struct CommandPrefix {
     pub command: String,
 }
 
+/// Prefix length for a row that looks like a shell prompt (starts with
+/// `user@host` and contains a recognized prompt marker).
+pub fn prompt_user_prefix_len(text: &str, cols: usize) -> Option<usize> {
+    let prefix = user_host_prefix_len(text)?;
+    if prefix == 0 || prefix >= cols {
+        return None;
+    }
+    let rest = text
+        .char_indices()
+        .nth(prefix)
+        .map(|(index, _)| &text[index..])
+        .unwrap_or("");
+    PROMPT_MARKERS
+        .iter()
+        .any(|marker| rest.contains(marker))
+        .then_some(prefix)
+}
+
+/// Length in `char`s of a leading `user@host` prompt prefix, including an
+/// optional trailing `:` or space. Returns `None` for prompts that do not
+/// start with a username.
+pub fn user_host_prefix_len(line: &str) -> Option<usize> {
+    let first = line.chars().next()?;
+    if !(first.is_alphanumeric() || matches!(first, '_' | '-' | '.')) {
+        return None;
+    }
+
+    let token_end = line.find(char::is_whitespace).unwrap_or(line.len());
+    let token = &line[..token_end];
+    let at = token.find('@')?;
+    if at == 0 {
+        return None;
+    }
+
+    let mut host_end = at + 1;
+    for (offset, character) in token[at + 1..].char_indices() {
+        if character.is_ascii_alphanumeric() || matches!(character, '.' | '-' | '_') {
+            host_end = at + 1 + offset + character.len_utf8();
+        } else {
+            break;
+        }
+    }
+    if host_end == at + 1 {
+        return None;
+    }
+
+    let mut mask_end = host_end;
+    if line[mask_end..].starts_with(':') {
+        mask_end += 1;
+    }
+    if line[mask_end..].starts_with(' ') {
+        mask_end += 1;
+    }
+    Some(line[..mask_end].chars().count())
+}
+
 /// Extract the text after the prompt from a terminal row.
 ///
 /// `input.text` is expected to contain one character per column (wide-character
@@ -222,6 +278,39 @@ mod tests {
         assert!(extract_command(&input(&right_prompt, 21)).is_some());
         assert!(extract_command(&input("user@host:~$ git st  12:30", 21)).is_some());
         assert!(extract_command(&input("git status", 10)).is_none());
+    }
+
+    #[test]
+    fn finds_user_host_prefixes() {
+        assert_eq!(
+            user_host_prefix_len("fiopans1@MacBook-Pro-de-Diego-3 F-Terminal % "),
+            Some("fiopans1@MacBook-Pro-de-Diego-3 ".chars().count())
+        );
+        assert_eq!(
+            user_host_prefix_len("user@host:~/git$ "),
+            Some("user@host:".chars().count())
+        );
+        assert_eq!(
+            user_host_prefix_len("root@127.0.0.1:~# "),
+            Some("root@127.0.0.1:".chars().count())
+        );
+        assert_eq!(user_host_prefix_len("PS C:\\src> "), None);
+        assert_eq!(user_host_prefix_len("➜ user@host ~/src"), None);
+        assert_eq!(user_host_prefix_len("user@host"), Some(9));
+    }
+
+    #[test]
+    fn only_trims_rows_that_look_like_shell_prompts() {
+        assert_eq!(
+            prompt_user_prefix_len("user@host ~/repo % ls", 80),
+            Some("user@host ".chars().count())
+        );
+        assert_eq!(
+            prompt_user_prefix_len("user@host:~/repo$ ", 80),
+            Some("user@host:".chars().count())
+        );
+        assert_eq!(prompt_user_prefix_len("user@host is up", 80), None);
+        assert_eq!(prompt_user_prefix_len("PS C:\\src> ", 80), None);
     }
 
     #[test]

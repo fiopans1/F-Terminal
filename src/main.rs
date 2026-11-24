@@ -1,5 +1,7 @@
 #![cfg_attr(target_os = "windows", windows_subsystem = "windows")]
 
+mod agent_window;
+mod agents;
 mod app;
 mod complete;
 mod config;

@@ -1,5 +1,6 @@
 use std::collections::HashMap;
 use std::path::PathBuf;
+use std::time::Instant;
 
 use anyhow::{Context, Result};
 use winit::event_loop::EventLoopProxy;
@@ -40,6 +41,7 @@ pub enum LayoutNode {
 }
 
 impl LayoutNode {
+    #[cfg(test)]
     pub fn leaf_count(&self) -> usize {
         match self {
             Self::Leaf(_) => 1,
@@ -165,6 +167,10 @@ pub struct Pane {
     pub profile_id: String,
     /// Completion is only considered after the user has edited the line.
     pub suggestion_armed: bool,
+    /// Last time the PTY produced output, used by the agent fallback state.
+    pub last_output: Instant,
+    /// Revision of the `OSC 7501` records already consumed by the app.
+    pub program_status_revision: u64,
 }
 
 impl Pane {
@@ -190,6 +196,8 @@ impl Pane {
             git_status: None,
             profile_id: profile.id.clone(),
             suggestion_armed: false,
+            last_output: Instant::now(),
+            program_status_revision: 0,
         })
     }
 
@@ -223,10 +231,6 @@ impl Tab {
         let mut leaves = Vec::new();
         self.layout.leaves(&mut leaves);
         leaves
-    }
-
-    pub fn is_multi_pane(&self) -> bool {
-        self.layout.leaf_count() > 1
     }
 }
 

@@ -680,6 +680,7 @@ dependencies = [
  "alacritty_terminal",
  "anyhow",
  "arboard",
+ "base64 0.22.1",
  "bytemuck",
  "cosmic-text",
  "env_logger",

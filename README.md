@@ -37,6 +37,7 @@ welcome.
 - [Footer Git por terminal](#footer-git-por-terminal)
 - [Code Review](#code-review)
 - [Gestor Git](#gestor-git)
+- [Agent Mode](#agent-mode)
 - [Atajos](#atajos)
 - [Autenticación y configuración](#autenticación-y-configuración)
 - [Arquitectura](#arquitectura)
@@ -65,6 +66,8 @@ welcome.
   commits y **pull requests de GitHub o merge requests de GitLab** con buscador.
 - **Gestor Git** en ventana separada: stage/unstage, commit/amend, ramas,
   fetch/pull/push, merge, stash e historial con diff.
+- **Agent Mode** en ventana separada: agentes Claude Code, Codex, OpenCode y
+  Junie en tiempo real, con estados, mensajes, subagentes y salto al pane.
 - Footer Git por terminal con dos burbujas: rama y `+N/-N`.
 - Autocompletado inline y popup: historial, comandos del `PATH`, rutas y
   ramas/tags de Git, sin indexar el disco ni lanzar `git` por pulsación.
@@ -74,8 +77,8 @@ welcome.
   modo de render compartido o aislado.
 - Instaladores nativos offline: DMG en macOS, EXE con UAC en Windows y
   paquetes DEB/RPM en Linux.
-- La terminal principal sigue usable mientras Code Review o el gestor Git
-  están abiertos.
+- La terminal principal sigue usable mientras Code Review, el gestor Git o
+  Agent Mode están abiertos.
 
 ---
 
@@ -326,10 +329,13 @@ primer arranque con una plantilla comentada y permisos `600` en Unix.
 
 La variable `F_TERMINAL_CONFIG` permite usar otra ruta.
 
+`Cmd+Shift+S` / `Ctrl+Shift+S` abre el `config.toml` en el editor integrado. Los
+cambios se aplican al reiniciar la app.
+
 El fichero se lee al arrancar: reinicia la app para aplicar cambios. Si el TOML
 no se puede leer o parsear, se usan los valores por defecto y se escribe un
 aviso en el log. Los números fuera de rango se recortan; un `render.mode`
-desconocido cae a `isolated` y un tema desconocido a Tokyo Night.
+desconocido cae a `isolated` y un tema desconocido a GitHub Dark.
 
 ### Ejemplo completo
 
@@ -338,13 +344,18 @@ desconocido cae a `isolated` y un tema desconocido a Tokyo Night.
 # font_family = "SF Mono"
 font_size = 14.0
 line_height = 1.3
-padding = 10.0
+# Sin marco: la terminal llega hasta los bordes del panel.
+padding = 0.0
+# Margen izquierdo extra para el texto del terminal.
+padding_left = 8.0
+# false oculta el prefijo user@host del prompt (en cualquier SO).
+show_user_in_prompt = true
 sidebar_width = 210.0
 ui_font_size = 12.5
 # El valor por defecto depende de la plataforma:
 # false en macOS, true en Linux/Windows.
 option_as_meta = false
-theme = "tokyo-night"
+theme = "github-dark"
 
 [terminal]
 # Historial por pane en la sesión activa.
@@ -367,6 +378,14 @@ completion_min_chars = 2
 # "isolated" crea recursos propios en cada ventana.
 mode = "shared"
 
+[agents]
+# Descubre agentes y responde a OSC 7501.
+enabled = true
+# Incluye agentes de otras terminales/IDEs (solo lectura).
+show_external = true
+# Intervalo del escaneo de procesos, en milisegundos.
+poll_interval_ms = 2000
+
 [shell]
 # default = "zsh"
 
@@ -376,6 +395,41 @@ mode = "shared"
 [forge.gitlab]
 # token = "glpat-..."
 ```
+
+### Margen izquierdo
+
+`padding_left` añade espacio solo a la izquierda del grid del terminal (8 px por
+defecto), para que el texto no quede pegado a la sidebar. El resto de lados
+sigue sin marco; `padding` sigue controlando un inset en los cuatro lados si se
+quiere.
+
+### Temas
+
+`theme` selecciona la paleta completa (terminal, sidebar, diffs y Code Review):
+
+| Valor | Tema |
+|---|---|
+| `github-dark` (por defecto) | GitHub Dark |
+| `tokyo-night` | Tokyo Night |
+| `catppuccin-mocha` | Catppuccin Mocha |
+| `dracula` | Dracula |
+| `nord` | Nord |
+| `gruvbox-dark` | Gruvbox Dark |
+| `one-dark` | One Dark |
+| `solarized-dark` | Solarized Dark |
+| `kanagawa` | Kanagawa |
+
+Se aceptan guiones o guiones bajos y algunos alias (`gruvbox`, `onedark`,
+`solarized`, `github`). Un nombre desconocido cae en GitHub Dark y se escribe un
+aviso en el log.
+
+### Prefijo `user@host`
+
+Con `show_user_in_prompt = false`, F-Terminal oculta el prefijo `user@host`
+del prompt visible, incluidas las líneas ya impresas en pantalla, y de los
+títulos de pane/ventana (por ejemplo `fiopans1@MacBook-Pro ~/repo %` pasa a
+`~/repo %`). Funciona en macOS, Linux y Windows, conserva los colores del resto
+del prompt y no modifica tu `PS1`/`PROMPT` ni el historial del shell.
 
 ### Scrollback
 
@@ -515,6 +569,8 @@ Cada sesión es un workspace con uno o más panes:
   contador de panes.
 - El título inicial de una sesión es **New session**. Cuando el shell envía su
   título por OSC, el padre se actualiza.
+- Los títulos que son solo una ruta (por ejemplo, el directorio actual que
+  reporta ConPTY/cmd.exe en Windows) se ignoran para no ensuciar la sidebar.
 - Los hijos muestran el título del pane o, si no hay, el shell (`zsh`, `bash`,
   `PowerShell`…).
 - Clic en el padre: enfoca el pane activo de esa sesión.
@@ -560,6 +616,9 @@ Dentro de cada sesión:
 - `Cmd+S` / `Ctrl+S` guarda.
 - `Esc` o `Cmd+W` cierra. El punto de acento indica cambios sin guardar.
 - Resaltado TextMate con `syntect` en un hilo aparte, con debounce de 120 ms.
+- `.jsx`, `.mjs`, `.cjs`, `.ts` y `.tsx` usan la gramática de JavaScript como
+  fallback; `.jsonc` y `.json5` usan la de JSON. TOML todavía no tiene gramática
+  en el paquete por defecto y se muestra sin colores.
 - Los buffers de texto se cachean por pane y solo se re-shapean cuando cambian.
 
 Limitaciones actuales del editor:
@@ -575,7 +634,8 @@ Limitaciones actuales del editor:
 
 ## Footer Git por terminal
 
-Cada pane muestra dos burbujas abajo a la izquierda:
+Cada pane muestra dos burbujas abajo a la izquierda en una barra compacta de
+una sola línea:
 
 1. Rama actual, con un punto de acento.
 2. Cambios del working tree: `+N -N`, en una sola píldora con la mitad verde
@@ -583,6 +643,21 @@ Cada pane muestra dos burbujas abajo a la izquierda:
 
 Detalles:
 
+- Las burbujas tienen icono vectorial (rama y archivo de diff), borde y un
+  pequeño margen inferior.
+- Clic en la burbuja de la rama: abre un popup con las ramas locales. Puedes
+  usar `↑↓`, `Home`/`End` y `Enter`, o hacer clic en una rama para hacer
+  checkout. `Esc` o un clic fuera lo cierran.
+- Clic en la burbuja de cambios: abre una vista dividida a la derecha con el
+  diff completo del working tree, con cabeceras por archivo, números de línea y
+  los colores de adición/eliminación que usa Code Review. `R` recarga, `Esc` o
+  `×` la cierran, la rueda/`↑↓`/`PgUp`/`PgDn` hacen scroll y `Shift`+rueda o
+  `←`/`→` desplazan horizontalmente.
+- El panel de la terminal se pinta con el fondo real del TUI (incluidos los
+  colores SGR de opencode), así que el footer y el espacio sobrante no muestran
+  una franja del color de la app.
+- El footer tiene una altura compacta y aprovecha el espacio sobrante del grid
+  para mantener la tipografía legible.
 - Usa `git diff --numstat HEAD`, así que cuenta cambios **tracked** staged y
   unstaged. Los archivos untracked no suman.
 - Se actualiza al cambiar el cwd y cada 2 segundos.
@@ -675,7 +750,7 @@ procesos.
 
 ## Gestor Git
 
-Se abre con `Cmd+Shift+G` / `Ctrl+Shift+G` o desde el menú de macOS.
+Se abre con `Cmd+Shift+M` / `Ctrl+Shift+M` o desde el menú de macOS.
 
 Es otra **ventana nativa independiente**, distinta de Code Review. Puede estar
 abierta a la vez que la terminal y que Code Review. Usa el repositorio Git del
@@ -769,6 +844,153 @@ En la pestaña **REFS**:
 
 ---
 
+## Agent Mode
+
+Se abre con `Cmd+Shift+A` / `Ctrl+Shift+A` o desde el menú de macOS. Es una
+**ventana independiente** que puede estar abierta mientras usas la terminal,
+Code Review o el gestor Git.
+
+Muestra todos los agentes detectados, tanto los que corren dentro de
+F-Terminal como los que corren en otras terminales o IDEs (estos últimos en
+modo lectura). La lista se ordena por prioridad:
+
+1. Permisos o preguntas pendientes.
+2. Avisos de atención.
+3. Errores.
+4. Trabajo terminado sin leer.
+5. Trabajando.
+6. Inactivos.
+7. Procesos externos.
+
+Estados:
+
+- **Working**: el agente está generando o ejecutando herramientas.
+- **Needs permission / Needs answer / Needs login**: el agente está bloqueado.
+- **Needs attention**: notificación o campana sin estado estructurado.
+- **Done / Error**: el turno terminó; el aviso desaparece al enfocar el pane.
+- **Idle**: el agente sigue vivo, esperando el siguiente prompt.
+- **Running** (externo): proceso detectado, sin estado en tiempo real.
+
+### Detección
+
+La fuente principal es **OSC 7501** (Program Status Protocol). F-Terminal
+responde a la consulta de soporte y lee los informes que escriben los agentes:
+
+| Agente | Estado preciso |
+|---|---|
+| Claude Code | `OSC 7501` desde 2.1.295 |
+| Codex CLI | `OSC 7501` desde 0.163; `OSC 9` para completados |
+| OpenCode | OpenCode 2.x; versiones anteriores usan el fallback |
+| Junie | Hooks opcionales (ver abajo); si no, proceso + actividad + campana |
+| Otros | Cualquier agente que implemente `OSC 7501` |
+
+Además hay un watcher de procesos en background que recorre el árbol de cada
+pane y reconoce `claude`, `codex`, `opencode` y `junie`. Ese watcher sirve para
+saber si el agente sigue vivo, para los agentes sin protocolo y para listar los
+procesos externos. El escaneo corre cada 2 segundos por defecto, en un hilo
+aparte, y no bloquea la UI.
+
+### Controles
+
+- `↑` / `↓`: mover la selección.
+- `PgUp` / `PgDn`, `Home` / `End`: desplazarse.
+- `Enter`: enfocar el pane del agente seleccionado.
+- `R` o `F5`, o el botón **REFRESH**: forzar un escaneo de procesos inmediato,
+  sin esperar al intervalo configurado.
+- `X` o `Supr`: terminar el proceso seleccionado. La primera pulsación arma la
+  acción y la segunda confirma; también se puede hacer clic en **KILL PID**.
+- `Tab` o `F`: cambiar entre ALL, ATTENTION, RUNNING y FINISHED.
+- `1`–`4`: elegir filtro directamente.
+- Clic en una fila para seleccionar; doble clic para enfocar.
+- `Esc`: cerrar la ventana.
+
+Al matar un agente se envía primero `SIGTERM`; si sigue vivo después de dos
+segundos, se fuerza `SIGKILL` (en Windows, `taskkill /F`). El aviso del resultado
+aparece en el pie de la ventana.
+
+Los agentes externos aparecen como `external` y no se pueden enfocar porque su
+PTY pertenece a otra aplicación. Sí se pueden terminar desde Agent Mode si
+tienen un PID conocido.
+
+### Junie con hooks
+
+Junie todavía no implementa `OSC 7501`, pero sus hooks permiten obtener estados
+precisos. F-Terminal lee un log pequeño en
+`~/.f-terminal/junie-events.log`; el pane se identifica con la variable
+`F_TERMINAL_PANE`, que F-Terminal inyecta en cada shell.
+
+En macOS/Linux, añade esto a `~/.junie/config.json` (solo la parte `hooks`):
+
+```json
+{
+  "hooks": {
+    "UserPromptSubmit": [
+      { "hooks": [{ "type": "command",
+        "command": "echo \"$F_TERMINAL_PANE|working|\" >> \"$HOME/.f-terminal/junie-events.log\"",
+        "async": true }] }
+    ],
+    "Stop": [
+      { "hooks": [{ "type": "command",
+        "command": "echo \"$F_TERMINAL_PANE|done|\" >> \"$HOME/.f-terminal/junie-events.log\"",
+        "async": true }] }
+    ],
+    "StopFailure": [
+      { "hooks": [{ "type": "command",
+        "command": "echo \"$F_TERMINAL_PANE|error|\" >> \"$HOME/.f-terminal/junie-events.log\"",
+        "async": true }] }
+    ],
+    "SessionEnd": [
+      { "hooks": [{ "type": "command",
+        "command": "echo \"$F_TERMINAL_PANE|end|\" >> \"$HOME/.f-terminal/junie-events.log\"",
+        "async": true }] }
+    ]
+  }
+}
+```
+
+En Windows, el comando equivalente usa PowerShell, porque `cmd` complica el
+escape de las barras verticales:
+
+```text
+powershell -NoProfile -Command "Add-Content -Path \"$env:USERPROFILE\\.f-terminal\\junie-events.log\" -Value \"$env:F_TERMINAL_PANE|working|\""
+```
+
+Cambia `working` por `done`, `error` o `end` en cada hook.
+
+No configures un hook `PermissionRequest` solo para registrar el estado: en
+Junie, un hook de permiso que termina con éxito sin decisión **autoaprueba** la
+acción. Los permisos pendientes se muestran como **Needs attention** mediante
+la campana, el título y la actividad del terminal.
+
+### Configuración
+
+```toml
+[agents]
+# Descubre agentes y responde a OSC 7501.
+enabled = true
+# Incluye agentes de otras terminales/IDEs (solo lectura).
+show_external = true
+# Intervalo del escaneo de procesos, en milisegundos.
+poll_interval_ms = 2000
+```
+
+### Limitaciones
+
+- El estado preciso depende de que el agente implemente `OSC 7501` o de los
+  hooks de Junie.
+- `tmux` y `screen` pueden bloquear `OSC 7501`; el watcher de procesos sigue
+  funcionando, pero el estado puede ser aproximado.
+- En SSH el proceso remoto no es visible, aunque los informes `OSC` pueden
+  llegar por el PTY.
+- En WSL los procesos Linux no son visibles desde `sysinfo` de Windows; los
+  informes `OSC` sí pueden atravesar el PTY.
+- Los agentes externos no tienen estado en tiempo real; su única acción es
+  terminar el proceso.
+- No se aprueban ni deniegan acciones desde Agent Mode; `Enter` solo enfoca y
+  `X` termina el proceso del agente.
+
+---
+
 ## Atajos
 
 ### Globales — macOS
@@ -784,7 +1006,9 @@ En la pestaña **REFS**:
 | Mostrar/ocultar sidebar | `Cmd+B` |
 | Cambiar SESSIONS / FILES | `Cmd+Shift+F` |
 | Abrir Code Review | `Cmd+Shift+R` |
-| Abrir gestor Git | `Cmd+Shift+G` |
+| Abrir gestor Git | `Cmd+Shift+M` |
+| Abrir Agent Mode | `Cmd+Shift+A` |
+| Abrir ajustes (`config.toml`) | `Cmd+Shift+S` |
 | Abrir explorador | `Cmd+Shift+O` |
 | Guardar en el editor | `Cmd+S` |
 | Cerrar editor | `Esc` o `Cmd+W` |
@@ -804,7 +1028,9 @@ En la pestaña **REFS**:
 | Mostrar/ocultar sidebar | `Ctrl+Shift+B` |
 | Cambiar SESSIONS / FILES | `Ctrl+Shift+F` |
 | Abrir Code Review | `Ctrl+Shift+R` |
-| Abrir gestor Git | `Ctrl+Shift+G` |
+| Abrir gestor Git | `Ctrl+Shift+M` |
+| Abrir Agent Mode | `Ctrl+Shift+A` |
+| Abrir ajustes (`config.toml`) | `Ctrl+Shift+S` |
 | Abrir explorador | `Ctrl+Shift+O` |
 | Guardar en el editor | `Ctrl+S` |
 | Cerrar editor | `Esc` o `Ctrl+W` |
@@ -848,6 +1074,17 @@ En la pestaña **REFS**:
 | Refrescar | `R` |
 | Commit | `Enter` en el campo de mensaje |
 | Cerrar ventana | `Esc` o `Cmd/Ctrl+W` |
+
+### Agent Mode
+
+| Acción | Tecla |
+|---|---|
+| Mover selección | `↑` / `↓`, `PgUp` / `PgDn`, `Home` / `End` |
+| Enfocar pane del agente | `Enter` |
+| Refrescar procesos | `R` o `F5` |
+| Matar proceso (doble pulsación) | `X`, `Supr` o `Backspace` |
+| Cambiar filtro | `Tab` o `F`, `1`–`4` |
+| Cerrar ventana | `Esc`, `Cmd+W` / `Ctrl+Shift+W` o `×` |
 
 ---
 
@@ -913,6 +1150,8 @@ La configuración general, incluidos los tokens, se describe en
 src/
   main.rs          Arranque, config y event loop
   app.rs           Ventana principal, routing multi-ventana, atajos y estado
+  agents.rs        Modelo de agentes, watcher de procesos y hooks de Junie
+  agent_window.rs  Ventana Agent Mode
   complete/
     mod.rs         Motor, contexto, ranking y candidatos
     line.rs        Prompt, tokenizador y quoting
@@ -956,6 +1195,7 @@ src/
     mod.rs         Term + parser + selección
     color.rs       Paleta y conversión sRGB
     frame.rs       Snapshot del grid
+    program_status.rs  Parser OSC 7501 y notificaciones
   render/
     mod.rs         Superficie wgpu y recursos GPU/texto compartidos
     scene.rs       Panes, labels y quads
@@ -988,6 +1228,7 @@ de splits; la sidebar solo conoce IDs; el renderer solo recibe `Rect` y `Frame`.
 - `WindowState`: terminal principal.
 - `Option<ReviewWindow>`: Code Review.
 - `Option<GitWindow>`: gestor Git.
+- `Option<AgentWindow>`: Agent Mode.
 
 Los eventos se enrutan por `WindowId`. Cada ventana tiene su propia superficie,
 viewport, factor de escala y métricas de celda. Con `render.mode = "shared"`
@@ -1001,6 +1242,7 @@ compartido falla, la ventana secundaria cae a aislado.
 - Footer Git: un hilo por consulta de estado.
 - Code Review: listas de PRs/MRs y diffs en hilos separados.
 - Gestor Git: snapshots, detalles y operaciones en hilos separados.
+- Agentes: watcher de procesos en un hilo; `OSC 7501` se parsea en el hilo de UI sin trabajo extra por frame.
 - Los resultados llevan `request_id` para descartar respuestas obsoletas.
 - Las operaciones mutantes de Git se serializan con un estado `busy`.
 - Los tokens de GitHub y GitLab se pasan a `curl` por stdin.
@@ -1102,7 +1344,7 @@ Limitaciones conocidas:
 - Validar perfiles de shell y ConPTY en Windows real.
 - Pantalla de ajustes, recarga en caliente del TOML y perfiles de shell
   personalizados.
-- Selector de tema y más paletas.
+- Selector de tema en la app (las paletas ya están disponibles vía TOML).
 - Añadir más perfiles: NuShell, fish en Windows, distros WSL concretas.
 - Git: tags, rebase, cherry-pick, revert, force push con lease y resolución de
   conflictos.

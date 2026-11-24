@@ -16,6 +16,7 @@ pub enum Action {
     OpenCode,
     CodeReview,
     GitManager,
+    AgentMode,
     Settings,
 }
 
@@ -27,6 +28,7 @@ impl Action {
             "open-code" => Some(Self::OpenCode),
             "code-review" => Some(Self::CodeReview),
             "git-manager" => Some(Self::GitManager),
+            "agent-mode" => Some(Self::AgentMode),
             "open-settings" => Some(Self::Settings),
             _ => None,
         }
@@ -41,10 +43,6 @@ pub fn open_explorer(directory: &Path) {
 pub fn open_in_code(directory: &Path) {
     log::info!("opening VS Code at {}", directory.display());
     spawn_detached(code_command(directory), "open VS Code");
-}
-
-pub fn open_settings() {
-    log::info!("settings are not implemented yet");
 }
 
 fn explorer_command(directory: &Path) -> Command {
@@ -113,17 +111,19 @@ impl MenuState {
         let code = MenuItem::with_id("open-code", "Abrir en VS Code", true, None);
         let review = MenuItem::with_id("code-review", "Code Review", true, None);
         let git = MenuItem::with_id("git-manager", "Git", true, None);
-        let settings = MenuItem::with_id("open-settings", "Ajustes…", true, None);
+        let agent = MenuItem::with_id("agent-mode", "Agent Mode", true, None);
+        let settings = MenuItem::with_id("open-settings", "Abrir configuración…", true, None);
 
         let separator_one = PredefinedMenuItem::separator();
         let separator_two = PredefinedMenuItem::separator();
         let quit = PredefinedMenuItem::quit(Some("Salir"));
 
-        let items: [&dyn IsMenuItem; 8] = [
+        let items: [&dyn IsMenuItem; 9] = [
             &explorer,
             &code,
             &review,
             &git,
+            &agent,
             &separator_one,
             &settings,
             &separator_two,
@@ -179,6 +179,7 @@ mod tests {
             Action::from_menu_id("git-manager"),
             Some(Action::GitManager)
         );
+        assert_eq!(Action::from_menu_id("agent-mode"), Some(Action::AgentMode));
         assert_eq!(
             Action::from_menu_id("open-settings"),
             Some(Action::Settings)

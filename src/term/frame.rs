@@ -2,7 +2,7 @@ use alacritty_terminal::event::EventListener;
 use alacritty_terminal::grid::Dimensions;
 use alacritty_terminal::term::Term;
 use alacritty_terminal::term::cell::Flags;
-use alacritty_terminal::vte::ansi::{CursorShape, Rgb};
+use alacritty_terminal::vte::ansi::{Color, CursorShape, NamedColor, Rgb};
 
 use crate::term::color::Theme;
 
@@ -13,6 +13,8 @@ pub struct Frame {
     pub rows: Vec<Row>,
     pub cols: usize,
     pub cursor: Option<Cursor>,
+    /// Effective terminal background, including OSC 11 overrides.
+    pub background: Rgb,
 }
 #[derive(Debug, Default)]
 pub struct Row {
@@ -59,6 +61,7 @@ pub fn build<T: EventListener>(term: &Term<T>, theme: &Theme) -> Frame {
     let display_offset = content.display_offset;
     let colors = content.colors;
     let selection = content.selection;
+    let background = theme.resolve(Color::Named(NamedColor::Background), colors);
 
     let mut rows: Vec<Row> = Vec::with_capacity(screen_lines);
     let mut row = Row::default();
@@ -86,9 +89,10 @@ pub fn build<T: EventListener>(term: &Term<T>, theme: &Theme) -> Frame {
             bg = theme.selection;
         }
 
-        if bg != theme.background {
-            push_background(&mut row, point.column.0, point.column.0 + 1, bg);
-        }
+        // Draw every cell background, including the default one. This lets the
+        // pane paint its full area (padding, footer and row-rounding leftovers)
+        // with the same color as the TUI, including explicit SGR backgrounds.
+        push_background(&mut row, point.column.0, point.column.0 + 1, bg);
 
         let is_spacer = cell
             .flags
@@ -137,7 +141,12 @@ pub fn build<T: EventListener>(term: &Term<T>, theme: &Theme) -> Frame {
         }
     };
 
-    Frame { rows, cols, cursor }
+    Frame {
+        rows,
+        cols,
+        cursor,
+        background,
+    }
 }
 
 fn push_char(row: &mut Row, character: char, color: Rgb) {
@@ -211,10 +220,13 @@ mod tests {
         let frame = frame_for(b"\x1b[44mAB\x1b[0mC");
 
         let backgrounds = &frame.rows[0].backgrounds;
-        assert_eq!(backgrounds.len(), 1);
+        assert_eq!(backgrounds.len(), 2);
         assert_eq!(backgrounds[0].start, 0);
         assert_eq!(backgrounds[0].end, 2);
         assert_eq!(backgrounds[0].color, Theme::tokyo_night().ansi[4]);
+        assert_eq!(backgrounds[1].start, 2);
+        assert_eq!(backgrounds[1].end, 20);
+        assert_eq!(backgrounds[1].color, Theme::tokyo_night().background);
     }
 
     #[test]

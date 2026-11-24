@@ -6,6 +6,7 @@ use winit::window::WindowId;
 use crate::complete::history::History;
 use crate::explorer::FileRow;
 use crate::forge::RemoteChange;
+use crate::git::refs::BranchInfo;
 use crate::git::{Snapshot, StatusSnapshot};
 use crate::git_status::GitStatus;
 use crate::highlight::StyledSpan;
@@ -41,6 +42,25 @@ pub enum UserEvent {
     /// Action selected from the native macOS menu.
     #[cfg_attr(not(target_os = "macos"), allow(dead_code))]
     Menu(Action),
+    /// Open the Agent Mode window.
+    OpenAgentMode,
+    /// Focus a pane selected from the Agent Mode window.
+    FocusAgentPane { pane: PaneId },
+    /// Agent processes discovered by the background watcher.
+    AgentsDetected {
+        generation: u64,
+        panes: Vec<crate::agents::DetectedAgent>,
+        external: Vec<crate::agents::DetectedAgent>,
+    },
+    /// Force an immediate agent process scan (Agent Mode refresh button).
+    RefreshAgents,
+    /// Terminate an agent process selected in Agent Mode.
+    KillAgent { pid: u32 },
+    /// Result of a kill request handled by a background worker.
+    AgentKilled {
+        pid: u32,
+        result: Result<String, String>,
+    },
     /// Syntax highlighting result from the background worker.
     Highlight {
         generation: u64,
@@ -68,6 +88,26 @@ pub enum UserEvent {
         pane: PaneId,
         cwd: PathBuf,
         status: Option<GitStatus>,
+    },
+    /// Local branches loaded for the footer branch popup.
+    BranchesLoaded {
+        pane: PaneId,
+        cwd: PathBuf,
+        result: Result<Vec<BranchInfo>, String>,
+    },
+    /// A footer branch checkout finished.
+    BranchCheckedOut {
+        pane: PaneId,
+        cwd: PathBuf,
+        branch: String,
+        result: Result<String, String>,
+    },
+    /// Working-tree diff loaded for the embedded split diff view.
+    WorkingDiffLoaded {
+        pane: PaneId,
+        cwd: PathBuf,
+        generation: u64,
+        result: Result<ReviewDetail, String>,
     },
     /// Full repository snapshot for the Git manager window.
     GitSnapshotLoaded {

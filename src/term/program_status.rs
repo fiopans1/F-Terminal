@@ -1,0 +1,626 @@
+//! `OSC 7501` program status support.
+//!
+//! Coding agents such as Claude Code, Codex and OpenCode can report whether
+//! they are working, waiting for the user, done or failed. The protocol is
+//! opt-in for the program: before reporting, it asks the terminal whether it
+//! understands the sequence. F-Terminal therefore has to both parse reports
+//! and answer the feature-detection query.
+//!
+//! The scanner is deliberately small: it walks bytes that the VT parser is
+//! going to see anyway, and only allocates when a complete OSC sequence has
+//! been received.
+
+use std::collections::HashMap;
+
+use base64::Engine;
+use base64::engine::general_purpose::{STANDARD, STANDARD_NO_PAD};
+
+const FEATURE_REPLY_BODY: &str =
+    "?:states=idle,working,done,blocked,error:kinds=permission,question,auth";
+const MAX_OSC_BYTES: usize = 4096;
+const MAX_RECORDS: usize = 256;
+const MAX_MSG_ENCODED: usize = 2732;
+const MAX_MSG_DECODED: usize = 2048;
+const MAX_TITLE_ENCODED: usize = 256;
+const MAX_TITLE_DECODED: usize = 192;
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum ProgramState {
+    Idle,
+    Working,
+    Blocked,
+    Done,
+    Error,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum BlockKind {
+    Permission,
+    Question,
+    Auth,
+}
+
+impl BlockKind {
+    fn from_name(value: &str) -> Option<Self> {
+        match value {
+            "permission" => Some(Self::Permission),
+            "question" => Some(Self::Question),
+            "auth" => Some(Self::Auth),
+            _ => None,
+        }
+    }
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct ProgramRecord {
+    pub id: String,
+    pub app: Option<String>,
+    pub state: ProgramState,
+    pub kind: Option<BlockKind>,
+    pub progress: Option<u8>,
+    pub title: Option<String>,
+    pub message: Option<String>,
+    pub touched: u64,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum NotificationSource {
+    Osc9,
+    Osc777,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct ProgramNotification {
+    pub title: Option<String>,
+    pub message: Option<String>,
+    pub source: NotificationSource,
+}
+
+#[derive(Default)]
+pub struct ProgramStatus {
+    records: HashMap<String, ProgramRecord>,
+    scanner: OscScanner,
+    replies: Vec<String>,
+    notifications: Vec<ProgramNotification>,
+    revision: u64,
+    tick: u64,
+}
+
+impl ProgramStatus {
+    pub fn feed(&mut self, bytes: &[u8]) {
+        let mut frames = Vec::new();
+        let mut resets = 0;
+        self.scanner.feed(bytes, &mut frames, &mut resets);
+
+        if resets > 0 {
+            self.records.clear();
+            self.revision = self.revision.wrapping_add(1);
+        }
+
+        for (frame, bel) in frames {
+            self.handle_frame(&frame, bel);
+        }
+    }
+
+    pub fn revision(&self) -> u64 {
+        self.revision
+    }
+
+    pub fn has_records(&self) -> bool {
+        !self.records.is_empty()
+    }
+
+    pub fn take_replies(&mut self) -> Vec<String> {
+        std::mem::take(&mut self.replies)
+    }
+
+    pub fn take_notifications(&mut self) -> Vec<ProgramNotification> {
+        std::mem::take(&mut self.notifications)
+    }
+
+    /// Records in display order (root first). Orphan child records are
+    /// included after the roots, with their inherited `app` filled in.
+    pub fn snapshot(&self) -> Vec<ProgramRecord> {
+        let mut records: Vec<ProgramRecord> = self.records.values().cloned().collect();
+        for record in &mut records {
+            if record.app.is_none() {
+                record.app = self.inherited_app(&record.id);
+            }
+        }
+        records.sort_by(|a, b| {
+            a.id.is_empty()
+                .cmp(&b.id.is_empty())
+                .reverse()
+                .then_with(|| b.touched.cmp(&a.touched))
+                .then_with(|| a.id.cmp(&b.id))
+        });
+        records
+    }
+
+    /// Drop transient states after the attached process exits or a shell
+    /// prompt starts. Finished work stays visible until the user sees it.
+    pub fn clear_active(&mut self) {
+        let before = self.records.len();
+        self.records
+            .retain(|_, record| matches!(record.state, ProgramState::Done | ProgramState::Error));
+        if self.records.len() != before {
+            self.revision = self.revision.wrapping_add(1);
+        }
+    }
+
+    fn inherited_app(&self, id: &str) -> Option<String> {
+        if let Some(record) = self.records.get(id)
+            && record.app.is_some()
+        {
+            return record.app.clone();
+        }
+
+        let mut parent = id;
+        while let Some((next, _)) = parent.rsplit_once('/') {
+            if let Some(record) = self.records.get(next)
+                && let Some(app) = &record.app
+            {
+                return Some(app.clone());
+            }
+            if next.is_empty() {
+                break;
+            }
+            parent = next;
+        }
+        self.records.get("").and_then(|record| record.app.clone())
+    }
+
+    fn handle_frame(&mut self, frame: &[u8], bel: bool) {
+        let Ok(body) = std::str::from_utf8(frame) else {
+            return;
+        };
+
+        if let Some(rest) = body.strip_prefix("7501;") {
+            self.handle_program_status(rest, bel);
+        } else if let Some(rest) = body.strip_prefix("9;") {
+            if !rest.starts_with("4;") {
+                self.push_notification(ProgramNotification {
+                    title: Some("Terminal".into()),
+                    message: clean_notification_text(rest),
+                    source: NotificationSource::Osc9,
+                });
+            }
+        } else if let Some(rest) = body.strip_prefix("777;") {
+            let mut parts = rest.splitn(3, ';');
+            let kind = parts.next().unwrap_or("");
+            if kind == "notify" {
+                let title = parts.next().and_then(clean_notification_text);
+                let message = parts.next().and_then(clean_notification_text);
+                self.push_notification(ProgramNotification {
+                    title,
+                    message,
+                    source: NotificationSource::Osc777,
+                });
+            }
+        } else if body == "133;A" {
+            self.clear_active();
+        }
+    }
+
+    fn push_notification(&mut self, notification: ProgramNotification) {
+        self.notifications.push(notification);
+        if self.notifications.len() > 16 {
+            self.notifications.remove(0);
+        }
+        self.revision = self.revision.wrapping_add(1);
+    }
+
+    fn handle_program_status(&mut self, body: &str, bel: bool) {
+        let body = body.trim();
+        if body.is_empty() {
+            return;
+        }
+        if body == "?" || body.starts_with("?:") {
+            let terminator = if bel { "\x07" } else { "\x1b\\" };
+            self.replies
+                .push(format!("\x1b]7501;{FEATURE_REPLY_BODY}{terminator}"));
+            return;
+        }
+
+        let mut state = None;
+        let mut clear = false;
+        let mut id = String::new();
+        let mut kind = None;
+        let mut progress = None;
+        let mut app = None;
+        let mut title = None;
+        let mut message = None;
+
+        for pair in body.split(':') {
+            let pair = pair.trim();
+            let Some((key, value)) = pair.split_once('=') else {
+                continue;
+            };
+            match key {
+                "state" => {
+                    clear = false;
+                    state = match value {
+                        "idle" => Some(ProgramState::Idle),
+                        "working" => Some(ProgramState::Working),
+                        "blocked" => Some(ProgramState::Blocked),
+                        "done" => Some(ProgramState::Done),
+                        "error" => Some(ProgramState::Error),
+                        "clear" => {
+                            clear = true;
+                            None
+                        }
+                        _ => None,
+                    };
+                }
+                "id" => {
+                    if !valid_id(value) {
+                        return;
+                    }
+                    id = value.to_owned();
+                }
+                "kind" => kind = BlockKind::from_name(value),
+                "progress" => progress = value.parse::<u8>().ok().filter(|value| *value <= 100),
+                "app" => {
+                    if valid_app(value) {
+                        app = Some(value.to_owned());
+                    }
+                }
+                "title" => match decode_text(value, MAX_TITLE_ENCODED, MAX_TITLE_DECODED) {
+                    Ok(text) => title = text,
+                    Err(()) => return,
+                },
+                "msg" => match decode_text(value, MAX_MSG_ENCODED, MAX_MSG_DECODED) {
+                    Ok(text) => message = text,
+                    Err(()) => return,
+                },
+                _ => {}
+            }
+        }
+
+        let Some(state) = state else {
+            if clear {
+                self.clear_record(&id);
+            }
+            return;
+        };
+
+        if clear {
+            self.clear_record(&id);
+            return;
+        }
+
+        self.tick = self.tick.wrapping_add(1);
+        let touched = self.tick;
+        if !self.records.contains_key(&id)
+            && self.records.len() >= MAX_RECORDS
+            && let Some(oldest) = self
+                .records
+                .iter()
+                .min_by_key(|(_, record)| record.touched)
+                .map(|(id, _)| id.clone())
+        {
+            self.records.remove(&oldest);
+        }
+
+        self.records.insert(
+            id.clone(),
+            ProgramRecord {
+                id,
+                app,
+                state,
+                kind: kind.filter(|_| state == ProgramState::Blocked),
+                progress: progress
+                    .filter(|_| matches!(state, ProgramState::Working | ProgramState::Blocked)),
+                title,
+                message,
+                touched,
+            },
+        );
+        self.revision = self.revision.wrapping_add(1);
+    }
+
+    fn clear_record(&mut self, id: &str) {
+        if id.is_empty() {
+            if !self.records.is_empty() {
+                self.records.clear();
+                self.revision = self.revision.wrapping_add(1);
+            }
+            return;
+        }
+
+        let prefix = format!("{id}/");
+        let before = self.records.len();
+        self.records
+            .retain(|key, _| key != id && !key.starts_with(&prefix));
+        if self.records.len() != before {
+            self.revision = self.revision.wrapping_add(1);
+        }
+    }
+}
+
+fn clean_notification_text(text: &str) -> Option<String> {
+    let text: String = text
+        .chars()
+        .filter(|character| !character.is_control())
+        .take(512)
+        .collect();
+    let text = text.trim();
+    (!text.is_empty()).then(|| text.to_owned())
+}
+
+fn valid_app(value: &str) -> bool {
+    !value.is_empty()
+        && value.len() <= 32
+        && value
+            .bytes()
+            .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'_' | b'.' | b'+' | b'-'))
+}
+
+fn valid_id(value: &str) -> bool {
+    if value.is_empty() || value.len() > 128 {
+        return false;
+    }
+    let mut depth = 0;
+    for segment in value.split('/') {
+        depth += 1;
+        if segment.is_empty()
+            || segment.len() > 32
+            || !segment.bytes().all(|byte| {
+                byte.is_ascii_alphanumeric() || matches!(byte, b'_' | b'.' | b'+' | b'-')
+            })
+        {
+            return false;
+        }
+    }
+    depth <= 8
+}
+
+fn decode_text(
+    encoded: &str,
+    max_encoded: usize,
+    max_decoded: usize,
+) -> Result<Option<String>, ()> {
+    if encoded.is_empty() {
+        return Ok(None);
+    }
+    if encoded.len() > max_encoded {
+        return Err(());
+    }
+    let decoded = STANDARD
+        .decode(encoded)
+        .or_else(|_| STANDARD_NO_PAD.decode(encoded))
+        .map_err(|_| ())?;
+    if decoded.len() > max_decoded {
+        return Err(());
+    }
+    let text = String::from_utf8(decoded).map_err(|_| ())?;
+    if text
+        .chars()
+        .any(|character| character.is_control() || matches!(character, '\u{202a}'..='\u{202e}'))
+    {
+        return Err(());
+    }
+    Ok(Some(text))
+}
+
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+enum ScanState {
+    #[default]
+    Ground,
+    Esc,
+    Osc,
+    OscEsc,
+}
+
+#[derive(Default)]
+struct OscScanner {
+    state: ScanState,
+    buffer: Vec<u8>,
+    overflow: bool,
+}
+
+impl OscScanner {
+    fn feed(&mut self, bytes: &[u8], frames: &mut Vec<(Vec<u8>, bool)>, resets: &mut usize) {
+        for &byte in bytes {
+            match self.state {
+                ScanState::Ground => {
+                    if byte == 0x1b {
+                        self.state = ScanState::Esc;
+                    }
+                }
+                ScanState::Esc => match byte {
+                    b']' => {
+                        self.state = ScanState::Osc;
+                        self.buffer.clear();
+                        self.overflow = false;
+                    }
+                    b'c' => {
+                        self.state = ScanState::Ground;
+                        *resets += 1;
+                    }
+                    0x1b => {}
+                    _ => self.state = ScanState::Ground,
+                },
+                ScanState::Osc => match byte {
+                    0x07 => self.finish(frames, true),
+                    0x1b => self.state = ScanState::OscEsc,
+                    _ => {
+                        if self.buffer.len() < MAX_OSC_BYTES {
+                            self.buffer.push(byte);
+                        } else {
+                            self.overflow = true;
+                        }
+                    }
+                },
+                ScanState::OscEsc => match byte {
+                    b'\\' => self.finish(frames, false),
+                    0x1b => {}
+                    _ => {
+                        self.state = ScanState::Ground;
+                        self.buffer.clear();
+                        self.overflow = false;
+                    }
+                },
+            }
+        }
+    }
+
+    fn finish(&mut self, frames: &mut Vec<(Vec<u8>, bool)>, bel: bool) {
+        if !self.overflow {
+            frames.push((std::mem::take(&mut self.buffer), bel));
+        } else {
+            self.buffer.clear();
+        }
+        self.overflow = false;
+        self.state = ScanState::Ground;
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn feed(status: &mut ProgramStatus, text: &str) {
+        status.feed(text.as_bytes());
+    }
+
+    fn encoded(text: &str) -> String {
+        STANDARD.encode(text)
+    }
+
+    #[test]
+    fn answers_the_feature_query() {
+        let mut status = ProgramStatus::default();
+        feed(&mut status, "\x1b]7501;?\x1b\\");
+
+        let replies = status.take_replies();
+        assert_eq!(replies.len(), 1);
+        assert!(replies[0].starts_with("\x1b]7501;?"));
+        assert!(replies[0].contains("states=idle,working,done,blocked,error"));
+        assert!(replies[0].contains("kinds=permission,question,auth"));
+        assert!(replies[0].ends_with("\x1b\\"));
+    }
+
+    #[test]
+    fn mirrors_the_query_terminator() {
+        let mut status = ProgramStatus::default();
+        feed(&mut status, "\x1b]7501;?\x07");
+        let replies = status.take_replies();
+        assert!(replies[0].ends_with('\x07'));
+    }
+
+    #[test]
+    fn parses_working_and_done_states() {
+        let mut status = ProgramStatus::default();
+        feed(
+            &mut status,
+            "\x1b]7501;state=working:app=claude-code:msg=QnVpbGRpbmc=\x1b\\",
+        );
+
+        let records = status.snapshot();
+        assert_eq!(records.len(), 1);
+        assert_eq!(records[0].state, ProgramState::Working);
+        assert_eq!(records[0].app.as_deref(), Some("claude-code"));
+        assert_eq!(records[0].message.as_deref(), Some("Building"));
+
+        feed(&mut status, "\x1b]7501;state=done:app=claude-code\x1b\\");
+        assert_eq!(status.snapshot()[0].state, ProgramState::Done);
+    }
+
+    #[test]
+    fn parses_blocked_kind_and_message() {
+        let mut status = ProgramStatus::default();
+        let message = encoded("Allow deploy?");
+        feed(
+            &mut status,
+            &format!("\x1b]7501;state=blocked:kind=permission:app=codex:msg={message}\x1b\\"),
+        );
+
+        let record = &status.snapshot()[0];
+        assert_eq!(record.state, ProgramState::Blocked);
+        assert_eq!(record.kind, Some(BlockKind::Permission));
+        assert_eq!(record.message.as_deref(), Some("Allow deploy?"));
+    }
+
+    #[test]
+    fn handles_sequences_split_across_reads() {
+        let mut status = ProgramStatus::default();
+        status.feed(b"\x1b]7501;sta");
+        assert!(status.snapshot().is_empty());
+        status.feed(b"te=working:app=opencode\x1b");
+        status.feed(b"\\");
+
+        assert_eq!(status.snapshot()[0].state, ProgramState::Working);
+    }
+
+    #[test]
+    fn child_records_inherit_the_parent_app() {
+        let mut status = ProgramStatus::default();
+        feed(&mut status, "\x1b]7501;state=working:app=claude-code\x1b\\");
+        feed(
+            &mut status,
+            "\x1b]7501;state=blocked:kind=question:id=agent/2\x1b\\",
+        );
+
+        let records = status.snapshot();
+        let child = records
+            .iter()
+            .find(|record| record.id == "agent/2")
+            .unwrap();
+        assert_eq!(child.app.as_deref(), Some("claude-code"));
+    }
+
+    #[test]
+    fn clear_removes_the_record_and_children() {
+        let mut status = ProgramStatus::default();
+        feed(&mut status, "\x1b]7501;state=working:app=codex\x1b\\");
+        feed(&mut status, "\x1b]7501;state=working:id=worker/1\x1b\\");
+        feed(&mut status, "\x1b]7501;state=clear\x1b\\");
+
+        assert!(status.snapshot().is_empty());
+    }
+
+    #[test]
+    fn rejects_invalid_base64_without_changing_the_record() {
+        let mut status = ProgramStatus::default();
+        feed(&mut status, "\x1b]7501;state=working:app=codex\x1b\\");
+        let before = status.snapshot();
+        feed(&mut status, "\x1b]7501;state=done:msg=!!!\x1b\\");
+        assert_eq!(status.snapshot(), before);
+    }
+
+    #[test]
+    fn parses_osc_notifications() {
+        let mut status = ProgramStatus::default();
+        feed(&mut status, "\x1b]9;Turn complete\x07");
+        feed(&mut status, "\x1b]777;notify;Codex;Approval needed\x1b\\");
+
+        let notifications = status.take_notifications();
+        assert_eq!(notifications.len(), 2);
+        assert_eq!(notifications[0].message.as_deref(), Some("Turn complete"));
+        assert_eq!(notifications[1].title.as_deref(), Some("Codex"));
+        assert_eq!(notifications[1].message.as_deref(), Some("Approval needed"));
+    }
+
+    #[test]
+    fn ignores_oversized_sequences() {
+        let mut status = ProgramStatus::default();
+        let mut sequence = b"\x1b]7501;state=working:app=codex:msg=".to_vec();
+        sequence.extend(std::iter::repeat_n(b'A', MAX_OSC_BYTES + 10));
+        sequence.extend_from_slice(b"\x1b\\");
+        status.feed(&sequence);
+        assert!(status.snapshot().is_empty());
+    }
+
+    #[test]
+    fn shell_prompt_drops_transient_states() {
+        let mut status = ProgramStatus::default();
+        feed(&mut status, "\x1b]7501;state=working:app=codex\x1b\\");
+        feed(&mut status, "\x1b]7501;state=done:app=codex\x1b\\");
+        status.clear_active();
+
+        let records = status.snapshot();
+        assert_eq!(records.len(), 1);
+        assert_eq!(records[0].state, ProgramState::Done);
+    }
+}

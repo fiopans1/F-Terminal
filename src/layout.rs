@@ -80,6 +80,7 @@ pub fn compute_layout(
     area: Rect,
     gap: f32,
     padding: f32,
+    left_padding: f32,
     footer_height: f32,
 ) -> LayoutResult {
     let mut result = LayoutResult::default();
@@ -88,6 +89,7 @@ pub fn compute_layout(
         area,
         gap.max(1.0),
         padding,
+        left_padding.max(0.0),
         footer_height.max(0.0),
         &mut result,
     );
@@ -99,12 +101,16 @@ fn walk(
     area: Rect,
     gap: f32,
     padding: f32,
+    left_padding: f32,
     footer_height: f32,
     result: &mut LayoutResult,
 ) {
     match node {
         LayoutNode::Leaf(id) => {
             let padded = area.inset(padding);
+            let left = left_padding.min((padded.width - 1.0).max(0.0));
+            let content_width = (padded.width - left).max(1.0);
+            let content_x = padded.x + left;
             let footer_height = footer_height
                 .min(padded.height * 0.3)
                 .min((padded.height - 1.0).max(0.0));
@@ -112,11 +118,11 @@ fn walk(
             result.panes.push(PaneLayout {
                 id: *id,
                 outer: area,
-                content: Rect::new(padded.x, padded.y, padded.width, content_height),
+                content: Rect::new(content_x, padded.y, content_width, content_height),
                 footer: Rect::new(
-                    padded.x,
+                    content_x,
                     padded.y + content_height,
-                    padded.width,
+                    content_width,
                     (padded.height - content_height).max(0.0),
                 ),
             });
@@ -137,6 +143,7 @@ fn walk(
                 first_area,
                 gap,
                 padding,
+                left_padding,
                 footer_height,
                 result,
             );
@@ -145,6 +152,7 @@ fn walk(
                 second_area,
                 gap,
                 padding,
+                left_padding,
                 footer_height,
                 result,
             );
@@ -206,7 +214,7 @@ mod tests {
             second: Box::new(LayoutNode::Leaf(PaneId(2))),
         }));
 
-        let layout = compute_layout(&tree, Rect::new(0.0, 0.0, 100.0, 50.0), 2.0, 4.0, 0.0);
+        let layout = compute_layout(&tree, Rect::new(0.0, 0.0, 100.0, 50.0), 2.0, 4.0, 0.0, 0.0);
 
         assert_eq!(layout.panes.len(), 2);
         assert_eq!(layout.dividers.len(), 1);
@@ -222,12 +230,32 @@ mod tests {
     #[test]
     fn reserves_space_for_the_pane_footer() {
         let tree = LayoutNode::Leaf(PaneId(1));
-        let layout = compute_layout(&tree, Rect::new(0.0, 0.0, 100.0, 80.0), 2.0, 4.0, 12.0);
+        let layout = compute_layout(&tree, Rect::new(0.0, 0.0, 100.0, 80.0), 2.0, 4.0, 0.0, 12.0);
 
         let pane = layout.panes[0];
         assert_eq!(pane.content.height, 60.0);
         assert_eq!(pane.footer.y, 64.0);
         assert_eq!(pane.footer.height, 12.0);
+    }
+
+    #[test]
+    fn insets_only_the_left_side_of_the_grid() {
+        let tree = LayoutNode::Leaf(PaneId(1));
+        let layout = compute_layout(
+            &tree,
+            Rect::new(0.0, 0.0, 100.0, 80.0),
+            2.0,
+            0.0,
+            10.0,
+            12.0,
+        );
+
+        let pane = layout.panes[0];
+        assert_eq!(pane.content.x, 10.0);
+        assert_eq!(pane.content.width, 90.0);
+        assert_eq!(pane.footer.x, 10.0);
+        assert_eq!(pane.footer.width, 90.0);
+        assert_eq!(pane.content.height, 68.0);
     }
 
     #[test]
@@ -240,7 +268,7 @@ mod tests {
             second: Box::new(LayoutNode::Leaf(PaneId(2))),
         }));
 
-        let layout = compute_layout(&tree, Rect::new(0.0, 0.0, 80.0, 100.0), 2.0, 0.0, 0.0);
+        let layout = compute_layout(&tree, Rect::new(0.0, 0.0, 80.0, 100.0), 2.0, 0.0, 0.0, 0.0);
 
         assert_eq!(layout.panes[0].outer.height, 24.5);
         assert_eq!(layout.panes[1].outer.y, 26.5);

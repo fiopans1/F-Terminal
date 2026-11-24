@@ -17,12 +17,19 @@ use winit::event_loop::{ActiveEventLoop, ControlFlow, EventLoopProxy};
 use winit::keyboard::{Key, KeyCode, ModifiersState, NamedKey, PhysicalKey};
 use winit::window::{Window, WindowId};
 
+use crate::agent_window::AgentWindow;
+use crate::agents::{
+    self, AgentChild, AgentId, AgentKind, AgentRow, AgentSnapshot, AgentSource, AgentState,
+    AgentWatchRequest, DetectedAgent, kind_from_protocol_app,
+};
 use crate::complete;
 use crate::complete::history::History;
-use crate::config::{Config, RenderMode};
+use crate::config::{Config, RenderMode, config_path};
 use crate::editor::Editor;
 use crate::event::UserEvent;
 use crate::explorer::{FileExplorer, FileRow};
+use crate::git::ops::{self as git_ops, Action as GitOpsAction};
+use crate::git::refs::{self as git_refs, BranchInfo};
 use crate::git_status::{self, GitStatus};
 use crate::git_window::GitWindow;
 use crate::highlight::{self, HighlightRequest, StyledSpan};
@@ -32,13 +39,15 @@ use crate::menu;
 use crate::render::quads::Quad;
 use crate::render::scene::{GhostText, Label, PaneLayer, Scene};
 use crate::render::{CellMetrics, Renderer, SharedRenderResources, grid_size_for};
+use crate::review::{self, DiffLineKind, FileStatus, ReviewDetail, ReviewKind, ReviewSummary};
 use crate::review_window::ReviewWindow;
 use crate::shell::{ShellCatalog, TerminalProfile};
 use crate::sidebar::{
     self, LayoutSpec, Sidebar, SidebarHit, SidebarLayout, SidebarMode, SidebarRow, TabSummary,
 };
-use crate::term::color::{Theme, to_linear};
-use crate::term::frame::{Cursor, CursorShapeKind, Frame, Row, Run};
+use crate::term::color::{Rgb, Theme, to_linear};
+use crate::term::frame::{Background, Cursor, CursorShapeKind, Frame, Row, Run};
+use crate::term::program_status::{BlockKind, ProgramRecord, ProgramState};
 use crate::workspace::{CloseOutcome, Pane, PaneId, SplitDirection, TabId, Workspace};
 
 pub struct App {
@@ -47,6 +56,7 @@ pub struct App {
     window: Option<WindowState>,
     review: Option<ReviewWindow>,
     git: Option<GitWindow>,
+    agent: Option<AgentWindow>,
     shared_render: Option<SharedRenderResources>,
     _menu: Option<menu::MenuState>,
 }
@@ -67,6 +77,7 @@ impl App {
             window: None,
             review: None,
             git: None,
+            agent: None,
             shared_render: None,
             _menu: None,
         }
@@ -186,6 +197,63 @@ impl App {
         self.git = Some(git);
     }
 
+    fn open_agent_window(&mut self, event_loop: &ActiveEventLoop) {
+        if let Some(agent) = &self.agent {
+            agent.focus();
+            return;
+        }
+
+        let attributes = Window::default_attributes()
+            .with_title("Agent Mode — F-Terminal")
+            .with_inner_size(LogicalSize::new(980.0, 640.0))
+            .with_min_inner_size(LogicalSize::new(720.0, 460.0));
+
+        let window = match event_loop.create_window(attributes) {
+            Ok(window) => Arc::new(window),
+            Err(error) => {
+                log::error!("failed to create the agent window: {error}");
+                return;
+            }
+        };
+
+        let Some(renderer) = self.create_secondary_renderer(&window, event_loop, "agent mode")
+        else {
+            return;
+        };
+
+        let agent = AgentWindow::new(window, renderer, self.proxy.clone());
+        agent.focus();
+        agent.request_redraw();
+        log::info!("opened agent mode window");
+        self.agent = Some(agent);
+        if let Some(state) = &mut self.window {
+            state.force_agent_refresh(&self.config);
+        }
+        self.sync_agent_window();
+    }
+
+    fn focus_agent_pane(&mut self, pane: PaneId) {
+        let Some(state) = &mut self.window else {
+            return;
+        };
+        if state.focus_agent_pane(pane, &self.config) {
+            state.window.focus_window();
+        }
+        self.sync_agent_window();
+    }
+
+    fn sync_agent_window(&mut self) {
+        let Some(agent_window) = &mut self.agent else {
+            return;
+        };
+        let Some(state) = &mut self.window else {
+            return;
+        };
+        state.rebuild_agent_snapshot();
+        let snapshot = state.agent_snapshot.clone();
+        agent_window.apply_snapshot(snapshot);
+    }
+
     fn focus_main(&self) {
         if let Some(window) = &self.window {
             window.window.focus_window();
@@ -269,6 +337,32 @@ impl ApplicationHandler<UserEvent> for App {
             return;
         }
 
+        if self
+            .agent
+            .as_ref()
+            .is_some_and(|agent| agent.window_id() == window_id)
+        {
+            if matches!(event, WindowEvent::CloseRequested) {
+                self.agent = None;
+                self.focus_main();
+                return;
+            }
+
+            let close_requested = {
+                let Some(agent) = &mut self.agent else {
+                    return;
+                };
+                agent.on_window_event(event, &self.config);
+                agent.close_requested()
+            };
+
+            if close_requested {
+                self.agent = None;
+                self.focus_main();
+            }
+            return;
+        }
+
         if !self
             .review
             .as_ref()
@@ -305,6 +399,74 @@ impl ApplicationHandler<UserEvent> for App {
             }
             UserEvent::OpenGitManager { cwd } => {
                 self.open_git_window(event_loop, cwd);
+                return;
+            }
+            UserEvent::OpenAgentMode => {
+                self.open_agent_window(event_loop);
+                return;
+            }
+            UserEvent::FocusAgentPane { pane } => {
+                self.focus_agent_pane(pane);
+                return;
+            }
+            UserEvent::RefreshAgents => {
+                if let Some(state) = &mut self.window {
+                    state.force_agent_refresh(&self.config);
+                    state.window.request_redraw();
+                }
+                self.sync_agent_window();
+                if let Some(agent) = &self.agent {
+                    agent.request_redraw();
+                }
+                return;
+            }
+            UserEvent::KillAgent { pid } => {
+                if let Some(agent) = &mut self.agent {
+                    agent.on_kill_requested(pid);
+                }
+                let proxy = self.proxy.clone();
+                let spawned =
+                    std::thread::Builder::new()
+                        .name("agent-kill".into())
+                        .spawn(move || {
+                            let result = agents::terminate_process(pid);
+                            let _ = proxy.send_event(UserEvent::AgentKilled { pid, result });
+                        });
+                if let Err(error) = spawned
+                    && let Some(agent) = &mut self.agent
+                {
+                    agent.on_agent_killed(
+                        pid,
+                        &Err(format!("could not start the kill worker: {error}")),
+                    );
+                }
+                return;
+            }
+            UserEvent::AgentKilled { pid, result } => {
+                if let Some(agent) = &mut self.agent {
+                    agent.on_agent_killed(pid, &result);
+                }
+                if result.is_ok() {
+                    if let Some(state) = &mut self.window {
+                        state.force_agent_refresh(&self.config);
+                        state.window.request_redraw();
+                    }
+                    self.sync_agent_window();
+                }
+                return;
+            }
+            UserEvent::AgentsDetected {
+                generation,
+                panes,
+                external,
+            } => {
+                if let Some(state) = &mut self.window {
+                    state.on_agents_detected(generation, panes, external);
+                }
+                self.sync_agent_window();
+                if let Some(state) = &self.window {
+                    state.window.request_redraw();
+                }
                 return;
             }
             UserEvent::ReviewLoaded {
@@ -397,6 +559,10 @@ impl ApplicationHandler<UserEvent> for App {
                 self.open_git_window(event_loop, cwd);
                 return;
             }
+            UserEvent::Menu(menu::Action::AgentMode) => {
+                self.open_agent_window(event_loop);
+                return;
+            }
             _ => {}
         }
 
@@ -412,7 +578,7 @@ impl ApplicationHandler<UserEvent> for App {
             UserEvent::Term { pane, event } => {
                 state.on_term_event(pane, event, event_loop, &self.config);
             }
-            UserEvent::Menu(action) => state.dispatch_menu(action),
+            UserEvent::Menu(action) => state.dispatch_menu(action, &self.config),
             UserEvent::Highlight {
                 generation,
                 revision,
@@ -420,6 +586,25 @@ impl ApplicationHandler<UserEvent> for App {
             } => state.on_highlight(generation, revision, spans),
             UserEvent::GitStatus { pane, cwd, status } => {
                 state.on_git_status(pane, cwd, status);
+            }
+            UserEvent::BranchesLoaded { pane, cwd, result } => {
+                state.on_branches_loaded(pane, cwd, result);
+            }
+            UserEvent::BranchCheckedOut {
+                pane,
+                cwd,
+                branch,
+                result,
+            } => {
+                state.on_branch_checked_out(pane, cwd, branch, result);
+            }
+            UserEvent::WorkingDiffLoaded {
+                pane,
+                cwd,
+                generation,
+                result,
+            } => {
+                state.on_working_diff_loaded(pane, cwd, generation, result);
             }
             UserEvent::CompletionCommands(commands) => {
                 state.on_completion_commands(commands, &self.config);
@@ -440,16 +625,36 @@ impl ApplicationHandler<UserEvent> for App {
             | UserEvent::GitSnapshotLoaded { .. }
             | UserEvent::GitStatusLoaded { .. }
             | UserEvent::GitDetailLoaded { .. }
-            | UserEvent::GitOperationFinished { .. } => {}
+            | UserEvent::GitOperationFinished { .. }
+            | UserEvent::OpenAgentMode
+            | UserEvent::FocusAgentPane { .. }
+            | UserEvent::AgentsDetected { .. }
+            | UserEvent::RefreshAgents
+            | UserEvent::KillAgent { .. }
+            | UserEvent::AgentKilled { .. } => {}
         }
     }
 
     fn about_to_wait(&mut self, event_loop: &ActiveEventLoop) {
         let mut wait = Duration::from_millis(750);
+        let agent_open = self.agent.is_some();
 
         if let Some(state) = &mut self.window {
             state.poll_background(&self.config);
+            state.poll_agent_watcher(&self.config, agent_open);
+            if state.agents_dirty {
+                state.rebuild_agent_snapshot();
+                state.window.request_redraw();
+            }
             wait = state.next_wake();
+        }
+
+        if let Some(agent) = &mut self.agent {
+            agent.tick();
+            wait = wait.min(Duration::from_secs(1));
+        }
+        if agent_open {
+            self.sync_agent_window();
         }
 
         if let Some(git) = &mut self.git {
@@ -465,6 +670,7 @@ struct ViewLayout {
     sidebar: SidebarLayout,
     panes: Vec<PaneLayout>,
     dividers: Vec<DividerLayout>,
+    /// Right-side panel layout, used by the editor or the working diff.
     editor: Option<EditorLayout>,
 }
 
@@ -479,6 +685,7 @@ impl ViewLayout {
     }
 }
 
+/// Layout shared by the editor and the embedded working-diff panel.
 #[derive(Clone, Copy, Debug)]
 struct EditorLayout {
     panel: Rect,
@@ -494,6 +701,7 @@ struct EditorLayout {
 enum Focus {
     Terminal,
     Editor,
+    Diff,
 }
 
 #[derive(Clone, Copy, Debug)]
@@ -526,6 +734,19 @@ struct WindowState {
     selecting: Option<PaneId>,
     last_click: Option<(Instant, Point, PaneId)>,
     processes: Option<System>,
+    agent_watch_tx: Option<Sender<AgentWatchRequest>>,
+    agent_watch_generation: u64,
+    agent_watch_pending: bool,
+    last_agent_poll: Instant,
+    detected_agents: Vec<DetectedAgent>,
+    external_agents: Vec<DetectedAgent>,
+    agent_snapshot: AgentSnapshot,
+    agent_times: HashMap<AgentId, u64>,
+    seen_agents: HashSet<AgentId>,
+    agent_notifications: HashMap<PaneId, PaneNotification>,
+    hook_log: agents::HookLog,
+    hook_states: HashMap<PaneId, HookState>,
+    agents_dirty: bool,
     explorer: FileExplorer,
     editor: Option<Editor>,
     highlight_tx: Option<Sender<HighlightRequest>>,
@@ -538,6 +759,11 @@ struct WindowState {
     last_cwd_poll: Instant,
     last_git_poll: Instant,
     git_in_flight: HashSet<PaneId>,
+    footer_hits: HashMap<PaneId, FooterHits>,
+    prompt_trims: HashMap<PaneId, Vec<PromptTrim>>,
+    branch_menu: Option<BranchMenu>,
+    diff_view: Option<DiffView>,
+    diff_generation: u64,
     editor_ratio: f32,
     pending_spawns: HashMap<PaneId, PendingSpawn>,
     shells: ShellCatalog,
@@ -560,6 +786,84 @@ struct CompletionView {
     typed_line: usize,
     typed_token: usize,
     right_limit: usize,
+}
+
+#[derive(Clone, Copy, Debug, Default)]
+struct FooterHits {
+    branch: Option<Rect>,
+    changes: Option<Rect>,
+}
+
+#[derive(Clone, Copy, Debug)]
+struct PromptTrim {
+    row: usize,
+    columns: usize,
+}
+
+#[derive(Clone, Debug)]
+struct PaneNotification {
+    title: Option<String>,
+    message: Option<String>,
+    at: Instant,
+}
+
+#[derive(Clone, Debug)]
+struct HookState {
+    state: AgentState,
+    message: Option<String>,
+    at: Instant,
+}
+
+#[derive(Clone, Debug)]
+struct BranchMenu {
+    pane: PaneId,
+    cwd: PathBuf,
+    branches: Vec<BranchInfo>,
+    selected: usize,
+    loading: bool,
+    error: Option<String>,
+    busy: Option<String>,
+}
+
+#[derive(Clone, Copy, Debug)]
+struct BranchMenuLayout {
+    rect: Rect,
+    list: Rect,
+    row_height: f32,
+    visible_rows: usize,
+    offset: usize,
+    message: Option<Rect>,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum DiffRowKind {
+    File,
+    Add,
+    Remove,
+    Context,
+    Hunk,
+    Meta,
+    Separator,
+}
+
+#[derive(Clone, Debug)]
+struct DiffRow {
+    kind: DiffRowKind,
+    text: String,
+}
+
+#[derive(Clone, Debug)]
+struct DiffView {
+    pane: PaneId,
+    cwd: PathBuf,
+    generation: u64,
+    loading: bool,
+    error: Option<String>,
+    detail: Option<ReviewDetail>,
+    rows: Vec<DiffRow>,
+    max_cols: usize,
+    scroll_row: usize,
+    scroll_col: usize,
 }
 
 #[derive(Clone, Debug)]
@@ -599,6 +903,11 @@ impl WindowState {
         let working_directory = default_directory();
         log::info!("working directory: {}", working_directory.display());
         let highlight_tx = highlight::spawn_worker(proxy.clone());
+        let agent_watch_tx = if config.agents.enabled {
+            agents::spawn_watcher(proxy.clone())
+        } else {
+            None
+        };
         let completion = complete::Engine::new(false);
         let shells = ShellCatalog::detect(config.shell.as_deref());
         log::info!(
@@ -632,6 +941,21 @@ impl WindowState {
             selecting: None,
             last_click: None,
             processes: System::new().ok(),
+            agent_watch_tx,
+            agent_watch_generation: 0,
+            agent_watch_pending: false,
+            last_agent_poll: Instant::now()
+                .checked_sub(Duration::from_millis(config.agents.poll_interval_ms))
+                .unwrap_or_else(Instant::now),
+            detected_agents: Vec::new(),
+            external_agents: Vec::new(),
+            agent_snapshot: AgentSnapshot::default(),
+            agent_times: HashMap::new(),
+            seen_agents: HashSet::new(),
+            agent_notifications: HashMap::new(),
+            hook_log: agents::HookLog::new(),
+            hook_states: HashMap::new(),
+            agents_dirty: true,
             explorer: FileExplorer::empty(working_directory),
             editor: None,
             highlight_tx,
@@ -644,6 +968,11 @@ impl WindowState {
             last_cwd_poll: Instant::now(),
             last_git_poll: Instant::now(),
             git_in_flight: HashSet::new(),
+            footer_hits: HashMap::new(),
+            prompt_trims: HashMap::new(),
+            branch_menu: None,
+            diff_view: None,
+            diff_generation: 0,
             editor_ratio: 0.42,
             pending_spawns: HashMap::new(),
             shells,
@@ -777,7 +1106,9 @@ impl WindowState {
                     self.editor_dirty = true;
                     self.ensure_editor_visible();
                     self.window.request_redraw();
-                } else if let Some(pane) = self.focused_pane_mut() {
+                } else if self.focus == Focus::Terminal
+                    && let Some(pane) = self.focused_pane_mut()
+                {
                     pane.session.write(text.as_bytes());
                     pane.suggestion_armed = true;
                 }
@@ -878,11 +1209,15 @@ impl WindowState {
 
         let gap = (2.0 * scale).round().max(1.0);
         let padding = self.renderer.physical(config.padding);
+        let padding_left = self.renderer.physical(config.padding_left);
 
         let mut terminal_area = content_area;
         let mut editor_layout = None;
 
-        if self.editor.is_some() {
+        if self.editor.is_some() || self.diff_view.is_some() {
+            // The right-side panel keeps a small inset even when the terminal
+            // is edge-to-edge, so text never collides with its frame.
+            let editor_padding = padding.max(self.renderer.physical(10.0));
             let minimum_editor_width = (240.0 * scale).min(content_area.width);
             let maximum_editor_width =
                 (content_area.width - 240.0 * scale).max(minimum_editor_width);
@@ -903,16 +1238,16 @@ impl WindowState {
             let header = Rect::new(panel.x, panel.y, panel.width, header_height);
             let close_size = (18.0 * scale).round();
             let close = Rect::new(
-                panel.right() - close_size - padding,
+                panel.right() - close_size - editor_padding,
                 panel.y + ((header_height - close_size) / 2.0).max(0.0),
                 close_size,
                 close_size,
             );
             let text = Rect::new(
-                panel.x + padding,
-                header.bottom() + padding,
-                (panel.width - padding * 2.0).max(1.0),
-                (panel.height - header_height - padding * 2.0).max(1.0),
+                panel.x + editor_padding,
+                header.bottom() + editor_padding,
+                (panel.width - editor_padding * 2.0).max(1.0),
+                (panel.height - header_height - editor_padding * 2.0).max(1.0),
             );
 
             if let Some(editor) = &mut self.editor {
@@ -929,7 +1264,7 @@ impl WindowState {
                 close,
                 divider,
                 split_area: content_area,
-                padding,
+                padding: editor_padding,
             });
         }
 
@@ -938,6 +1273,8 @@ impl WindowState {
             terminal_area,
             gap,
             padding,
+            padding_left,
+            // A compact but readable line for the Git bubbles.
             (26.0 * scale).round().max(18.0),
         );
         let pane_specs: Vec<(PaneId, Rect)> = layout
@@ -946,6 +1283,7 @@ impl WindowState {
             .map(|pane| (pane.id, pane.content))
             .collect();
 
+        let mut spawned_panes = Vec::new();
         for (pane_id, content) in &pane_specs {
             let grid = grid_size_for(content.width, content.height, metrics);
             if let Some(pane) = self.workspace.pane_mut(*pane_id) {
@@ -965,7 +1303,16 @@ impl WindowState {
                     .get(&spawn.profile_id)
                     .cloned()
                     .unwrap_or_else(|| self.shells.default_profile().clone());
-                let pane = Pane::new(
+                // Reuse the status of a sibling in the same directory so the
+                // bubbles appear immediately; a fresh request runs below.
+                let cached_status = self
+                    .workspace
+                    .tabs
+                    .iter()
+                    .flat_map(|tab| tab.panes.values())
+                    .find(|pane| pane.cwd.as_deref() == Some(spawn.cwd.as_path()))
+                    .and_then(|pane| pane.git_status.clone());
+                let mut pane = Pane::new(
                     *pane_id,
                     grid,
                     self.proxy.clone(),
@@ -973,7 +1320,9 @@ impl WindowState {
                     spawn.cwd,
                     config.scrollback_lines,
                 )?;
+                pane.git_status = cached_status;
                 self.workspace.insert_pane(pane);
+                spawned_panes.push(*pane_id);
             }
         }
 
@@ -983,6 +1332,10 @@ impl WindowState {
             dividers: layout.dividers,
             editor: editor_layout,
         };
+
+        for pane_id in spawned_panes {
+            self.request_git_status(pane_id);
+        }
 
         self.apply_scrollback_policy(config);
 
@@ -1038,6 +1391,19 @@ impl WindowState {
     }
 
     fn relayout(&mut self, config: &Config) {
+        if self
+            .diff_view
+            .as_ref()
+            .is_some_and(|diff| self.workspace.pane(diff.pane).is_none())
+        {
+            self.diff_view = None;
+            self.focus = if self.editor.is_some() {
+                Focus::Editor
+            } else {
+                Focus::Terminal
+            };
+        }
+        self.branch_menu = None;
         self.sync_explorer_to_focused();
         if let Err(error) = self.sync_layout(config) {
             log::error!("layout failed: {error:#}");
@@ -1077,6 +1443,7 @@ impl WindowState {
         self.sidebar.profile_menu = false;
         self.sidebar.hovered_profile = None;
         self.focus = Focus::Terminal;
+        self.branch_menu = None;
         // New terminals are appended to the sidebar; reveal the newest one.
         self.sidebar.scroll = f32::MAX;
 
@@ -1136,6 +1503,7 @@ impl WindowState {
                 self.git_in_flight.remove(&pane);
                 self.selecting = None;
                 self.sidebar.hovered = None;
+                self.agents_dirty = true;
                 self.relayout(config);
             }
         }
@@ -1148,6 +1516,7 @@ impl WindowState {
             CloseOutcome::TabClosed | CloseOutcome::PaneClosed => {
                 self.selecting = None;
                 self.sidebar.hovered = None;
+                self.agents_dirty = true;
                 self.relayout(config);
             }
         }
@@ -1164,6 +1533,8 @@ impl WindowState {
         self.workspace.select_tab(tab);
         if self.workspace.focus_pane(pane) {
             self.focus = Focus::Terminal;
+            self.mark_pane_agents_seen(pane);
+            self.agents_dirty = true;
             self.sync_explorer_to_focused();
             self.update_window_title();
             self.relayout(config);
@@ -1191,7 +1562,7 @@ impl WindowState {
         }
     }
 
-    fn dispatch_menu(&mut self, action: menu::Action) {
+    fn dispatch_menu(&mut self, action: menu::Action, config: &Config) {
         let cwd = self.focused_cwd();
         match action {
             menu::Action::Explorer => menu::open_explorer(&cwd),
@@ -1202,7 +1573,10 @@ impl WindowState {
             menu::Action::GitManager => {
                 let _ = self.proxy.send_event(UserEvent::OpenGitManager { cwd });
             }
-            menu::Action::Settings => menu::open_settings(),
+            menu::Action::AgentMode => {
+                let _ = self.proxy.send_event(UserEvent::OpenAgentMode);
+            }
+            menu::Action::Settings => self.open_settings(config),
         }
     }
 
@@ -1356,6 +1730,513 @@ impl WindowState {
         }
     }
 
+    fn toggle_branch_menu(&mut self, pane_id: PaneId) {
+        if self
+            .branch_menu
+            .as_ref()
+            .is_some_and(|menu| menu.pane == pane_id)
+        {
+            self.branch_menu = None;
+            self.window.request_redraw();
+            return;
+        }
+
+        let Some(cwd) = self
+            .workspace
+            .pane(pane_id)
+            .and_then(|pane| pane.cwd.clone())
+        else {
+            return;
+        };
+
+        self.clear_completion();
+        self.branch_menu = Some(BranchMenu {
+            pane: pane_id,
+            cwd: cwd.clone(),
+            branches: Vec::new(),
+            selected: 0,
+            loading: true,
+            error: None,
+            busy: None,
+        });
+        self.request_branches(pane_id, cwd);
+        self.window.request_redraw();
+    }
+
+    fn request_branches(&mut self, pane_id: PaneId, cwd: PathBuf) {
+        let proxy = self.proxy.clone();
+        let thread_cwd = cwd.clone();
+        let spawned = std::thread::Builder::new()
+            .name("git-branches".into())
+            .spawn(move || {
+                let result = git_refs::load(&thread_cwd)
+                    .map(|refs| refs.local_branches)
+                    .map_err(|error| format!("{error:#}"));
+                let _ = proxy.send_event(UserEvent::BranchesLoaded {
+                    pane: pane_id,
+                    cwd: thread_cwd,
+                    result,
+                });
+            });
+
+        if spawned.is_err()
+            && let Some(menu) = self.branch_menu.as_mut()
+            && menu.pane == pane_id
+        {
+            menu.loading = false;
+            menu.error = Some("Could not start the Git branch reader".to_owned());
+        }
+    }
+
+    fn on_branches_loaded(
+        &mut self,
+        pane_id: PaneId,
+        cwd: PathBuf,
+        result: Result<Vec<BranchInfo>, String>,
+    ) {
+        let Some(menu) = self.branch_menu.as_mut() else {
+            return;
+        };
+        if menu.pane != pane_id || menu.cwd != cwd {
+            return;
+        }
+
+        menu.loading = false;
+        match result {
+            Ok(branches) => {
+                menu.selected = branches
+                    .iter()
+                    .position(|branch| branch.current)
+                    .unwrap_or(0);
+                menu.branches = branches;
+            }
+            Err(error) => menu.error = Some(error),
+        }
+        self.window.request_redraw();
+    }
+
+    fn checkout_selected_branch(&mut self) {
+        let Some(menu) = self.branch_menu.as_mut() else {
+            return;
+        };
+        let Some(branch) = menu.branches.get(menu.selected) else {
+            return;
+        };
+        if branch.current {
+            self.branch_menu = None;
+            self.window.request_redraw();
+            return;
+        }
+
+        let name = branch.name.clone();
+        menu.busy = Some(format!("Checking out {name}…"));
+        menu.error = None;
+        let pane_id = menu.pane;
+        let cwd = menu.cwd.clone();
+
+        let proxy = self.proxy.clone();
+        let action = GitOpsAction::Checkout {
+            branch: name.clone(),
+            track: false,
+            local: name.clone(),
+        };
+        let thread_cwd = cwd.clone();
+        let thread_branch = name.clone();
+        let spawned = std::thread::Builder::new()
+            .name("git-checkout".into())
+            .spawn(move || {
+                let result =
+                    git_ops::apply(&thread_cwd, &action).map_err(|error| format!("{error:#}"));
+                let _ = proxy.send_event(UserEvent::BranchCheckedOut {
+                    pane: pane_id,
+                    cwd: thread_cwd,
+                    branch: thread_branch,
+                    result,
+                });
+            });
+
+        if spawned.is_err()
+            && let Some(menu) = self.branch_menu.as_mut()
+            && menu.pane == pane_id
+        {
+            menu.busy = None;
+            menu.error = Some("Could not start the Git checkout".to_owned());
+        }
+        self.window.request_redraw();
+    }
+
+    fn on_branch_checked_out(
+        &mut self,
+        pane_id: PaneId,
+        cwd: PathBuf,
+        branch: String,
+        result: Result<String, String>,
+    ) {
+        match result {
+            Ok(_) => {
+                if self
+                    .branch_menu
+                    .as_ref()
+                    .is_some_and(|menu| menu.pane == pane_id)
+                {
+                    self.branch_menu = None;
+                }
+                self.git_in_flight.remove(&pane_id);
+                self.request_git_status(pane_id);
+                if self
+                    .diff_view
+                    .as_ref()
+                    .is_some_and(|diff| diff.pane == pane_id && diff.cwd == cwd)
+                {
+                    self.reload_diff_view();
+                }
+                self.window.request_redraw();
+            }
+            Err(error) => {
+                log::warn!("checkout of {branch} failed: {error}");
+                if let Some(menu) = self.branch_menu.as_mut()
+                    && menu.pane == pane_id
+                    && menu.cwd == cwd
+                {
+                    menu.busy = None;
+                    menu.error = Some(error);
+                }
+                self.window.request_redraw();
+            }
+        }
+    }
+
+    fn toggle_diff_view(&mut self, pane_id: PaneId, config: &Config) {
+        let Some(cwd) = self
+            .workspace
+            .pane(pane_id)
+            .and_then(|pane| pane.cwd.clone())
+        else {
+            return;
+        };
+
+        if self
+            .diff_view
+            .as_ref()
+            .is_some_and(|diff| diff.pane == pane_id && diff.cwd == cwd)
+        {
+            self.close_diff_view(config);
+            return;
+        }
+
+        self.branch_menu = None;
+        self.clear_completion();
+        self.diff_generation = self.diff_generation.wrapping_add(1);
+        let generation = self.diff_generation;
+        log::debug!(
+            "opening working diff for pane {} at {}",
+            pane_id.0,
+            cwd.display()
+        );
+        self.diff_view = Some(DiffView {
+            pane: pane_id,
+            cwd: cwd.clone(),
+            generation,
+            loading: true,
+            error: None,
+            detail: None,
+            rows: Vec::new(),
+            max_cols: 0,
+            scroll_row: 0,
+            scroll_col: 0,
+        });
+        self.focus = Focus::Diff;
+        self.editor_dirty = true;
+        if self.editor.is_none() {
+            self.editor_ratio = 0.5;
+        }
+        self.relayout(config);
+        self.request_working_diff(pane_id, cwd, generation);
+    }
+
+    fn request_working_diff(&mut self, pane_id: PaneId, cwd: PathBuf, generation: u64) {
+        let proxy = self.proxy.clone();
+        let thread_cwd = cwd.clone();
+        let summary = ReviewSummary {
+            title: "Working changes".to_owned(),
+            subtitle: String::new(),
+            kind: ReviewKind::Working,
+        };
+        let spawned = std::thread::Builder::new()
+            .name("working-diff".into())
+            .spawn(move || {
+                let result = crate::git::repository_root(&thread_cwd)
+                    .and_then(|root| review::load_detail(&root, &summary, &Default::default()))
+                    .map_err(|error| format!("{error:#}"));
+                let _ = proxy.send_event(UserEvent::WorkingDiffLoaded {
+                    pane: pane_id,
+                    cwd: thread_cwd,
+                    generation,
+                    result,
+                });
+            });
+
+        if spawned.is_err()
+            && let Some(diff) = self.diff_view.as_mut()
+            && diff.generation == generation
+        {
+            diff.loading = false;
+            diff.error = Some("Could not start the diff reader".to_owned());
+        }
+    }
+
+    fn on_working_diff_loaded(
+        &mut self,
+        pane_id: PaneId,
+        cwd: PathBuf,
+        generation: u64,
+        result: Result<ReviewDetail, String>,
+    ) {
+        let Some(diff) = self.diff_view.as_mut() else {
+            return;
+        };
+        if diff.pane != pane_id || diff.cwd != cwd || diff.generation != generation {
+            return;
+        }
+
+        diff.loading = false;
+        match result {
+            Ok(detail) => {
+                diff.rows = build_diff_rows(&detail);
+                diff.max_cols = diff
+                    .rows
+                    .iter()
+                    .map(|row| row.text.chars().count())
+                    .max()
+                    .unwrap_or(0);
+                diff.scroll_row = 0;
+                diff.scroll_col = 0;
+                log::debug!(
+                    "working diff loaded: {} file(s), {} row(s)",
+                    detail.files.len(),
+                    diff.rows.len()
+                );
+                diff.detail = Some(detail);
+                diff.error = None;
+            }
+            Err(error) => {
+                diff.rows.clear();
+                diff.max_cols = 0;
+                diff.detail = None;
+                log::warn!("failed to load working diff: {error}");
+                diff.error = Some(error);
+            }
+        }
+        self.editor_dirty = true;
+        self.window.request_redraw();
+    }
+
+    fn close_diff_view(&mut self, config: &Config) {
+        if self.diff_view.take().is_some() {
+            self.focus = if self.editor.is_some() {
+                Focus::Editor
+            } else {
+                Focus::Terminal
+            };
+            self.editor_dirty = true;
+            self.relayout(config);
+        }
+    }
+
+    fn scroll_diff(&mut self, rows: f32, columns: f32) {
+        let Some(diff) = self.diff_view.as_mut() else {
+            return;
+        };
+        let metrics = self.renderer.cell_metrics();
+        let visible_rows = self
+            .view
+            .editor
+            .map(|layout| (layout.text.height / metrics.height).floor().max(1.0) as usize)
+            .unwrap_or(1);
+        let visible_cols = self
+            .view
+            .editor
+            .map(|layout| (layout.text.width / metrics.width).floor().max(1.0) as usize)
+            .unwrap_or(1);
+        let max_row = diff.rows.len().saturating_sub(visible_rows);
+        let max_col = diff.max_cols.saturating_sub(visible_cols);
+
+        if rows != 0.0 {
+            let target = (diff.scroll_row as f32 - rows).round();
+            diff.scroll_row = target.clamp(0.0, max_row as f32) as usize;
+        }
+        if columns != 0.0 {
+            let target = (diff.scroll_col as f32 - columns).round();
+            diff.scroll_col = target.clamp(0.0, max_col as f32) as usize;
+        }
+        self.editor_dirty = true;
+        self.window.request_redraw();
+    }
+
+    fn reload_diff_view(&mut self) {
+        let Some(diff) = self.diff_view.as_ref() else {
+            return;
+        };
+        let pane = diff.pane;
+        let cwd = diff.cwd.clone();
+        self.diff_generation = self.diff_generation.wrapping_add(1);
+        let generation = self.diff_generation;
+        if let Some(diff) = self.diff_view.as_mut() {
+            diff.generation = generation;
+            diff.loading = true;
+            diff.error = None;
+        }
+        self.editor_dirty = true;
+        self.request_working_diff(pane, cwd, generation);
+        self.window.request_redraw();
+    }
+
+    fn handle_diff_key(&mut self, event: &winit::event::KeyEvent, config: &Config) -> bool {
+        if event.state != ElementState::Pressed || self.diff_view.is_none() {
+            return false;
+        }
+
+        let ctrl = self.modifiers.control_key();
+        let super_key = self.modifiers.super_key();
+        let command = ctrl || super_key;
+
+        if command {
+            if let PhysicalKey::Code(KeyCode::KeyW) = event.physical_key {
+                self.close_diff_view(config);
+                return true;
+            }
+            if let PhysicalKey::Code(KeyCode::KeyC) | PhysicalKey::Code(KeyCode::KeyA) =
+                event.physical_key
+            {
+                return true;
+            }
+            return false;
+        }
+
+        let page = self
+            .view
+            .editor
+            .map(|layout| {
+                let metrics = self.renderer.cell_metrics();
+                (layout.text.height / metrics.height).floor().max(1.0)
+            })
+            .unwrap_or(10.0);
+
+        match &event.logical_key {
+            Key::Named(NamedKey::Escape) => {
+                self.close_diff_view(config);
+                return true;
+            }
+            Key::Named(NamedKey::ArrowUp) => self.scroll_diff(1.0, 0.0),
+            Key::Named(NamedKey::ArrowDown) => self.scroll_diff(-1.0, 0.0),
+            Key::Named(NamedKey::PageUp) => self.scroll_diff(page, 0.0),
+            Key::Named(NamedKey::PageDown) => self.scroll_diff(-page, 0.0),
+            Key::Named(NamedKey::Home) => self.scroll_diff(f32::MAX, 0.0),
+            Key::Named(NamedKey::End) => self.scroll_diff(f32::MIN, 0.0),
+            Key::Named(NamedKey::ArrowLeft) => self.scroll_diff(0.0, 1.0),
+            Key::Named(NamedKey::ArrowRight) => self.scroll_diff(0.0, -1.0),
+            Key::Character(character) if character.eq_ignore_ascii_case("r") => {
+                self.reload_diff_view();
+            }
+            _ => {}
+        }
+        true
+    }
+
+    fn branch_menu_layout(&self, config: &Config) -> Option<BranchMenuLayout> {
+        let menu = self.branch_menu.as_ref()?;
+        let anchor = self.footer_hits.get(&menu.pane)?.branch?;
+        let outer = self
+            .view
+            .panes
+            .iter()
+            .find(|pane| pane.id == menu.pane)?
+            .outer;
+        let scale = self.renderer.scale_factor() as f32;
+        let ui_font_size = self.renderer.physical(config.ui_font_size);
+        Some(branch_menu_layout(menu, anchor, outer, scale, ui_font_size))
+    }
+
+    fn handle_branch_menu_click(
+        &mut self,
+        state: ElementState,
+        button: MouseButton,
+        x: f32,
+        y: f32,
+        config: &Config,
+    ) -> bool {
+        let Some(layout) = self.branch_menu_layout(config) else {
+            self.branch_menu = None;
+            return false;
+        };
+
+        if layout.rect.contains(x, y) {
+            let mut checkout = false;
+            if state == ElementState::Pressed
+                && button == MouseButton::Left
+                && let Some(menu) = self.branch_menu.as_mut()
+                && !menu.loading
+                && menu.busy.is_none()
+                && layout.list.contains(x, y)
+            {
+                let row = ((y - layout.list.y) / layout.row_height).floor().max(0.0) as usize;
+                if row < layout.visible_rows {
+                    let index = layout.offset + row;
+                    if index < menu.branches.len() {
+                        menu.selected = index;
+                        checkout = true;
+                    }
+                }
+            }
+            if checkout {
+                self.checkout_selected_branch();
+            }
+            return true;
+        }
+
+        // Clicking the branch pill again closes the popup. Release events are
+        // consumed but must not close the menu that was just opened.
+        let on_anchor = self
+            .branch_menu
+            .as_ref()
+            .and_then(|menu| self.footer_hits.get(&menu.pane))
+            .and_then(|hits| hits.branch)
+            .is_some_and(|rect| rect.contains(x, y));
+        if state == ElementState::Pressed {
+            self.branch_menu = None;
+            self.window.request_redraw();
+        }
+        on_anchor
+    }
+
+    fn handle_branch_menu_wheel(&mut self, delta: MouseScrollDelta, config: &Config) -> bool {
+        let Some(layout) = self.branch_menu_layout(config) else {
+            self.branch_menu = None;
+            return false;
+        };
+        let (x, y) = (self.cursor_position.x as f32, self.cursor_position.y as f32);
+        if !layout.rect.contains(x, y) {
+            self.branch_menu = None;
+            self.window.request_redraw();
+            return false;
+        }
+
+        let rows = match delta {
+            MouseScrollDelta::LineDelta(_, y) => y,
+            MouseScrollDelta::PixelDelta(position) => position.y as f32 / layout.row_height,
+        };
+        if rows != 0.0
+            && let Some(menu) = self.branch_menu.as_mut()
+            && !menu.branches.is_empty()
+        {
+            let selected = (menu.selected as f32 - rows.round())
+                .clamp(0.0, (menu.branches.len().saturating_sub(1)) as f32);
+            menu.selected = selected as usize;
+            self.window.request_redraw();
+        }
+        true
+    }
+
     fn toggle_sidebar(&mut self, config: &Config) {
         self.sidebar.visible = !self.sidebar.visible;
         self.sidebar.hovered = None;
@@ -1424,6 +2305,15 @@ impl WindowState {
         }
     }
 
+    fn open_settings(&mut self, config: &Config) {
+        let Some(path) = config_path() else {
+            log::warn!("could not resolve the config path");
+            return;
+        };
+        log::info!("opening settings at {}", path.display());
+        self.open_file(path, config);
+    }
+
     fn open_file(&mut self, path: PathBuf, config: &Config) {
         match Editor::open(&path) {
             Ok(editor) => {
@@ -1432,12 +2322,506 @@ impl WindowState {
                 self.highlight_generation = self.highlight_generation.wrapping_add(1);
                 self.highlight_due = Some(Instant::now());
                 self.editor_dirty = true;
+                self.diff_view = None;
                 self.editor = Some(editor);
                 self.focus = Focus::Editor;
                 self.relayout(config);
             }
             Err(error) => log::warn!("failed to open {}: {error:#}", path.display()),
         }
+    }
+
+    fn poll_hook_events(&mut self) {
+        for event in self.hook_log.poll() {
+            if self.workspace.pane(event.pane).is_some() {
+                if event.state == AgentState::Detected {
+                    self.hook_states.remove(&event.pane);
+                } else {
+                    self.hook_states.insert(
+                        event.pane,
+                        HookState {
+                            state: event.state,
+                            message: event.message,
+                            at: Instant::now(),
+                        },
+                    );
+                }
+                self.agents_dirty = true;
+            }
+        }
+    }
+
+    fn poll_agent_watcher(&mut self, config: &Config, force: bool) {
+        if !config.agents.enabled {
+            return;
+        }
+        self.poll_hook_events();
+        if !force && !self.window_focused && self.agent_snapshot.generated.is_some() {
+            return;
+        }
+        if self.window_focused
+            && let Some(pane) = self.workspace.focused_pane()
+        {
+            self.mark_pane_agents_seen(pane);
+        }
+        if self.agent_watch_pending {
+            if self.last_agent_poll.elapsed() <= Duration::from_secs(8) {
+                return;
+            }
+            log::warn!("agent watcher did not answer in time; restarting it");
+            self.agent_watch_pending = false;
+            self.agent_watch_tx = agents::spawn_watcher(self.proxy.clone());
+        }
+        if self.agent_watch_tx.is_none() {
+            self.agent_watch_tx = agents::spawn_watcher(self.proxy.clone());
+        }
+
+        let now = Instant::now();
+        let interval = Duration::from_millis(config.agents.poll_interval_ms);
+        if now.duration_since(self.last_agent_poll) < interval {
+            return;
+        }
+        let Some(sender) = &self.agent_watch_tx else {
+            return;
+        };
+
+        let roots = self
+            .workspace
+            .tabs
+            .iter()
+            .flat_map(|tab| tab.panes.values())
+            .filter_map(|pane| pane.session.process_id().map(|pid| (pane.id, pid)))
+            .collect::<Vec<_>>();
+
+        self.agent_watch_generation = self.agent_watch_generation.wrapping_add(1);
+        let request = AgentWatchRequest {
+            generation: self.agent_watch_generation,
+            roots,
+            include_external: config.agents.show_external,
+        };
+        match sender.send(request) {
+            Ok(()) => {
+                self.last_agent_poll = now;
+                self.agent_watch_pending = true;
+            }
+            Err(error) => {
+                log::warn!("agent watcher stopped: {error}");
+                self.agent_watch_tx = None;
+            }
+        }
+    }
+
+    /// Ignore the scan interval and ask for a fresh process tree right now.
+    /// Any request still in flight is abandoned; the generation check drops
+    /// its stale response.
+    fn force_agent_refresh(&mut self, config: &Config) {
+        if !config.agents.enabled {
+            return;
+        }
+        self.poll_hook_events();
+        self.agent_watch_pending = false;
+        self.last_agent_poll = Instant::now()
+            .checked_sub(Duration::from_millis(config.agents.poll_interval_ms))
+            .unwrap_or_else(Instant::now);
+        // Show the current state immediately even while the new scan runs.
+        self.agents_dirty = true;
+        self.rebuild_agent_snapshot();
+        self.poll_agent_watcher(config, true);
+    }
+
+    fn on_agents_detected(
+        &mut self,
+        generation: u64,
+        panes: Vec<DetectedAgent>,
+        external: Vec<DetectedAgent>,
+    ) {
+        if generation != self.agent_watch_generation {
+            return;
+        }
+        self.agent_watch_pending = false;
+
+        let previous: HashSet<PaneId> = self
+            .detected_agents
+            .iter()
+            .filter_map(|agent| agent.pane)
+            .collect();
+        let current: HashSet<PaneId> = panes.iter().filter_map(|agent| agent.pane).collect();
+        self.detected_agents = panes;
+        self.external_agents = external;
+
+        // When an agent exits back to the shell, drop its transient state.
+        for pane in previous.difference(&current) {
+            if let Some(pane) = self.workspace.pane_mut(*pane) {
+                pane.terminal.clear_active_program_status();
+                pane.program_status_revision = pane.terminal.program_status_revision();
+            }
+            if self
+                .hook_states
+                .get(pane)
+                .is_some_and(|state| !state.state.is_finished())
+            {
+                self.hook_states.remove(pane);
+            }
+        }
+
+        self.agents_dirty = true;
+        self.rebuild_agent_snapshot();
+        log::debug!(
+            "agent watcher: {} pane agent(s), {} external",
+            self.detected_agents.len(),
+            self.external_agents.len()
+        );
+    }
+
+    fn mark_pane_agents_seen(&mut self, pane: PaneId) {
+        let mut changed = false;
+        for row in &self.agent_snapshot.rows {
+            if row.pane == Some(pane) && row.state.is_finished() {
+                changed |= self.seen_agents.insert(row.id.clone());
+            }
+        }
+        if changed {
+            self.agents_dirty = true;
+        }
+    }
+
+    fn focus_agent_pane(&mut self, pane: PaneId, config: &Config) -> bool {
+        if !self.workspace.focus_pane(pane) {
+            return false;
+        }
+        self.focus = Focus::Terminal;
+        self.mark_pane_agents_seen(pane);
+        self.rebuild_agent_snapshot();
+        self.sync_explorer_to_focused();
+        self.update_window_title();
+        self.relayout(config);
+        self.window.request_redraw();
+        true
+    }
+
+    fn pane_has_agent(&self, pane: PaneId) -> bool {
+        self.detected_agents
+            .iter()
+            .any(|agent| agent.pane == Some(pane))
+            || self
+                .workspace
+                .pane(pane)
+                .is_some_and(|pane| pane.terminal.has_program_status())
+    }
+
+    fn pane_agent_state(&self, pane: PaneId) -> Option<AgentState> {
+        self.agent_snapshot
+            .rows
+            .iter()
+            .filter(|row| row.pane == Some(pane))
+            .filter(|row| !(row.seen && row.state.is_finished()))
+            .max_by_key(|row| row.state.priority(row.seen))
+            .map(|row| row.state.clone())
+    }
+
+    fn tab_agent_state(&self, tab: TabId) -> Option<AgentState> {
+        let panes = self
+            .workspace
+            .tabs
+            .iter()
+            .find(|candidate| candidate.id == tab)?
+            .panes
+            .values()
+            .map(|pane| pane.id)
+            .collect::<Vec<_>>();
+        panes
+            .into_iter()
+            .filter_map(|pane| self.pane_agent_state(pane))
+            .max_by_key(|state| state.priority(false))
+    }
+
+    fn rebuild_agent_snapshot(&mut self) {
+        if !self.agents_dirty && self.agent_snapshot.generated.is_some() {
+            return;
+        }
+        let now = Instant::now();
+        let now_epoch = epoch_seconds();
+        let mut rows = Vec::new();
+        let active_panes: HashSet<PaneId> = self
+            .workspace
+            .tabs
+            .iter()
+            .flat_map(|tab| tab.panes.values())
+            .map(|pane| pane.id)
+            .collect();
+        self.hook_states
+            .retain(|pane, _| active_panes.contains(pane));
+        self.agent_notifications
+            .retain(|pane, _| active_panes.contains(pane));
+        let detected_by_pane: HashMap<PaneId, Vec<DetectedAgent>> = {
+            let mut map: HashMap<PaneId, Vec<DetectedAgent>> = HashMap::new();
+            for agent in &self.detected_agents {
+                if let Some(pane) = agent.pane {
+                    map.entry(pane).or_default().push(agent.clone());
+                }
+            }
+            map
+        };
+
+        for tab in &self.workspace.tabs {
+            for pane in tab.panes.values() {
+                let records = pane.terminal.program_status();
+                let detected = detected_by_pane.get(&pane.id).cloned().unwrap_or_default();
+                let raw_root = records.iter().find(|record| record.id.is_empty());
+                let root_kind = raw_root
+                    .and_then(|record| record.app.as_deref())
+                    .map(kind_from_protocol_app);
+                let stale_protocol = root_kind.as_ref().is_some_and(|kind| {
+                    !detected.is_empty() && detected.iter().all(|agent| &agent.kind != kind)
+                });
+                let root = raw_root.filter(|_| !stale_protocol);
+                let children: Vec<&ProgramRecord> = records
+                    .iter()
+                    .filter(|record| !record.id.is_empty())
+                    .collect();
+                let mut used_detected: HashSet<u32> = HashSet::new();
+                let notification = self
+                    .agent_notifications
+                    .get(&pane.id)
+                    .filter(|notification| {
+                        now.duration_since(notification.at) < Duration::from_secs(120)
+                            && pane
+                                .last_output
+                                .checked_duration_since(notification.at)
+                                .is_none_or(|elapsed| elapsed <= Duration::from_secs(1))
+                    });
+                let hook = self
+                    .hook_states
+                    .get(&pane.id)
+                    .filter(|hook| now.duration_since(hook.at) < Duration::from_secs(1800));
+
+                if let Some(root) = root {
+                    let kind = root
+                        .app
+                        .as_deref()
+                        .map(kind_from_protocol_app)
+                        .or_else(|| detected.first().map(|agent| agent.kind.clone()))
+                        .unwrap_or_else(|| AgentKind::Other("agent".into()));
+                    let row_id = AgentId::Terminal {
+                        pane: pane.id,
+                        record: root.id.clone(),
+                    };
+                    let detected_match = detected
+                        .iter()
+                        .find(|agent| agent.kind == kind)
+                        .or_else(|| detected.first());
+                    let (pid, started, cwd) = if let Some(agent) = detected_match {
+                        used_detected.insert(agent.pid);
+                        (
+                            Some(agent.pid),
+                            if agent.started > 0 {
+                                agent.started
+                            } else {
+                                self.agent_times.get(&row_id).copied().unwrap_or(0)
+                            },
+                            agent.cwd.clone().or_else(|| pane.cwd.clone()),
+                        )
+                    } else {
+                        (
+                            None,
+                            self.agent_times.get(&row_id).copied().unwrap_or(0),
+                            pane.cwd.clone(),
+                        )
+                    };
+
+                    let mut state = protocol_agent_state(
+                        root.state,
+                        root.kind,
+                        notification,
+                        pane.last_output.elapsed(),
+                    );
+                    let mut message = root
+                        .message
+                        .clone()
+                        .or_else(|| notification.and_then(notification_message));
+                    if matches!(state, AgentState::Working | AgentState::Attention)
+                        && message.is_none()
+                    {
+                        message = notification.and_then(notification_message);
+                    }
+                    if matches!(state, AgentState::Idle) && notification.is_some() {
+                        // Codex reports idle after a completed turn and sends
+                        // its completion text through OSC 9.
+                        if notification
+                            .and_then(notification_message)
+                            .as_deref()
+                            .is_some_and(looks_finished)
+                        {
+                            state = AgentState::Done;
+                        }
+                    }
+
+                    let seen = state.is_finished() && self.seen_agents.contains(&row_id);
+                    let mut subagents = Vec::new();
+                    for child in children {
+                        if child.id == root.id {
+                            continue;
+                        }
+                        let child_kind = child
+                            .app
+                            .as_deref()
+                            .map(kind_from_protocol_app)
+                            .unwrap_or_else(|| kind.clone());
+                        subagents.push(AgentChild {
+                            id: child.id.clone(),
+                            kind: child_kind,
+                            state: protocol_agent_state(
+                                child.state,
+                                child.kind,
+                                None,
+                                pane.last_output.elapsed(),
+                            ),
+                            message: child.message.clone(),
+                            progress: child.progress,
+                        });
+                    }
+                    rows.push(AgentRow {
+                        id: row_id,
+                        kind,
+                        state,
+                        message,
+                        title: root.title.clone().or_else(|| pane.title.clone()),
+                        cwd,
+                        pane: Some(pane.id),
+                        tab_title: Some(tab.title.clone()),
+                        pane_label: pane_label(pane, &self.shells),
+                        pid,
+                        started,
+                        progress: root.progress,
+                        source: AgentSource::Protocol,
+                        subagents,
+                        seen,
+                    });
+                }
+
+                if root.is_none()
+                    && let Some(hook) = hook
+                {
+                    let detected_match = detected.first();
+                    if let Some(agent) = detected_match {
+                        used_detected.insert(agent.pid);
+                    }
+                    let kind = detected_match
+                        .map(|agent| agent.kind.clone())
+                        .unwrap_or(AgentKind::Junie);
+                    let row_id = AgentId::Terminal {
+                        pane: pane.id,
+                        record: "hook".into(),
+                    };
+                    let started = detected_match
+                        .map(|agent| agent.started)
+                        .filter(|started| *started > 0)
+                        .or_else(|| self.agent_times.get(&row_id).copied())
+                        .unwrap_or(0);
+                    rows.push(AgentRow {
+                        id: row_id.clone(),
+                        kind,
+                        state: hook.state.clone(),
+                        message: hook.message.clone(),
+                        title: pane.title.clone(),
+                        cwd: detected_match
+                            .and_then(|agent| agent.cwd.clone())
+                            .or_else(|| pane.cwd.clone()),
+                        pane: Some(pane.id),
+                        tab_title: Some(tab.title.clone()),
+                        pane_label: pane_label(pane, &self.shells),
+                        pid: detected_match.map(|agent| agent.pid),
+                        started,
+                        progress: None,
+                        source: AgentSource::Hook,
+                        subagents: Vec::new(),
+                        seen: hook.state.is_finished() && self.seen_agents.contains(&row_id),
+                    });
+                }
+
+                for agent in detected
+                    .iter()
+                    .filter(|agent| !used_detected.contains(&agent.pid))
+                {
+                    let id = AgentId::Terminal {
+                        pane: pane.id,
+                        record: format!("process:{}", agent.pid),
+                    };
+                    let started = if agent.started > 0 {
+                        agent.started
+                    } else {
+                        self.agent_times.get(&id).copied().unwrap_or(0)
+                    };
+                    let mut row = process_agent_row(
+                        pane,
+                        &tab.title,
+                        pane_label(pane, &self.shells),
+                        agent,
+                        notification,
+                        started,
+                    );
+                    row.seen = row.state.is_finished() && self.seen_agents.contains(&row.id);
+                    rows.push(row);
+                }
+            }
+        }
+
+        for agent in &self.external_agents {
+            let id = AgentId::External { pid: agent.pid };
+            let started = if agent.started > 0 {
+                agent.started
+            } else {
+                self.agent_times.get(&id).copied().unwrap_or(0)
+            };
+            rows.push(AgentRow {
+                id,
+                kind: agent.kind.clone(),
+                state: AgentState::Detected,
+                message: None,
+                title: None,
+                cwd: agent.cwd.clone(),
+                pane: None,
+                tab_title: None,
+                pane_label: None,
+                pid: Some(agent.pid),
+                started,
+                progress: None,
+                source: AgentSource::External,
+                subagents: Vec::new(),
+                seen: false,
+            });
+        }
+
+        let active: HashSet<AgentId> = rows.iter().map(|row| row.id.clone()).collect();
+        self.agent_times.retain(|id, _| active.contains(id));
+        self.seen_agents
+            .retain(|id| rows.iter().any(|row| &row.id == id && row.seen));
+        for row in &mut rows {
+            if row.started == 0 {
+                row.started = now_epoch;
+                self.agent_times.insert(row.id.clone(), now_epoch);
+            }
+        }
+
+        rows.sort_by(|a, b| {
+            b.state
+                .priority(b.seen)
+                .cmp(&a.state.priority(a.seen))
+                .then_with(|| a.pane.is_none().cmp(&b.pane.is_none()))
+                .then_with(|| a.kind.cmp(&b.kind))
+                .then_with(|| a.pid.cmp(&b.pid))
+        });
+
+        self.agent_snapshot = AgentSnapshot {
+            rows,
+            generated: Some(now),
+        };
+        self.agents_dirty = false;
+        log::debug!(
+            "agent snapshot: {} row(s), {} need attention",
+            self.agent_snapshot.rows.len(),
+            self.agent_snapshot.attention_count()
+        );
     }
 
     fn poll_background(&mut self, config: &Config) {
@@ -1614,6 +2998,7 @@ impl WindowState {
 
         if command {
             match code {
+                KeyCode::KeyS if self.modifiers.shift_key() => return false,
                 KeyCode::KeyS => {
                     self.save_editor();
                     return true;
@@ -1982,7 +3367,7 @@ impl WindowState {
     }
 
     fn refresh_completion(&mut self, config: &Config) {
-        if !config.completions || self.focus != Focus::Terminal {
+        if !config.completions || self.focus != Focus::Terminal || self.branch_menu.is_some() {
             self.clear_completion();
             return;
         }
@@ -2093,10 +3478,21 @@ impl WindowState {
         (typed >= config.completion_min_chars).then_some(candidate)
     }
 
+    fn prompt_shift(&self, pane: PaneId, row: usize) -> usize {
+        self.prompt_trims
+            .get(&pane)
+            .and_then(|trims| trims.iter().find(|trim| trim.row == row))
+            .map(|trim| trim.columns)
+            .unwrap_or(0)
+    }
+
     fn ghost_text(&self, config: &Config) -> Option<GhostText> {
         let view = self.completion_view.as_ref()?;
         let candidate = self.ghost_candidate(config)?;
-        let free = view.right_limit.saturating_sub(view.col);
+        let shift = self.prompt_shift(view.pane, view.row);
+        let col = view.col.saturating_sub(shift);
+        let right_limit = view.right_limit.saturating_sub(shift);
+        let free = right_limit.saturating_sub(col);
         if free < 3 {
             return None;
         }
@@ -2106,7 +3502,7 @@ impl WindowState {
         }
         Some(GhostText {
             row: view.row,
-            col: view.col,
+            col,
             text,
             color: config.theme.sidebar_text_dim,
         })
@@ -2331,8 +3727,21 @@ impl WindowState {
             return;
         }
 
+        if self.branch_menu.is_some() {
+            self.on_branch_menu_key(&event);
+            return;
+        }
+
         if self.sidebar.profile_menu {
             self.on_profile_menu_key(&event, config);
+            return;
+        }
+
+        if self.focus == Focus::Diff && self.diff_view.is_some() {
+            if self.handle_diff_key(&event, config) {
+                return;
+            }
+            let _ = self.handle_shortcut(&event, event_loop, config);
             return;
         }
 
@@ -2414,6 +3823,35 @@ impl WindowState {
                 pane.suggestion_armed = true;
             }
         }
+    }
+
+    fn on_branch_menu_key(&mut self, event: &winit::event::KeyEvent) {
+        let Some(menu) = self.branch_menu.as_mut() else {
+            return;
+        };
+        let count = menu.branches.len();
+
+        match &event.logical_key {
+            Key::Named(NamedKey::Escape) => {
+                self.branch_menu = None;
+            }
+            Key::Named(NamedKey::ArrowUp) => {
+                menu.selected = menu.selected.saturating_sub(1);
+            }
+            Key::Named(NamedKey::ArrowDown) => {
+                if count > 0 {
+                    menu.selected = (menu.selected + 1).min(count - 1);
+                }
+            }
+            Key::Named(NamedKey::Home) => menu.selected = 0,
+            Key::Named(NamedKey::End) => menu.selected = count.saturating_sub(1),
+            Key::Named(NamedKey::Enter) => {
+                self.checkout_selected_branch();
+            }
+            _ => return,
+        }
+
+        self.window.request_redraw();
     }
 
     fn on_profile_menu_key(&mut self, event: &winit::event::KeyEvent, config: &Config) {
@@ -2502,10 +3940,14 @@ impl WindowState {
                 });
                 true
             }
-            KeyCode::KeyG if shift => {
+            KeyCode::KeyM if shift => {
                 let _ = self.proxy.send_event(UserEvent::OpenGitManager {
                     cwd: self.focused_cwd(),
                 });
+                true
+            }
+            KeyCode::KeyS if shift => {
+                self.open_settings(config);
                 true
             }
             KeyCode::KeyC => {
@@ -2552,6 +3994,10 @@ impl WindowState {
             }
             KeyCode::KeyB => {
                 self.toggle_sidebar(config);
+                true
+            }
+            KeyCode::KeyA if shift => {
+                let _ = self.proxy.send_event(UserEvent::OpenAgentMode);
                 true
             }
             KeyCode::KeyF if shift => {
@@ -2727,6 +4173,10 @@ impl WindowState {
             self.sidebar.hovered_profile = hovered_profile;
             self.window.request_redraw();
         }
+
+        if self.branch_menu.is_some() {
+            self.window.request_redraw();
+        }
     }
 
     fn on_mouse_input(
@@ -2738,6 +4188,11 @@ impl WindowState {
     ) {
         let x = self.cursor_position.x as f32;
         let y = self.cursor_position.y as f32;
+
+        if self.branch_menu.is_some() && self.handle_branch_menu_click(state, button, x, y, config)
+        {
+            return;
+        }
 
         if state == ElementState::Pressed && button == MouseButton::Left {
             if self.completion_open {
@@ -2800,12 +4255,18 @@ impl WindowState {
             return;
         }
 
-        if let Some(editor_layout) = self.view.editor
-            && editor_layout.panel.contains(x, y)
+        if let Some(panel) = self.view.editor
+            && panel.panel.contains(x, y)
         {
             if state == ElementState::Pressed && button == MouseButton::Left {
-                if editor_layout.close.contains(x, y) {
-                    self.close_editor(config);
+                if panel.close.contains(x, y) {
+                    if self.diff_view.is_some() {
+                        self.close_diff_view(config);
+                    } else {
+                        self.close_editor(config);
+                    }
+                } else if self.diff_view.is_some() {
+                    self.focus = Focus::Diff;
                 } else {
                     self.focus = Focus::Editor;
                     self.set_editor_cursor_from_point(self.cursor_position);
@@ -2827,12 +4288,27 @@ impl WindowState {
             self.window.request_redraw();
         }
 
+        if let Some(hits) = self.footer_hits.get(&pane_id).copied() {
+            if hits.branch.is_some_and(|rect| rect.contains(x, y)) {
+                if state == ElementState::Pressed && button == MouseButton::Left {
+                    self.toggle_branch_menu(pane_id);
+                }
+                return;
+            }
+            if hits.changes.is_some_and(|rect| rect.contains(x, y)) {
+                if state == ElementState::Pressed && button == MouseButton::Left {
+                    self.toggle_diff_view(pane_id, config);
+                }
+                return;
+            }
+        }
+
         if self
             .view
             .panes
             .iter()
             .find(|pane| pane.id == pane_id)
-            .is_some_and(|pane| pane.footer.contains(x, y))
+            .is_some_and(|pane| pane_footer_band(pane, self.renderer.cell_metrics()).contains(x, y))
         {
             return;
         }
@@ -2904,6 +4380,10 @@ impl WindowState {
         let x = self.cursor_position.x as f32;
         let y = self.cursor_position.y as f32;
 
+        if self.branch_menu.is_some() && self.handle_branch_menu_wheel(delta, config) {
+            return;
+        }
+
         if self.view.sidebar.rect.width > 0.0 && self.view.sidebar.rect.contains(x, y) {
             let item_height = self.view.sidebar.item_height.max(1.0);
             let lines = match delta {
@@ -2926,6 +4406,14 @@ impl WindowState {
                 MouseScrollDelta::LineDelta(_, y) => y * 3.0,
                 MouseScrollDelta::PixelDelta(position) => position.y as f32 / metrics.height,
             };
+            if self.diff_view.is_some() {
+                if self.modifiers.shift_key() {
+                    self.scroll_diff(0.0, rows);
+                } else {
+                    self.scroll_diff(rows, 0.0);
+                }
+                return;
+            }
             let visible_rows = (layout.text.height / metrics.height).floor().max(1.0) as usize;
             if let Some(editor) = &mut self.editor {
                 let max_scroll = editor.lines.len().saturating_sub(visible_rows) as i32;
@@ -2946,7 +4434,7 @@ impl WindowState {
             .panes
             .iter()
             .find(|pane| pane.id == pane_id)
-            .is_some_and(|pane| pane.footer.contains(x, y))
+            .is_some_and(|pane| pane_footer_band(pane, self.renderer.cell_metrics()).contains(x, y))
         {
             return;
         }
@@ -3093,6 +4581,8 @@ impl WindowState {
             return None;
         }
 
+        let shift = self.prompt_shift(pane_id, row);
+        let actual_column = (column + shift).min(pane.grid.cols - 1);
         let offset = x - column as f32 * metrics.width;
         let side = if offset < metrics.width / 2.0 {
             Side::Left
@@ -3101,7 +4591,7 @@ impl WindowState {
         };
         let line = row as i32 - pane.terminal.display_offset() as i32;
 
-        Some((Point::new(Line(line), Column(column)), side))
+        Some((Point::new(Line(line), Column(actual_column)), side))
     }
 
     fn cell_in_pane(&self, pane_id: PaneId, x: f32, y: f32) -> Option<(usize, usize)> {
@@ -3121,7 +4611,10 @@ impl WindowState {
             return None;
         }
 
-        Some((column, row))
+        Some((
+            (column + self.prompt_shift(pane_id, row)).min(pane.grid.cols - 1),
+            row,
+        ))
     }
 
     // ------------------------------------------------------------------
@@ -3129,13 +4622,48 @@ impl WindowState {
     // ------------------------------------------------------------------
 
     fn on_pty_data(&mut self, pane_id: PaneId, bytes: &[u8]) {
+        let detected_present = self
+            .detected_agents
+            .iter()
+            .any(|agent| agent.pane == Some(pane_id));
         let Some(pane) = self.workspace.pane_mut(pane_id) else {
             return;
         };
         pane.terminal.feed(bytes);
+        pane.last_output = Instant::now();
+
+        let revision = pane.terminal.program_status_revision();
+        let status_changed = revision != pane.program_status_revision;
+        pane.program_status_revision = revision;
+
+        for reply in pane.terminal.take_program_status_replies() {
+            pane.session.write(reply.as_bytes());
+        }
+        let notifications = pane.terminal.take_program_notifications();
+        let agent_present = detected_present || pane.terminal.has_program_status();
+
+        let visible = self.workspace.is_pane_visible(pane_id);
         self.dirty_panes.insert(pane_id);
 
-        if self.workspace.is_pane_visible(pane_id) {
+        if status_changed || !notifications.is_empty() {
+            self.agents_dirty = true;
+            log::debug!("pane {} program status revision {}", pane_id.0, revision);
+        }
+        for notification in notifications {
+            if !agent_present {
+                continue;
+            }
+            self.agent_notifications.insert(
+                pane_id,
+                PaneNotification {
+                    title: notification.title,
+                    message: notification.message,
+                    at: Instant::now(),
+                },
+            );
+        }
+
+        if visible || status_changed {
             self.window.request_redraw();
         }
     }
@@ -3154,12 +4682,26 @@ impl WindowState {
                 }
             }
             Event::Title(title) => {
-                self.workspace.set_pane_title(pane_id, Some(title));
+                let title = clean_pty_title(&title, config.show_user_in_prompt);
+                self.workspace.set_pane_title(pane_id, title);
                 self.update_window_title();
             }
             Event::ResetTitle => {
                 self.workspace.set_pane_title(pane_id, None);
                 self.update_window_title();
+            }
+            Event::Bell => {
+                if self.pane_has_agent(pane_id) {
+                    self.agent_notifications.insert(
+                        pane_id,
+                        PaneNotification {
+                            title: None,
+                            message: None,
+                            at: Instant::now(),
+                        },
+                    );
+                    self.agents_dirty = true;
+                }
             }
             Event::ColorRequest(index, formatter) => {
                 let color = config.theme.special(index);
@@ -3200,7 +4742,6 @@ impl WindowState {
                     pane.session.write(response.as_bytes());
                 }
             }
-            Event::Bell => log::debug!("terminal bell"),
             Event::Wakeup | Event::MouseCursorDirty | Event::CursorBlinkingChange => {}
             Event::Exit | Event::ChildExit(_) => {
                 self.close_pane(pane_id, event_loop, config);
@@ -3224,32 +4765,56 @@ impl WindowState {
             return;
         };
         let focused = tab.focused;
-        let multi_pane = tab.is_multi_pane();
 
         let mut frames: Vec<(PaneId, Rect, Frame)> = Vec::with_capacity(self.view.panes.len());
+        let mut prompt_trims = Vec::new();
         for pane_layout in &self.view.panes {
             if let Some(pane) = self.workspace.pane(pane_layout.id) {
-                frames.push((
-                    pane_layout.id,
-                    pane_layout.content,
-                    pane.terminal.frame(theme),
-                ));
+                let mut frame = pane.terminal.frame(theme);
+                let trims = if pane.terminal.mode().contains(TermMode::ALT_SCREEN) {
+                    Vec::new()
+                } else {
+                    collect_prompt_trims(&frame, !config.show_user_in_prompt)
+                };
+                for trim in &trims {
+                    trim_prompt_row(&mut frame, trim.row, trim.columns);
+                }
+                if !trims.is_empty() {
+                    prompt_trims.push((pane_layout.id, trims));
+                }
+                frames.push((pane_layout.id, pane_layout.content, frame));
             }
         }
+        self.prompt_trims.clear();
+        self.prompt_trims.extend(prompt_trims);
 
-        let editor_frame = self
-            .editor
-            .as_ref()
-            .zip(self.view.editor)
-            .map(|(editor, layout)| {
-                (
-                    layout.text,
-                    build_editor_frame(editor, layout.text, metrics, theme),
-                )
-            });
+        let editor_frame = if self.diff_view.is_some() {
+            None
+        } else {
+            self.editor
+                .as_ref()
+                .zip(self.view.editor)
+                .map(|(editor, layout)| {
+                    (
+                        layout.text,
+                        build_editor_frame(editor, layout.text, metrics, theme),
+                    )
+                })
+        };
 
         let mut quads: Vec<Quad> = Vec::new();
         let mut labels: Vec<Label> = Vec::new();
+
+        let diff_frame = self
+            .diff_view
+            .as_ref()
+            .zip(self.view.editor)
+            .map(|(diff, layout)| {
+                (
+                    layout.text,
+                    build_diff_frame(diff, layout.text, metrics, theme, &mut quads),
+                )
+            });
 
         self.build_sidebar_chrome(
             &config.theme,
@@ -3284,31 +4849,22 @@ impl WindowState {
             ));
         }
 
-        if multi_pane && self.focus == Focus::Terminal {
-            for pane_layout in &self.view.panes {
-                if pane_layout.id != focused {
-                    continue;
-                }
-                let rect = pane_layout.outer;
-                let thickness = (2.0 * scale).round().max(1.0);
-                let color = to_linear(theme.accent, 0.9);
-                quads.push(Quad::new(rect.x, rect.y, rect.width, thickness, color));
-                quads.push(Quad::new(
-                    rect.x,
-                    rect.bottom() - thickness,
-                    rect.width,
-                    thickness,
-                    color,
-                ));
-                quads.push(Quad::new(rect.x, rect.y, thickness, rect.height, color));
-                quads.push(Quad::new(
-                    rect.right() - thickness,
-                    rect.y,
-                    thickness,
-                    rect.height,
-                    color,
-                ));
-            }
+        // Paint each pane with its dominant terminal background, including
+        // full-screen TUIs that set their own SGR background. This keeps the
+        // padding, footer and row-rounding strip flush with the TUI instead of
+        // showing the app frame.
+        for (id, _, frame) in &frames {
+            let Some(pane_layout) = self.view.panes.iter().find(|pane| pane.id == *id) else {
+                continue;
+            };
+            let outer = pane_layout.outer;
+            quads.push(Quad::new(
+                outer.x,
+                outer.y,
+                outer.width,
+                outer.height,
+                to_linear(dominant_background(frame), 1.0),
+            ));
         }
 
         for (_, content, frame) in &frames {
@@ -3335,6 +4891,7 @@ impl WindowState {
             push_cursor_quads(&mut quads, *content, frame, metrics, theme);
         }
 
+        let mut footer_hits = Vec::with_capacity(self.view.panes.len());
         {
             let view = &self.view;
             let workspace = &self.workspace;
@@ -3343,9 +4900,9 @@ impl WindowState {
                 let Some(pane) = workspace.pane(pane_layout.id) else {
                     continue;
                 };
-                build_pane_footer(
+                let hits = build_pane_footer(
                     pane,
-                    pane_layout.footer,
+                    pane_footer_band(pane_layout, metrics),
                     PaneFooterStyle {
                         scale,
                         ui_font_size,
@@ -3355,10 +4912,13 @@ impl WindowState {
                     &mut quads,
                     &mut labels,
                 );
+                footer_hits.push((pane_layout.id, hits));
             }
         }
+        self.footer_hits.clear();
+        self.footer_hits.extend(footer_hits);
 
-        if let (Some(editor), Some(layout)) = (&self.editor, self.view.editor) {
+        if let Some(layout) = self.view.editor {
             quads.push(Quad::new(
                 layout.header.x,
                 layout.header.y,
@@ -3374,13 +4934,13 @@ impl WindowState {
                 to_linear(theme.border, 1.0),
             ));
 
-            let focused_editor = self.focus == Focus::Editor;
-            let thickness = if focused_editor {
+            let focused_panel = matches!(self.focus, Focus::Editor | Focus::Diff);
+            let thickness = if focused_panel {
                 (2.0 * scale).round().max(1.0)
             } else {
                 1.0
             };
-            let border = if focused_editor {
+            let border = if focused_panel {
                 to_linear(theme.accent, 1.0)
             } else {
                 to_linear(theme.border, 1.0)
@@ -3416,9 +4976,30 @@ impl WindowState {
 
             let header_font = ui_font_size * 0.88;
             let header_line = header_font * 1.35;
-            let dirty_width = if editor.dirty { 16.0 * scale } else { 0.0 };
+            let title = if let Some(diff) = &self.diff_view {
+                diff.detail
+                    .as_ref()
+                    .map(|detail| {
+                        format!(
+                            "WORKING DIFF · {} files · +{} -{}",
+                            detail.files.len(),
+                            detail.additions,
+                            detail.deletions
+                        )
+                    })
+                    .unwrap_or_else(|| "WORKING DIFF".to_owned())
+            } else {
+                self.editor
+                    .as_ref()
+                    .map(|editor| editor.path.display().to_string())
+                    .unwrap_or_default()
+            };
+            let editor_dirty =
+                self.diff_view.is_none() && self.editor.as_ref().is_some_and(|editor| editor.dirty);
+            let dirty_width = if editor_dirty { 16.0 * scale } else { 0.0 };
+
             labels.push(Label {
-                text: editor.path.display().to_string(),
+                text: title,
                 x: layout.header.x + layout.padding,
                 y: layout.header.y + (layout.header.height - header_line) / 2.0,
                 width: (layout.close.x - layout.header.x - layout.padding * 2.0 - dirty_width)
@@ -3428,7 +5009,7 @@ impl WindowState {
                 bold: false,
             });
 
-            if editor.dirty {
+            if editor_dirty {
                 labels.push(Label {
                     text: "●".into(),
                     x: layout.close.x - 16.0 * scale,
@@ -3440,19 +5021,50 @@ impl WindowState {
                 });
             }
 
-            let close_font = ui_font_size * 1.0;
-            labels.push(Label {
-                text: "×".into(),
-                x: layout.close.x + (layout.close.width - close_font * 0.55) / 2.0,
-                y: layout.close.y + (layout.close.height - close_font * 1.35) / 2.0,
-                width: layout.close.width,
-                font_size: close_font,
-                color: theme.sidebar_text_dim,
-                bold: false,
-            });
+            push_close_icon(&mut quads, layout.close, scale, theme.sidebar_text);
         }
 
-        let mut popup_occlusion = None;
+        let mut branch_occlusion = None;
+        if let Some(menu) = &self.branch_menu
+            && let Some(anchor) = self
+                .footer_hits
+                .get(&menu.pane)
+                .and_then(|hits| hits.branch)
+            && let Some(pane_layout) = self.view.panes.iter().find(|pane| pane.id == menu.pane)
+        {
+            let layout = branch_menu_layout(menu, anchor, pane_layout.outer, scale, ui_font_size);
+            if let Some((_, content, frame)) = frames.iter_mut().find(|(id, _, _)| *id == menu.pane)
+            {
+                let rect = layout.rect;
+                let row_start = (((rect.y - content.y) / metrics.height).floor() as isize)
+                    .clamp(0, frame.rows.len() as isize - 1)
+                    as usize;
+                let row_end = (((rect.bottom() - content.y) / metrics.height).ceil() as usize)
+                    .min(frame.rows.len());
+                let col_start = (((rect.x - content.x) / metrics.width).floor() as isize)
+                    .clamp(0, frame.cols as isize - 1) as usize;
+                let col_end =
+                    (((rect.right() - content.x) / metrics.width).ceil() as usize).min(frame.cols);
+                blank_region(frame, row_start..row_end, col_start..col_end, theme);
+                branch_occlusion = Some((menu.pane, row_start, row_end, col_start, col_end));
+            }
+
+            build_branch_menu(
+                menu,
+                anchor,
+                pane_layout.outer,
+                (self.cursor_position.x as f32, self.cursor_position.y as f32),
+                BranchMenuStyle {
+                    scale,
+                    ui_font_size,
+                    theme,
+                },
+                &mut quads,
+                &mut labels,
+            );
+        }
+
+        let mut popup_occlusion = branch_occlusion;
         if self.completion_open
             && let Some(view) = &self.completion_view
             && let Some((_, content, frame)) = frames.iter_mut().find(|(id, _, _)| *id == view.pane)
@@ -3461,7 +5073,9 @@ impl WindowState {
                 PopupGeometry {
                     content: *content,
                     row: view.row,
-                    col: view.col,
+                    col: view
+                        .col
+                        .saturating_sub(self.prompt_shift(view.pane, view.row)),
                     selected: self.completion_selected,
                     metrics,
                     ui_font_size,
@@ -3582,7 +5196,7 @@ impl WindowState {
                 },
             })
             .collect();
-        if let Some((content, frame)) = &editor_frame {
+        if let Some((content, frame)) = diff_frame.as_ref().or(editor_frame.as_ref()) {
             scene_panes.push(PaneLayer {
                 id: 0,
                 content: *content,
@@ -3605,15 +5219,15 @@ impl WindowState {
         self.dirty_panes.clear();
         self.editor_dirty = false;
 
-        let ime_target = if self.focus == Focus::Editor {
-            editor_frame
+        let ime_target = match self.focus {
+            Focus::Editor => editor_frame
                 .as_ref()
-                .map(|(content, frame)| (*content, frame))
-        } else {
-            frames
+                .map(|(content, frame)| (*content, frame)),
+            Focus::Terminal => frames
                 .iter()
                 .find(|(id, _, _)| *id == focused)
-                .map(|(_, content, frame)| (*content, frame))
+                .map(|(_, content, frame)| (*content, frame)),
+            Focus::Diff => None,
         };
 
         if let Some((content, frame)) = ime_target
@@ -3857,7 +5471,6 @@ impl WindowState {
             SidebarMode::Terminals => {
                 let hovered_tab = self.sidebar.hovered;
                 let hovered_pane = self.sidebar.hovered_pane;
-                let close_size = ui_font_size * 1.1;
 
                 for row in &layout.rows {
                     match row {
@@ -3940,15 +5553,17 @@ impl WindowState {
                                 });
                             }
 
-                            labels.push(Label {
-                                text: "×".into(),
-                                x: item.close.x + (item.close.width - close_size * 0.55) / 2.0,
-                                y: item.close.y + (item.close.height - close_size * 1.35) / 2.0,
-                                width: item.close.width,
-                                font_size: close_size,
-                                color: theme.sidebar_text_dim,
-                                bold: false,
-                            });
+                            if let Some(state) = self.tab_agent_state(item.tab) {
+                                push_agent_dot(
+                                    &mut *quads,
+                                    item.close.x - 36.0 * scale,
+                                    item.rect.y + item.rect.height / 2.0,
+                                    scale,
+                                    agent_state_color(theme, &state),
+                                );
+                            }
+
+                            push_close_icon(&mut *quads, item.close, scale, theme.sidebar_text);
                         }
                         SidebarRow::Pane(item) => {
                             let is_hovered = Some(item.pane) == hovered_pane;
@@ -4012,15 +5627,17 @@ impl WindowState {
                                 bold: item.is_focused,
                             });
 
-                            labels.push(Label {
-                                text: "×".into(),
-                                x: item.close.x + (item.close.width - close_size * 0.55) / 2.0,
-                                y: item.close.y + (item.close.height - close_size * 1.35) / 2.0,
-                                width: item.close.width,
-                                font_size: close_size,
-                                color: theme.sidebar_text_dim,
-                                bold: false,
-                            });
+                            if let Some(state) = self.pane_agent_state(item.pane) {
+                                push_agent_dot(
+                                    &mut *quads,
+                                    item.close.x - 26.0 * scale,
+                                    item.rect.y + item.rect.height / 2.0,
+                                    scale,
+                                    agent_state_color(theme, &state),
+                                );
+                            }
+
+                            push_close_icon(&mut *quads, item.close, scale, theme.sidebar_text);
                         }
                     }
                 }
@@ -4110,6 +5727,125 @@ impl WindowState {
     }
 }
 
+fn process_agent_row(
+    pane: &Pane,
+    tab_title: &str,
+    pane_label: Option<String>,
+    agent: &DetectedAgent,
+    notification: Option<&PaneNotification>,
+    started: u64,
+) -> AgentRow {
+    AgentRow {
+        id: AgentId::Terminal {
+            pane: pane.id,
+            record: format!("process:{}", agent.pid),
+        },
+        kind: agent.kind.clone(),
+        state: fallback_agent_state(pane, notification),
+        message: notification.and_then(notification_message),
+        title: pane.title.clone(),
+        cwd: agent.cwd.clone().or_else(|| pane.cwd.clone()),
+        pane: Some(pane.id),
+        tab_title: Some(tab_title.to_owned()),
+        pane_label,
+        pid: Some(agent.pid),
+        started,
+        progress: None,
+        source: AgentSource::Process,
+        subagents: Vec::new(),
+        seen: false,
+    }
+}
+
+fn notification_message(notification: &PaneNotification) -> Option<String> {
+    notification
+        .message
+        .clone()
+        .or_else(|| notification.title.clone())
+}
+
+fn pane_label(pane: &Pane, shells: &ShellCatalog) -> Option<String> {
+    pane.title
+        .as_deref()
+        .filter(|title| !title.is_empty())
+        .map(str::to_owned)
+        .or_else(|| {
+            shells
+                .get(&pane.profile_id)
+                .map(|profile| profile.short.clone())
+        })
+}
+
+fn looks_finished(message: &str) -> bool {
+    let message = message.to_ascii_lowercase();
+    message.contains("complete")
+        || message.contains("finished")
+        || message.contains("turn ended")
+        || message.contains("done")
+}
+
+fn fallback_agent_state(pane: &Pane, notification: Option<&PaneNotification>) -> AgentState {
+    let quiet = pane.last_output.elapsed();
+    if let Some(notification) = notification {
+        if quiet > Duration::from_millis(800) {
+            if notification_message(notification)
+                .as_deref()
+                .is_some_and(looks_finished)
+            {
+                return AgentState::Done;
+            }
+            return AgentState::Attention;
+        }
+        return AgentState::Working;
+    }
+
+    if quiet <= Duration::from_millis(2500) {
+        AgentState::Working
+    } else {
+        AgentState::Idle
+    }
+}
+
+fn protocol_agent_state(
+    state: ProgramState,
+    block: Option<BlockKind>,
+    notification: Option<&PaneNotification>,
+    quiet: Duration,
+) -> AgentState {
+    match state {
+        ProgramState::Working => AgentState::Working,
+        ProgramState::Blocked => match block {
+            Some(BlockKind::Permission) => AgentState::Blocked(BlockKind::Permission),
+            Some(BlockKind::Question) => AgentState::Blocked(BlockKind::Question),
+            Some(BlockKind::Auth) => AgentState::Blocked(BlockKind::Auth),
+            None => AgentState::Attention,
+        },
+        ProgramState::Done => AgentState::Done,
+        ProgramState::Error => AgentState::Error,
+        ProgramState::Idle => {
+            if let Some(notification) = notification
+                && quiet > Duration::from_millis(800)
+            {
+                if notification_message(notification)
+                    .as_deref()
+                    .is_some_and(looks_finished)
+                {
+                    return AgentState::Done;
+                }
+                return AgentState::Attention;
+            }
+            AgentState::Idle
+        }
+    }
+}
+
+fn epoch_seconds() -> u64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|duration| duration.as_secs())
+        .unwrap_or(0)
+}
+
 fn default_directory() -> PathBuf {
     let interactive = std::io::stdin().is_terminal() || std::io::stdout().is_terminal();
     let cwd = std::env::current_dir().ok();
@@ -4117,6 +5853,42 @@ fn default_directory() -> PathBuf {
         .or_else(|| std::env::var_os("USERPROFILE"))
         .map(PathBuf::from);
     choose_launch_directory(interactive, cwd, home)
+}
+
+/// Normalize the title reported by the shell.
+///
+/// ConPTY (and cmd.exe) use the current directory as the console title, which
+/// looks like noise in the sidebar. Path-only titles are dropped so the pane
+/// keeps its default label. The `user@host` prefix is optionally removed as
+/// well.
+fn clean_pty_title(title: &str, show_user: bool) -> Option<String> {
+    let mut title = title.trim().to_owned();
+    if !show_user && let Some(len) = complete::line::user_host_prefix_len(&title) {
+        title = title.chars().skip(len).collect::<String>();
+        title = title.trim_start().to_owned();
+    }
+
+    let title = title.trim();
+    if title.is_empty() || title_looks_like_path(title) {
+        return None;
+    }
+    Some(title.to_owned())
+}
+
+/// Detect terminal titles that are only a filesystem path.
+fn title_looks_like_path(title: &str) -> bool {
+    let bytes = title.as_bytes();
+    let windows_drive = bytes.len() >= 3
+        && bytes[0].is_ascii_alphabetic()
+        && bytes[1] == b':'
+        && matches!(bytes[2], b'\\' | b'/');
+
+    windows_drive
+        || title.starts_with('/')
+        || title.starts_with('\\')
+        || title == "~"
+        || title.starts_with("~/")
+        || title.starts_with("~\\")
 }
 
 fn choose_launch_directory(
@@ -4128,6 +5900,457 @@ fn choose_launch_directory(
         return home;
     }
     cwd.or(home).unwrap_or_else(|| PathBuf::from("."))
+}
+
+/// Area from the last rendered terminal row down to the bottom of the pane.
+///
+/// The grid rounds down to whole rows, so there is usually a small unused
+/// strip above the reserved footer. The footer is drawn in that strip too,
+/// which keeps its text at a readable size without stealing rows from the
+/// terminal.
+fn pane_footer_band(pane: &PaneLayout, metrics: CellMetrics) -> Rect {
+    let rows = (pane.content.height / metrics.height).floor().max(1.0);
+    let top = (pane.content.y + rows * metrics.height).min(pane.footer.bottom());
+    Rect::new(
+        pane.footer.x,
+        top,
+        pane.footer.width,
+        (pane.footer.bottom() - top).max(1.0),
+    )
+}
+
+/// Most common background color in a frame, including the default one.
+///
+/// Full-screen TUIs such as opencode can paint their own background with SGR
+/// colors instead of OSC 11. Using the dominant color for the pane lets the
+/// footer share that background and removes the app-colored strip around it.
+fn dominant_background(frame: &Frame) -> Rgb {
+    let total = frame.rows.len().saturating_mul(frame.cols).max(1);
+    let mut counts: Vec<(Rgb, usize)> = Vec::new();
+
+    for row in &frame.rows {
+        for background in &row.backgrounds {
+            let width = background.end.saturating_sub(background.start);
+            if width == 0 {
+                continue;
+            }
+            if let Some(entry) = counts
+                .iter_mut()
+                .find(|(color, _)| *color == background.color)
+            {
+                entry.1 += width;
+            } else {
+                counts.push((background.color, width));
+            }
+        }
+    }
+
+    counts
+        .into_iter()
+        .max_by_key(|(_, count)| *count)
+        .filter(|(_, count)| *count * 2 >= total)
+        .map(|(color, _)| color)
+        .unwrap_or(frame.background)
+}
+
+fn branch_menu_layout(
+    menu: &BranchMenu,
+    anchor: Rect,
+    outer: Rect,
+    scale: f32,
+    ui_font_size: f32,
+) -> BranchMenuLayout {
+    let padding = (6.0 * scale).max(4.0);
+    let header_height = (ui_font_size * 1.5).max(16.0 * scale);
+    let row_height = (ui_font_size * 1.75).max(20.0 * scale);
+    let message_height = if menu.error.is_some() || menu.busy.is_some() {
+        row_height
+    } else {
+        0.0
+    };
+
+    let max_width = (outer.width - 8.0 * scale).max(1.0);
+    let width = (240.0 * scale)
+        .max(anchor.width + 24.0 * scale)
+        .min(max_width);
+
+    let available_rows = ((outer.height
+        - 8.0 * scale
+        - padding * 2.0
+        - header_height
+        - message_height)
+        / row_height)
+        .floor()
+        .max(1.0) as usize;
+    let visible_rows = menu.branches.len().clamp(1, 10.min(available_rows));
+    let height =
+        (padding + header_height + visible_rows as f32 * row_height + message_height + padding)
+            .min((outer.height - 8.0 * scale).max(1.0));
+
+    let x = anchor
+        .x
+        .min(outer.right() - width - 4.0 * scale)
+        .max(outer.x + 4.0 * scale);
+    let mut y = anchor.y - height - 4.0 * scale;
+    if y < outer.y + 4.0 * scale {
+        y = (anchor.bottom() + 4.0 * scale)
+            .min(outer.bottom() - height - 4.0 * scale)
+            .max(outer.y + 4.0 * scale);
+    }
+
+    let list = Rect::new(
+        x + padding,
+        y + padding + header_height,
+        (width - padding * 2.0).max(1.0),
+        visible_rows as f32 * row_height,
+    );
+    let message = (menu.error.is_some() || menu.busy.is_some()).then(|| {
+        Rect::new(
+            x + padding,
+            list.bottom(),
+            (width - padding * 2.0).max(1.0),
+            row_height,
+        )
+    });
+    let offset = if menu.branches.is_empty() {
+        0
+    } else {
+        menu.selected
+            .saturating_sub(visible_rows.saturating_sub(1))
+            .min(menu.branches.len().saturating_sub(visible_rows))
+    };
+
+    BranchMenuLayout {
+        rect: Rect::new(x, y, width, height),
+        list,
+        row_height,
+        visible_rows,
+        offset,
+        message,
+    }
+}
+
+fn build_diff_rows(detail: &ReviewDetail) -> Vec<DiffRow> {
+    let mut rows = Vec::new();
+
+    for (index, file) in detail.files.iter().enumerate() {
+        if index > 0 {
+            rows.push(DiffRow {
+                kind: DiffRowKind::Separator,
+                text: String::new(),
+            });
+        }
+
+        let status = match file.status {
+            FileStatus::Modified => "M",
+            FileStatus::Added => "A",
+            FileStatus::Deleted => "D",
+            FileStatus::Renamed => "R",
+            FileStatus::Binary => "B",
+        };
+        let path = match &file.old_path {
+            Some(old) if old != &file.path => format!("{old} → {}", file.path),
+            _ => file.path.clone(),
+        };
+        let stats = if file.binary {
+            "binary".to_owned()
+        } else {
+            format!("+{} -{}", file.additions, file.deletions)
+        };
+        rows.push(DiffRow {
+            kind: DiffRowKind::File,
+            text: format!("{status}  {path}   {stats}"),
+        });
+
+        if file.binary {
+            rows.push(DiffRow {
+                kind: DiffRowKind::Meta,
+                text: "Binary file".to_owned(),
+            });
+            continue;
+        }
+
+        for line in &file.lines {
+            let text = match line.kind {
+                DiffLineKind::Add => {
+                    format!(
+                        "{:>5} {:>5} + {}",
+                        "",
+                        line.new.unwrap_or_default(),
+                        line.text
+                    )
+                }
+                DiffLineKind::Remove => format!(
+                    "{:>5} {:>5} - {}",
+                    line.old.unwrap_or_default(),
+                    "",
+                    line.text
+                ),
+                DiffLineKind::Context => format!(
+                    "{:>5} {:>5}   {}",
+                    line.old.unwrap_or_default(),
+                    line.new.unwrap_or_default(),
+                    line.text
+                ),
+                DiffLineKind::Hunk | DiffLineKind::Meta => line.text.clone(),
+            };
+            let kind = match line.kind {
+                DiffLineKind::Add => DiffRowKind::Add,
+                DiffLineKind::Remove => DiffRowKind::Remove,
+                DiffLineKind::Context => DiffRowKind::Context,
+                DiffLineKind::Hunk => DiffRowKind::Hunk,
+                DiffLineKind::Meta => DiffRowKind::Meta,
+            };
+            rows.push(DiffRow { kind, text });
+        }
+    }
+
+    rows
+}
+
+fn build_diff_frame(
+    diff: &DiffView,
+    area: Rect,
+    metrics: CellMetrics,
+    theme: &Theme,
+    quads: &mut Vec<Quad>,
+) -> Frame {
+    let cols = (area.width / metrics.width).floor().max(1.0) as usize;
+    let rows = (area.height / metrics.height).floor().max(1.0) as usize;
+    let mut frame_rows = Vec::with_capacity(rows);
+
+    if diff.rows.is_empty() {
+        let (text, color) = if diff.loading {
+            ("Loading working diff…".to_owned(), theme.sidebar_text_dim)
+        } else if let Some(error) = &diff.error {
+            (error.replace('\n', " "), theme.diff_remove_text)
+        } else {
+            ("No changes".to_owned(), theme.sidebar_text_dim)
+        };
+        let text: String = text.chars().take(cols).collect();
+        let mut row = Row::default();
+        if !text.is_empty() {
+            row.runs.push(Run {
+                range: 0..text.len(),
+                color,
+            });
+            row.text = text;
+        }
+        frame_rows.push(row);
+        while frame_rows.len() < rows {
+            frame_rows.push(Row::default());
+        }
+        return Frame {
+            rows: frame_rows,
+            cols,
+            cursor: None,
+            background: theme.background,
+        };
+    }
+
+    let start = diff.scroll_row.min(diff.rows.len().saturating_sub(rows));
+    for index in 0..rows {
+        let mut row = Row::default();
+        if let Some(diff_row) = diff.rows.get(start + index) {
+            let text: String = diff_row
+                .text
+                .chars()
+                .skip(diff.scroll_col)
+                .take(cols)
+                .collect();
+            let (background, color) = match diff_row.kind {
+                DiffRowKind::File => (Some(theme.sidebar_active), theme.accent),
+                DiffRowKind::Add => (Some(theme.diff_add_background), theme.diff_add_text),
+                DiffRowKind::Remove => (Some(theme.diff_remove_background), theme.diff_remove_text),
+                DiffRowKind::Context => (None, theme.foreground),
+                DiffRowKind::Hunk => (None, theme.diff_hunk_text),
+                DiffRowKind::Meta => (None, theme.diff_meta_text),
+                DiffRowKind::Separator => (None, theme.background),
+            };
+            if let Some(background) = background {
+                quads.push(Quad::new(
+                    area.x,
+                    area.y + index as f32 * metrics.height,
+                    area.width,
+                    metrics.height,
+                    to_linear(background, 1.0),
+                ));
+            }
+            if !text.is_empty() {
+                row.runs.push(Run {
+                    range: 0..text.len(),
+                    color,
+                });
+                row.text = text;
+            }
+        }
+        frame_rows.push(row);
+    }
+
+    Frame {
+        rows: frame_rows,
+        cols,
+        cursor: None,
+        background: theme.background,
+    }
+}
+
+struct BranchMenuStyle<'a> {
+    scale: f32,
+    ui_font_size: f32,
+    theme: &'a Theme,
+}
+
+fn build_branch_menu(
+    menu: &BranchMenu,
+    anchor: Rect,
+    outer: Rect,
+    cursor: (f32, f32),
+    style: BranchMenuStyle<'_>,
+    quads: &mut Vec<Quad>,
+    labels: &mut Vec<Label>,
+) {
+    let BranchMenuStyle {
+        scale,
+        ui_font_size,
+        theme,
+    } = style;
+    let layout = branch_menu_layout(menu, anchor, outer, scale, ui_font_size);
+    let rect = layout.rect;
+    if rect.width <= 1.0 || rect.height <= 1.0 {
+        return;
+    }
+
+    let border = (1.0 * scale).max(1.0);
+    quads.push(Quad::rounded(
+        rect.x - border,
+        rect.y - border,
+        rect.width + border * 2.0,
+        rect.height + border * 2.0,
+        8.0 * scale,
+        to_linear(theme.border, 1.0),
+    ));
+    quads.push(Quad::rounded(
+        rect.x,
+        rect.y,
+        rect.width,
+        rect.height,
+        7.0 * scale,
+        to_linear(theme.sidebar_background, 1.0),
+    ));
+
+    let padding = (6.0 * scale).max(4.0);
+    let header_font = (ui_font_size * 0.78).max(8.0 * scale);
+    labels.push(Label {
+        text: "BRANCHES".into(),
+        x: rect.x + padding,
+        y: rect.y + padding,
+        width: (rect.width - padding * 2.0).max(1.0),
+        font_size: header_font,
+        color: theme.sidebar_text_dim,
+        bold: true,
+    });
+
+    let font = (ui_font_size * 0.88).max(9.0 * scale);
+    let line = font * 1.35;
+
+    if menu.branches.is_empty() {
+        let text = if menu.loading {
+            "Loading branches…"
+        } else {
+            "No local branches"
+        };
+        labels.push(Label {
+            text: text.into(),
+            x: layout.list.x + 4.0 * scale,
+            y: layout.list.y + (layout.row_height - line) / 2.0,
+            width: (layout.list.width - 8.0 * scale).max(1.0),
+            font_size: font,
+            color: theme.sidebar_text_dim,
+            bold: false,
+        });
+    } else {
+        let text_x = layout.list.x + 16.0 * scale;
+        let text_width = (layout.list.width - 20.0 * scale).max(1.0);
+        for row in 0..layout.visible_rows {
+            let index = layout.offset + row;
+            let Some(branch) = menu.branches.get(index) else {
+                break;
+            };
+            let row_rect = Rect::new(
+                layout.list.x,
+                layout.list.y + row as f32 * layout.row_height,
+                layout.list.width,
+                layout.row_height,
+            );
+            let selected = index == menu.selected;
+            let hovered = row_rect.contains(cursor.0, cursor.1);
+            if selected || hovered {
+                quads.push(Quad::rounded(
+                    row_rect.x + 2.0 * scale,
+                    row_rect.y + 1.0 * scale,
+                    (row_rect.width - 4.0 * scale).max(1.0),
+                    (row_rect.height - 2.0 * scale).max(1.0),
+                    4.0 * scale,
+                    to_linear(
+                        if selected {
+                            theme.sidebar_active
+                        } else {
+                            theme.sidebar_hover
+                        },
+                        1.0,
+                    ),
+                ));
+            }
+
+            let dot = (3.5 * scale).max(2.0);
+            if branch.current {
+                quads.push(Quad::rounded(
+                    layout.list.x + 6.0 * scale,
+                    row_rect.y + (row_rect.height - dot) / 2.0,
+                    dot,
+                    dot,
+                    dot / 2.0,
+                    to_linear(theme.accent, 1.0),
+                ));
+            }
+
+            labels.push(Label {
+                text: branch.name.clone(),
+                x: text_x,
+                y: row_rect.y + (layout.row_height - line) / 2.0,
+                width: text_width,
+                font_size: font,
+                color: if branch.current {
+                    theme.accent
+                } else if selected {
+                    theme.sidebar_text
+                } else {
+                    theme.sidebar_text_dim
+                },
+                bold: branch.current || selected,
+            });
+        }
+    }
+
+    if let Some(message) = layout.message {
+        let (text, color) = if let Some(error) = &menu.error {
+            (error.as_str(), theme.diff_remove_text)
+        } else if let Some(busy) = &menu.busy {
+            (busy.as_str(), theme.sidebar_text_dim)
+        } else {
+            ("", theme.sidebar_text_dim)
+        };
+        labels.push(Label {
+            text: text.to_owned(),
+            x: message.x,
+            y: message.y + (message.height - line) / 2.0,
+            width: message.width,
+            font_size: font,
+            color,
+            bold: false,
+        });
+    }
 }
 
 struct PaneFooterStyle<'a> {
@@ -4143,39 +6366,58 @@ fn build_pane_footer(
     renderer: &mut Renderer,
     quads: &mut Vec<Quad>,
     labels: &mut Vec<Label>,
-) {
+) -> FooterHits {
     let PaneFooterStyle {
         scale,
         ui_font_size,
         theme,
     } = style;
 
+    let mut hits = FooterHits::default();
+
     if footer.width <= 1.0 || footer.height <= 1.0 {
-        return;
+        return hits;
     }
 
     let Some(status) = &pane.git_status else {
-        return;
+        return hits;
     };
-    if footer.height < 12.0 * scale {
-        return;
+    if footer.height < 6.0 * scale {
+        return hits;
     }
 
-    let font = (ui_font_size * 0.86).max(10.0);
-    let line = font * 1.35;
-    let pill_height = (footer.height - 6.0 * scale).clamp(16.0 * scale, 34.0 * scale);
+    // Keep the usual footer size at the bottom. The strip above it belongs to
+    // the pane background (already painted with the TUI color), so it no
+    // longer shows as an app-colored margin.
+    let bottom_margin = (6.0 * scale).max(2.0);
+    let available = (footer.height - bottom_margin).max(1.0);
+    let block_height = (22.0 * scale).min(available);
+    let font = (ui_font_size * 0.9)
+        .max(11.0 * scale)
+        .min(block_height * 0.7)
+        .max(8.0 * scale);
+    let line = (font * 1.3).min(block_height);
+    let pill_height = (block_height - 3.0 * scale)
+        .clamp(18.0 * scale, 40.0 * scale)
+        .min(block_height);
     let radius = pill_height / 2.0;
-    let padding = 9.0 * scale;
-    let gap = 6.0 * scale;
-    let edge = 4.0 * scale;
-    let y = footer.y + (footer.height - pill_height) / 2.0;
+    let padding = 10.0 * scale;
+    let gap = 7.0 * scale;
+    let edge = 5.0 * scale;
+    let border = (1.0 * scale).max(1.0);
+    let y = footer.bottom() - bottom_margin - pill_height;
     let text_y = y + (pill_height - line) / 2.0;
+
+    let branch_icon = (font * 0.95).max(10.0 * scale);
+    let icon_gap = 6.0 * scale;
 
     let additions = format!("+{}", status.additions);
     let deletions = format!("-{}", status.deletions);
-    let additions_width = renderer.measure_ui_text(&additions, font, false);
-    let deletions_width = renderer.measure_ui_text(&deletions, font, false);
-    let changes_width = padding * 2.0 + additions_width + gap + deletions_width;
+    let additions_width = renderer.measure_ui_text(&additions, font, true);
+    let deletions_width = renderer.measure_ui_text(&deletions, font, true);
+    let changes_icon = (font * 0.85).max(9.0 * scale);
+    let changes_width =
+        padding * 2.0 + changes_icon + icon_gap + additions_width + gap + deletions_width;
 
     let can_show_changes = footer.width >= changes_width + edge * 2.0 + 60.0 * scale;
     let branch_max = if can_show_changes {
@@ -4185,16 +6427,22 @@ fn build_pane_footer(
     }
     .max(0.0);
 
-    let dot = (4.0 * scale).max(2.0);
-    let dot_gap = 5.0 * scale;
-    let branch_text_max = (branch_max - padding * 2.0 - dot - dot_gap).max(0.0);
+    let branch_text_max = (branch_max - padding * 2.0 - branch_icon - icon_gap).max(0.0);
     let branch = truncate_to_width(&status.branch, branch_text_max, font, true, renderer);
 
     let mut branch_width = 0.0;
-    if !branch.is_empty() && branch_max > dot + dot_gap + padding {
+    if !branch.is_empty() && branch_max > branch_icon + icon_gap + padding {
         let branch_text_width = renderer.measure_ui_text(&branch, font, true);
-        let width = (branch_text_width + padding * 2.0 + dot + dot_gap).min(branch_max);
+        let width = (branch_text_width + padding * 2.0 + branch_icon + icon_gap).min(branch_max);
         let x = footer.x + edge;
+        quads.push(Quad::rounded(
+            x - border,
+            y - border,
+            width + border * 2.0,
+            pill_height + border * 2.0,
+            radius + border,
+            to_linear(theme.border, 1.0),
+        ));
         quads.push(Quad::rounded(
             x,
             y,
@@ -4203,28 +6451,29 @@ fn build_pane_footer(
             radius,
             to_linear(theme.sidebar_active, 1.0),
         ));
-        quads.push(Quad::rounded(
+        push_branch_icon(
+            quads,
             x + padding,
-            y + (pill_height - dot) / 2.0,
-            dot,
-            dot,
-            dot / 2.0,
-            to_linear(theme.accent, 1.0),
-        ));
+            y + (pill_height - branch_icon) / 2.0,
+            branch_icon,
+            scale,
+            theme.accent,
+        );
         labels.push(Label {
             text: branch,
-            x: x + padding + dot + dot_gap,
+            x: x + padding + branch_icon + icon_gap,
             y: text_y,
-            width: (width - padding * 2.0 - dot - dot_gap).max(1.0),
+            width: (width - padding * 2.0 - branch_icon - icon_gap).max(1.0),
             font_size: font,
             color: theme.sidebar_text,
             bold: true,
         });
         branch_width = width;
+        hits.branch = Some(Rect::new(x, y, width, pill_height));
     }
 
     if !can_show_changes {
-        return;
+        return hits;
     }
 
     let changes_x = footer.x
@@ -4234,6 +6483,15 @@ fn build_pane_footer(
         } else {
             0.0
         };
+    hits.changes = Some(Rect::new(changes_x, y, changes_width, pill_height));
+    quads.push(Quad::rounded(
+        changes_x - border,
+        y - border,
+        changes_width + border * 2.0,
+        pill_height + border * 2.0,
+        radius + border,
+        to_linear(theme.border, 1.0),
+    ));
     quads.push(Quad::rounded(
         changes_x,
         y,
@@ -4253,7 +6511,7 @@ fn build_pane_footer(
     } else {
         theme.sidebar_hover
     };
-    let green_width = padding + additions_width + gap * 0.5;
+    let green_width = padding + changes_icon + icon_gap + additions_width + gap * 0.5;
     let red_width = (changes_width - green_width).max(0.0);
     quads.push(Quad::rounded_corners(
         changes_x,
@@ -4272,19 +6530,29 @@ fn build_pane_footer(
         to_linear(deletions_background, 1.0),
     ));
 
+    push_diff_icon(
+        &mut *quads,
+        changes_x + padding,
+        y + (pill_height - changes_icon) / 2.0,
+        changes_icon,
+        scale,
+        theme.sidebar_text,
+    );
+
     let additions_color = if status.additions > 0 {
         theme.diff_add_text
     } else {
         theme.sidebar_text_dim
     };
+    let additions_x = changes_x + padding + changes_icon + icon_gap;
     labels.push(Label {
         text: additions,
-        x: changes_x + padding,
+        x: additions_x,
         y: text_y,
         width: (additions_width + 2.0 * scale).max(1.0),
         font_size: font,
         color: additions_color,
-        bold: false,
+        bold: true,
     });
 
     let deletions_color = if status.deletions > 0 {
@@ -4294,13 +6562,15 @@ fn build_pane_footer(
     };
     labels.push(Label {
         text: deletions,
-        x: changes_x + padding + additions_width + gap,
+        x: additions_x + additions_width + gap,
         y: text_y,
         width: (deletions_width + 2.0 * scale).max(1.0),
         font_size: font,
         color: deletions_color,
-        bold: false,
+        bold: true,
     });
+
+    hits
 }
 
 fn truncate_to_width(
@@ -4328,6 +6598,115 @@ fn truncate_to_width(
     }
 
     String::new()
+}
+
+fn push_branch_icon(quads: &mut Vec<Quad>, x: f32, y: f32, size: f32, scale: f32, color: Rgb) {
+    let color = to_linear(color, 1.0);
+    let dot = (size * 0.28).max(2.0 * scale);
+    let bar = (size * 0.12).max(1.0 * scale);
+    let right = x + size - dot;
+    let bottom = y + size - dot;
+
+    quads.push(Quad::rounded(x, y, dot, dot, dot / 2.0, color));
+    quads.push(Quad::rounded(x, bottom, dot, dot, dot / 2.0, color));
+    quads.push(Quad::rounded(
+        x + dot / 2.0 - bar / 2.0,
+        y + dot / 2.0,
+        bar,
+        size - dot,
+        bar / 2.0,
+        color,
+    ));
+
+    let branch_y = y + size * 0.28;
+    quads.push(Quad::rounded(right, branch_y, dot, dot, dot / 2.0, color));
+    quads.push(Quad::rounded(
+        x + dot / 2.0,
+        branch_y + dot / 2.0 - bar / 2.0,
+        size - dot,
+        bar,
+        bar / 2.0,
+        color,
+    ));
+}
+
+fn push_diff_icon(quads: &mut Vec<Quad>, x: f32, y: f32, size: f32, scale: f32, color: Rgb) {
+    let color = to_linear(color, 1.0);
+    let width = size * 0.68;
+    let thickness = (1.2 * scale).max(1.0);
+
+    quads.push(Quad::new(x, y, width, thickness, color));
+    quads.push(Quad::new(x, y + size - thickness, width, thickness, color));
+    quads.push(Quad::new(x, y, thickness, size, color));
+    quads.push(Quad::new(x + width - thickness, y, thickness, size, color));
+    quads.push(Quad::new(
+        x + width * 0.22,
+        y + size * 0.34,
+        width * 0.5,
+        thickness,
+        color,
+    ));
+    quads.push(Quad::new(
+        x + width * 0.22,
+        y + size * 0.62,
+        width * 0.34,
+        thickness,
+        color,
+    ));
+}
+
+fn agent_state_color(theme: &Theme, state: &AgentState) -> Rgb {
+    match state {
+        AgentState::Working => theme.accent,
+        AgentState::Blocked(_) | AgentState::Attention => theme.ansi[3],
+        AgentState::Error => theme.ansi[1],
+        AgentState::Done => theme.ansi[2],
+        AgentState::Idle | AgentState::Detected => theme.sidebar_text_dim,
+    }
+}
+
+fn push_agent_dot(quads: &mut Vec<Quad>, x: f32, center_y: f32, scale: f32, color: Rgb) {
+    let size = (6.0 * scale).max(4.0);
+    quads.push(Quad::rounded(
+        x,
+        center_y - size / 2.0,
+        size,
+        size,
+        size / 2.0,
+        to_linear(color, 1.0),
+    ));
+}
+
+fn push_close_icon(quads: &mut Vec<Quad>, rect: Rect, scale: f32, color: Rgb) {
+    let extent = (rect.width.min(rect.height) * 0.5).max(4.0 * scale);
+    let thickness = (1.6 * scale).max(1.0);
+    let left = rect.x + (rect.width - extent) / 2.0;
+    let top = rect.y + (rect.height - extent) / 2.0;
+    let travel = (extent - thickness).max(0.0);
+    let steps = 5;
+
+    for index in 0..steps {
+        let t = index as f32 / (steps - 1) as f32;
+        let x = left + t * travel;
+        let y = top + t * travel;
+        quads.push(Quad::rounded(
+            x,
+            y,
+            thickness,
+            thickness,
+            thickness / 2.0,
+            to_linear(color, 1.0),
+        ));
+        let x = left + (1.0 - t) * travel;
+        quads.push(Quad::rounded(
+            x,
+            y,
+            thickness,
+            thickness,
+            thickness / 2.0,
+            to_linear(color, 1.0),
+        ));
+    }
 }
 
 fn push_cursor_quads(
@@ -4456,6 +6835,66 @@ fn popup_layout(geometry: PopupGeometry, candidates: &[complete::Candidate]) -> 
 /// drawn over terminal glyphs. Runs keep their byte ranges because only ASCII
 /// characters are replaced; rows with wide or non-ASCII glyphs are cleared
 /// entirely as a safe fallback.
+fn collect_prompt_trims(frame: &Frame, enabled: bool) -> Vec<PromptTrim> {
+    if !enabled {
+        return Vec::new();
+    }
+    frame
+        .rows
+        .iter()
+        .enumerate()
+        .filter_map(|(row, line)| {
+            complete::line::prompt_user_prefix_len(&line.text, frame.cols)
+                .map(|columns| PromptTrim { row, columns })
+        })
+        .collect()
+}
+
+fn trim_prompt_row(frame: &mut Frame, row_index: usize, columns: usize) {
+    let cols = frame.cols;
+    let cursor_row = frame.cursor.map(|cursor| cursor.row);
+    let Some(row) = frame.rows.get_mut(row_index) else {
+        return;
+    };
+    let char_count = row.text.chars().count();
+    if columns == 0 || columns >= char_count {
+        return;
+    }
+
+    let prefix_bytes: usize = row.text.chars().take(columns).map(char::len_utf8).sum();
+    let mut text: String = row.text.chars().skip(columns).collect();
+    while text.chars().count() < cols {
+        text.push(' ');
+    }
+    row.text = text;
+
+    for run in &mut row.runs {
+        run.range = run.range.start.saturating_sub(prefix_bytes)
+            ..run.range.end.saturating_sub(prefix_bytes);
+    }
+    row.runs.retain(|run| !run.range.is_empty());
+
+    let mut backgrounds = Vec::with_capacity(row.backgrounds.len());
+    for background in &row.backgrounds {
+        let start = background.start.saturating_sub(columns);
+        let end = background.end.saturating_sub(columns);
+        if end > start {
+            backgrounds.push(Background {
+                start,
+                end,
+                color: background.color,
+            });
+        }
+    }
+    row.backgrounds = backgrounds;
+
+    if cursor_row == Some(row_index)
+        && let Some(cursor) = &mut frame.cursor
+    {
+        cursor.col = cursor.col.saturating_sub(columns);
+    }
+}
+
 fn blank_region(
     frame: &mut Frame,
     rows: std::ops::Range<usize>,
@@ -4563,6 +7002,7 @@ fn build_editor_frame(editor: &Editor, text: Rect, metrics: CellMetrics, theme: 
         rows: frame_rows,
         cols,
         cursor,
+        background: theme.background,
     }
 }
 
@@ -4688,6 +7128,45 @@ mod tests {
     }
 
     #[test]
+    fn path_titles_fall_back_to_the_default_label() {
+        for title in [
+            r"C:\Users\me",
+            "c:/Users/me/project",
+            r"\\server\share",
+            r"\Windows\System32",
+            "/home/me/project",
+            "~/projects",
+            "~",
+        ] {
+            assert_eq!(clean_pty_title(title, true), None, "{title}");
+        }
+
+        assert_eq!(
+            clean_pty_title("New session", true).as_deref(),
+            Some("New session")
+        );
+        assert_eq!(
+            clean_pty_title("  vim README.md  ", true).as_deref(),
+            Some("vim README.md")
+        );
+        assert_eq!(
+            clean_pty_title("C: drive", true).as_deref(),
+            Some("C: drive")
+        );
+        assert_eq!(clean_pty_title("", true), None);
+    }
+
+    #[test]
+    fn path_titles_are_dropped_after_hiding_the_user_prefix() {
+        assert_eq!(clean_pty_title("me@host: /home/me/project", false), None);
+        assert_eq!(
+            clean_pty_title("me@host: opencode", false).as_deref(),
+            Some("opencode")
+        );
+        assert_eq!(clean_pty_title("me@host /home/me", false), None);
+    }
+
+    #[test]
     fn popup_keeps_the_selection_visible_and_inside_the_pane() {
         let candidates: Vec<_> = (0..20)
             .map(|index| candidate(&format!("item-{index}")))
@@ -4740,6 +7219,281 @@ mod tests {
     }
 
     #[test]
+    fn dominant_background_uses_the_most_common_color() {
+        let theme = Theme::tokyo_night();
+        let black = Rgb { r: 0, g: 0, b: 0 };
+        let row = || Row {
+            backgrounds: vec![crate::term::frame::Background {
+                start: 0,
+                end: 2,
+                color: black,
+            }],
+            ..Row::default()
+        };
+        let frame = Frame {
+            rows: vec![row(), row()],
+            cols: 2,
+            cursor: None,
+            background: theme.background,
+        };
+        assert_eq!(dominant_background(&frame), black);
+
+        let plain = Frame {
+            rows: vec![Row::default()],
+            cols: 2,
+            cursor: None,
+            background: theme.background,
+        };
+        assert_eq!(dominant_background(&plain), theme.background);
+    }
+
+    #[test]
+    fn branch_menu_opens_above_the_footer_and_scrolls_to_the_selection() {
+        let branches: Vec<BranchInfo> = (0..12)
+            .map(|index| BranchInfo {
+                name: format!("branch-{index}"),
+                full: format!("refs/heads/branch-{index}"),
+                hash: "abc123".into(),
+                upstream: None,
+                current: index == 0,
+            })
+            .collect();
+        let mut menu = BranchMenu {
+            pane: PaneId(1),
+            cwd: PathBuf::new(),
+            branches,
+            selected: 0,
+            loading: false,
+            error: None,
+            busy: None,
+        };
+        let anchor = Rect::new(100.0, 700.0, 80.0, 36.0);
+        let outer = Rect::new(0.0, 0.0, 800.0, 800.0);
+        let layout = branch_menu_layout(&menu, anchor, outer, 2.0, 25.0);
+
+        assert_eq!(layout.visible_rows, 10);
+        assert!(layout.rect.bottom() <= anchor.y);
+        assert!(layout.rect.x >= outer.x && layout.rect.right() <= outer.right());
+        assert_eq!(layout.offset, 0);
+
+        menu.selected = 11;
+        let layout = branch_menu_layout(&menu, anchor, outer, 2.0, 25.0);
+        assert_eq!(layout.offset, 2);
+    }
+
+    #[test]
+    fn branch_menu_renders_branches_and_messages() {
+        let branches: Vec<BranchInfo> = (0..3)
+            .map(|index| BranchInfo {
+                name: format!("branch-{index}"),
+                full: format!("refs/heads/branch-{index}"),
+                hash: "abc123".into(),
+                upstream: None,
+                current: index == 0,
+            })
+            .collect();
+        let mut menu = BranchMenu {
+            pane: PaneId(1),
+            cwd: PathBuf::new(),
+            branches,
+            selected: 1,
+            loading: false,
+            error: Some("checkout failed".into()),
+            busy: None,
+        };
+        let theme = Theme::tokyo_night();
+        let anchor = Rect::new(100.0, 700.0, 80.0, 36.0);
+        let outer = Rect::new(0.0, 0.0, 800.0, 800.0);
+        let mut quads = Vec::new();
+        let mut labels = Vec::new();
+
+        build_branch_menu(
+            &menu,
+            anchor,
+            outer,
+            (150.0, 600.0),
+            BranchMenuStyle {
+                scale: 2.0,
+                ui_font_size: 25.0,
+                theme: &theme,
+            },
+            &mut quads,
+            &mut labels,
+        );
+
+        assert!(!quads.is_empty());
+        assert!(labels.iter().any(|label| label.text == "BRANCHES"));
+        assert!(labels.iter().any(|label| label.text == "branch-0"));
+        assert!(labels.iter().any(|label| label.text == "checkout failed"));
+
+        menu.error = None;
+        menu.busy = Some("Checking out branch-1…".into());
+        labels.clear();
+        build_branch_menu(
+            &menu,
+            anchor,
+            outer,
+            (150.0, 600.0),
+            BranchMenuStyle {
+                scale: 2.0,
+                ui_font_size: 25.0,
+                theme: &theme,
+            },
+            &mut quads,
+            &mut labels,
+        );
+        assert!(
+            labels
+                .iter()
+                .any(|label| label.text == "Checking out branch-1…")
+        );
+    }
+
+    #[test]
+    fn diff_rows_format_files_and_line_numbers() {
+        let detail = ReviewDetail {
+            summary: ReviewSummary {
+                title: "Working changes".to_owned(),
+                subtitle: String::new(),
+                kind: ReviewKind::Working,
+            },
+            files: vec![crate::review::FileDiff {
+                path: "src/lib.rs".to_owned(),
+                old_path: None,
+                status: FileStatus::Modified,
+                additions: 1,
+                deletions: 1,
+                binary: false,
+                lines: vec![
+                    crate::review::DiffLine {
+                        kind: DiffLineKind::Context,
+                        text: "fn main() {".to_owned(),
+                        old: Some(1),
+                        new: Some(1),
+                    },
+                    crate::review::DiffLine {
+                        kind: DiffLineKind::Add,
+                        text: "    let x = 1;".to_owned(),
+                        old: None,
+                        new: Some(2),
+                    },
+                    crate::review::DiffLine {
+                        kind: DiffLineKind::Remove,
+                        text: "    let y = 2;".to_owned(),
+                        old: Some(2),
+                        new: None,
+                    },
+                ],
+            }],
+            additions: 1,
+            deletions: 1,
+        };
+
+        let rows = build_diff_rows(&detail);
+        assert_eq!(rows[0].kind, DiffRowKind::File);
+        assert!(rows[0].text.contains("src/lib.rs"));
+        assert!(rows[0].text.contains("+1 -1"));
+        assert_eq!(rows[1].kind, DiffRowKind::Context);
+        assert!(rows[1].text.contains("fn main()"));
+        assert_eq!(rows[2].kind, DiffRowKind::Add);
+        assert!(rows[2].text.contains("+ "));
+        assert_eq!(rows[3].kind, DiffRowKind::Remove);
+        assert!(rows[3].text.contains("- "));
+
+        let diff = DiffView {
+            pane: PaneId(1),
+            cwd: PathBuf::new(),
+            generation: 1,
+            loading: false,
+            error: None,
+            detail: Some(detail),
+            rows,
+            max_cols: 80,
+            scroll_row: 0,
+            scroll_col: 0,
+        };
+        let theme = Theme::tokyo_night();
+        let metrics = CellMetrics {
+            width: 8.0,
+            height: 16.0,
+        };
+        let mut quads = Vec::new();
+        let frame = build_diff_frame(
+            &diff,
+            Rect::new(0.0, 0.0, 400.0, 160.0),
+            metrics,
+            &theme,
+            &mut quads,
+        );
+        assert_eq!(frame.rows.len(), 10);
+        assert!(!quads.is_empty());
+    }
+
+    #[test]
+    fn collects_and_trims_every_visible_prompt_row() {
+        let frame = Frame {
+            rows: vec![
+                Row {
+                    text: "user@host ~/repo % ls".into(),
+                    ..Row::default()
+                },
+                Row {
+                    text: "README.md".into(),
+                    ..Row::default()
+                },
+                Row {
+                    text: "user@host ~/repo % ".into(),
+                    ..Row::default()
+                },
+            ],
+            cols: 30,
+            cursor: None,
+            background: Theme::github_dark().background,
+        };
+        let trims = collect_prompt_trims(&frame, true);
+        assert_eq!(trims.len(), 2);
+        assert_eq!(trims[0].row, 0);
+        assert_eq!(trims[1].row, 2);
+        assert!(collect_prompt_trims(&frame, false).is_empty());
+    }
+
+    #[test]
+    fn trimming_prompt_user_keeps_the_rest_of_the_line() {
+        let text = "user@host dir % ls";
+        let width = text.chars().count();
+        let mut frame = Frame {
+            rows: vec![Row {
+                text: text.into(),
+                runs: vec![Run {
+                    range: 0..text.len(),
+                    color: Theme::tokyo_night().foreground,
+                }],
+                backgrounds: vec![Background {
+                    start: 0,
+                    end: width,
+                    color: Theme::tokyo_night().sidebar_active,
+                }],
+            }],
+            cols: width,
+            cursor: Some(Cursor {
+                row: 0,
+                col: width - 1,
+                shape: CursorShapeKind::Beam,
+            }),
+            background: Theme::tokyo_night().background,
+        };
+
+        let shift = complete::line::user_host_prefix_len(text).unwrap();
+        trim_prompt_row(&mut frame, 0, shift);
+
+        assert_eq!(frame.rows[0].text.trim_end(), "dir % ls");
+        assert_eq!(frame.cursor.unwrap().col, width - 1 - shift);
+        assert_eq!(frame.rows[0].backgrounds[0].start, 0);
+        assert_eq!(frame.rows[0].backgrounds[0].end, width - shift);
+        assert_eq!(frame.rows[0].runs[0].range, 0..text.len() - shift);
+    }
+
+    #[test]
     fn blanking_hides_cells_without_touching_the_runs() {
         let mut frame = Frame {
             rows: vec![Row {
@@ -4752,6 +7506,7 @@ mod tests {
             }],
             cols: 11,
             cursor: None,
+            background: Theme::tokyo_night().background,
         };
         blank_region(&mut frame, 0..1, 2..5, &Theme::tokyo_night());
         assert_eq!(frame.rows[0].text, "he    world");
@@ -4771,6 +7526,7 @@ mod tests {
             }],
             cols: 5,
             cursor: None,
+            background: Theme::tokyo_night().background,
         };
         blank_region(&mut frame, 0..1, 1..2, &Theme::tokyo_night());
         assert_eq!(frame.rows[0].text, "     ");

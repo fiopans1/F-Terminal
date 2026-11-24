@@ -5,13 +5,13 @@ use std::thread;
 
 use syntect::easy::HighlightLines;
 use syntect::highlighting::{Theme as SyntaxTheme, ThemeSet};
-use syntect::parsing::SyntaxSet;
+use syntect::parsing::{SyntaxReference, SyntaxSet};
 use winit::event_loop::EventLoopProxy;
 
 use crate::event::UserEvent;
 use crate::term::color::Rgb;
 
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, PartialEq, Eq)]
 pub struct StyledSpan {
     pub range: Range<usize>,
     pub color: Rgb,
@@ -84,14 +84,29 @@ impl Highlighter {
         Self { syntax_set, theme }
     }
 
-    /// Return colored byte ranges per line. Lines must not include newlines.
-    pub fn highlight(&self, path: &Path, lines: &[String]) -> Vec<Vec<StyledSpan>> {
-        let syntax = path
+    /// Pick a grammar. JSX is highlighted with the JavaScript grammar, and
+    /// TypeScript falls back to JavaScript because syntect's default set does
+    /// not ship TS/TSX grammars.
+    fn syntax_for(&self, path: &Path) -> &SyntaxReference {
+        let extension = path
             .extension()
             .and_then(|extension| extension.to_str())
+            .map(|extension| extension.to_ascii_lowercase());
+        let extension = extension.as_deref().map(|extension| match extension {
+            "jsx" | "mjs" | "cjs" | "ts" | "tsx" => "js",
+            "jsonc" | "json5" => "json",
+            other => other,
+        });
+
+        extension
             .and_then(|extension| self.syntax_set.find_syntax_by_extension(extension))
             .or_else(|| self.syntax_set.find_syntax_for_file(path).ok().flatten())
-            .unwrap_or_else(|| self.syntax_set.find_syntax_plain_text());
+            .unwrap_or_else(|| self.syntax_set.find_syntax_plain_text())
+    }
+
+    /// Return colored byte ranges per line. Lines must not include newlines.
+    pub fn highlight(&self, path: &Path, lines: &[String]) -> Vec<Vec<StyledSpan>> {
+        let syntax = self.syntax_for(path);
 
         let mut highlighter = HighlightLines::new(syntax, &self.theme);
         let mut result = Vec::with_capacity(lines.len());
@@ -141,5 +156,36 @@ mod tests {
                 .iter()
                 .any(|span| span.color != Rgb { r: 0, g: 0, b: 0 })
         );
+    }
+
+    #[test]
+    fn highlights_jsx_with_the_javascript_grammar() {
+        let highlighter = Highlighter::new();
+        let lines = vec![
+            "const view = <div className=\"app\">{items.map((item) => item.name)}</div>;"
+                .to_owned(),
+        ];
+        let javascript = highlighter.highlight(Path::new("sample.js"), &lines);
+
+        for extension in ["jsx", "mjs", "cjs", "ts", "tsx"] {
+            let path = PathBuf::from(format!("sample.{extension}"));
+            assert_eq!(
+                highlighter.highlight(&path, &lines),
+                javascript,
+                "{extension} should use the JavaScript grammar"
+            );
+        }
+    }
+
+    #[test]
+    fn highlights_json_variants_as_json() {
+        let highlighter = Highlighter::new();
+        let lines = vec![r#"{"name": "f-terminal", "version": 1}"#.to_owned()];
+        let json = highlighter.highlight(Path::new("sample.json"), &lines);
+
+        for extension in ["jsonc", "json5"] {
+            let path = PathBuf::from(format!("sample.{extension}"));
+            assert_eq!(highlighter.highlight(&path, &lines), json);
+        }
     }
 }

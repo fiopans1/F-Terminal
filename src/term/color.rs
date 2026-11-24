@@ -28,13 +28,30 @@ pub struct Theme {
     pub diff_meta_text: Rgb,
 }
 
+const fn rgb(r: u8, g: u8, b: u8) -> Rgb {
+    Rgb { r, g, b }
+}
+
 impl Theme {
+    /// Resolve a theme preset by its configuration name.
+    pub fn from_name(name: &str) -> Option<Self> {
+        let normalized = name.trim().to_ascii_lowercase().replace(['_', ' '], "-");
+        match normalized.as_str() {
+            "tokyo-night" | "tokyo" => Some(Self::tokyo_night()),
+            "catppuccin-mocha" | "catppuccin" => Some(Self::catppuccin_mocha()),
+            "dracula" => Some(Self::dracula()),
+            "nord" => Some(Self::nord()),
+            "gruvbox-dark" | "gruvbox" => Some(Self::gruvbox_dark()),
+            "one-dark" | "onedark" => Some(Self::one_dark()),
+            "solarized-dark" | "solarized" => Some(Self::solarized_dark()),
+            "github-dark" | "github" => Some(Self::github_dark()),
+            "kanagawa" => Some(Self::kanagawa()),
+            _ => None,
+        }
+    }
+
     /// Tokyo Night inspired dark palette.
     pub const fn tokyo_night() -> Self {
-        const fn rgb(r: u8, g: u8, b: u8) -> Rgb {
-            Rgb { r, g, b }
-        }
-
         Self {
             background: rgb(0x1a, 0x1b, 0x26),
             foreground: rgb(0xc0, 0xca, 0xf5),
@@ -71,6 +88,334 @@ impl Theme {
             diff_remove_text: rgb(0xf7, 0x76, 0x8e),
             diff_hunk_text: rgb(0x7a, 0xa2, 0xf7),
             diff_meta_text: rgb(0x56, 0x5f, 0x89),
+        }
+    }
+
+    /// Catppuccin Mocha.
+    pub const fn catppuccin_mocha() -> Self {
+        Self {
+            background: rgb(0x1e, 0x1e, 0x2e),
+            foreground: rgb(0xcd, 0xd6, 0xf4),
+            cursor: rgb(0xf5, 0xe0, 0xdc),
+            selection: rgb(0x58, 0x5b, 0x70),
+            ansi: [
+                rgb(0x45, 0x47, 0x5a),
+                rgb(0xf3, 0x8b, 0xa8),
+                rgb(0xa6, 0xe3, 0xa1),
+                rgb(0xf9, 0xe2, 0xaf),
+                rgb(0x89, 0xb4, 0xfa),
+                rgb(0xf5, 0xc2, 0xe7),
+                rgb(0x94, 0xe2, 0xd5),
+                rgb(0xba, 0xc2, 0xde),
+                rgb(0x58, 0x5b, 0x70),
+                rgb(0xf3, 0x8b, 0xa8),
+                rgb(0xa6, 0xe3, 0xa1),
+                rgb(0xf9, 0xe2, 0xaf),
+                rgb(0x89, 0xb4, 0xfa),
+                rgb(0xf5, 0xc2, 0xe7),
+                rgb(0x94, 0xe2, 0xd5),
+                rgb(0xa6, 0xad, 0xc8),
+            ],
+            sidebar_background: rgb(0x18, 0x18, 0x25),
+            sidebar_hover: rgb(0x31, 0x32, 0x44),
+            sidebar_active: rgb(0x45, 0x47, 0x5a),
+            sidebar_text: rgb(0xcd, 0xd6, 0xf4),
+            sidebar_text_dim: rgb(0x7f, 0x84, 0x9c),
+            accent: rgb(0xcb, 0xa6, 0xf7),
+            border: rgb(0x31, 0x32, 0x44),
+            diff_add_background: rgb(0x1f, 0x35, 0x2c),
+            diff_remove_background: rgb(0x3a, 0x22, 0x2b),
+            diff_add_text: rgb(0xa6, 0xe3, 0xa1),
+            diff_remove_text: rgb(0xf3, 0x8b, 0xa8),
+            diff_hunk_text: rgb(0x89, 0xb4, 0xfa),
+            diff_meta_text: rgb(0x7f, 0x84, 0x9c),
+        }
+    }
+
+    /// Dracula.
+    pub const fn dracula() -> Self {
+        Self {
+            background: rgb(0x28, 0x2a, 0x36),
+            foreground: rgb(0xf8, 0xf8, 0xf2),
+            cursor: rgb(0xf8, 0xf8, 0xf2),
+            selection: rgb(0x44, 0x47, 0x5a),
+            ansi: [
+                rgb(0x21, 0x22, 0x2c),
+                rgb(0xff, 0x55, 0x55),
+                rgb(0x50, 0xfa, 0x7b),
+                rgb(0xf1, 0xfa, 0x8c),
+                rgb(0xbd, 0x93, 0xf9),
+                rgb(0xff, 0x79, 0xc6),
+                rgb(0x8b, 0xe9, 0xfd),
+                rgb(0xf8, 0xf8, 0xf2),
+                rgb(0x62, 0x72, 0xa4),
+                rgb(0xff, 0x6e, 0x6e),
+                rgb(0x69, 0xff, 0x94),
+                rgb(0xff, 0xff, 0xa5),
+                rgb(0xd6, 0xac, 0xff),
+                rgb(0xff, 0x92, 0xdf),
+                rgb(0xa4, 0xff, 0xff),
+                rgb(0xff, 0xff, 0xff),
+            ],
+            sidebar_background: rgb(0x21, 0x22, 0x2c),
+            sidebar_hover: rgb(0x34, 0x37, 0x46),
+            sidebar_active: rgb(0x44, 0x47, 0x5a),
+            sidebar_text: rgb(0xf8, 0xf8, 0xf2),
+            sidebar_text_dim: rgb(0x62, 0x72, 0xa4),
+            accent: rgb(0xbd, 0x93, 0xf9),
+            border: rgb(0x44, 0x47, 0x5a),
+            diff_add_background: rgb(0x1f, 0x35, 0x25),
+            diff_remove_background: rgb(0x3a, 0x22, 0x28),
+            diff_add_text: rgb(0x50, 0xfa, 0x7b),
+            diff_remove_text: rgb(0xff, 0x55, 0x55),
+            diff_hunk_text: rgb(0x8b, 0xe9, 0xfd),
+            diff_meta_text: rgb(0x62, 0x72, 0xa4),
+        }
+    }
+
+    /// Nord.
+    pub const fn nord() -> Self {
+        Self {
+            background: rgb(0x2e, 0x34, 0x40),
+            foreground: rgb(0xd8, 0xde, 0xe9),
+            cursor: rgb(0xd8, 0xde, 0xe9),
+            selection: rgb(0x43, 0x4c, 0x5e),
+            ansi: [
+                rgb(0x3b, 0x42, 0x52),
+                rgb(0xbf, 0x61, 0x6a),
+                rgb(0xa3, 0xbe, 0x8c),
+                rgb(0xeb, 0xcb, 0x8b),
+                rgb(0x81, 0xa1, 0xc1),
+                rgb(0xb4, 0x8e, 0xad),
+                rgb(0x88, 0xc0, 0xd0),
+                rgb(0xe5, 0xe9, 0xf0),
+                rgb(0x4c, 0x56, 0x6a),
+                rgb(0xbf, 0x61, 0x6a),
+                rgb(0xa3, 0xbe, 0x8c),
+                rgb(0xeb, 0xcb, 0x8b),
+                rgb(0x81, 0xa1, 0xc1),
+                rgb(0xb4, 0x8e, 0xad),
+                rgb(0x8f, 0xbc, 0xbb),
+                rgb(0xec, 0xef, 0xf4),
+            ],
+            sidebar_background: rgb(0x29, 0x2e, 0x39),
+            sidebar_hover: rgb(0x3b, 0x42, 0x52),
+            sidebar_active: rgb(0x43, 0x4c, 0x5e),
+            sidebar_text: rgb(0xd8, 0xde, 0xe9),
+            sidebar_text_dim: rgb(0x61, 0x6e, 0x88),
+            accent: rgb(0x88, 0xc0, 0xd0),
+            border: rgb(0x43, 0x4c, 0x5e),
+            diff_add_background: rgb(0x2f, 0x3d, 0x33),
+            diff_remove_background: rgb(0x3d, 0x2f, 0x33),
+            diff_add_text: rgb(0xa3, 0xbe, 0x8c),
+            diff_remove_text: rgb(0xbf, 0x61, 0x6a),
+            diff_hunk_text: rgb(0x81, 0xa1, 0xc1),
+            diff_meta_text: rgb(0x61, 0x6e, 0x88),
+        }
+    }
+
+    /// Gruvbox Dark.
+    pub const fn gruvbox_dark() -> Self {
+        Self {
+            background: rgb(0x28, 0x28, 0x28),
+            foreground: rgb(0xeb, 0xdb, 0xb2),
+            cursor: rgb(0xeb, 0xdb, 0xb2),
+            selection: rgb(0x50, 0x49, 0x45),
+            ansi: [
+                rgb(0x28, 0x28, 0x28),
+                rgb(0xcc, 0x24, 0x1d),
+                rgb(0x98, 0x97, 0x1a),
+                rgb(0xd7, 0x99, 0x21),
+                rgb(0x45, 0x85, 0x88),
+                rgb(0xb1, 0x62, 0x86),
+                rgb(0x68, 0x9d, 0x6a),
+                rgb(0xa8, 0x99, 0x84),
+                rgb(0x92, 0x83, 0x74),
+                rgb(0xfb, 0x49, 0x34),
+                rgb(0xb8, 0xbb, 0x26),
+                rgb(0xfa, 0xbd, 0x2f),
+                rgb(0x83, 0xa5, 0x98),
+                rgb(0xd3, 0x86, 0x9b),
+                rgb(0x8e, 0xc0, 0x7c),
+                rgb(0xeb, 0xdb, 0xb2),
+            ],
+            sidebar_background: rgb(0x1d, 0x20, 0x21),
+            sidebar_hover: rgb(0x32, 0x30, 0x2f),
+            sidebar_active: rgb(0x3c, 0x38, 0x36),
+            sidebar_text: rgb(0xeb, 0xdb, 0xb2),
+            sidebar_text_dim: rgb(0x92, 0x83, 0x74),
+            accent: rgb(0xfa, 0xbd, 0x2f),
+            border: rgb(0x3c, 0x38, 0x36),
+            diff_add_background: rgb(0x2a, 0x3a, 0x2a),
+            diff_remove_background: rgb(0x3a, 0x2a, 0x2a),
+            diff_add_text: rgb(0xb8, 0xbb, 0x26),
+            diff_remove_text: rgb(0xfb, 0x49, 0x34),
+            diff_hunk_text: rgb(0x83, 0xa5, 0x98),
+            diff_meta_text: rgb(0x92, 0x83, 0x74),
+        }
+    }
+
+    /// One Dark.
+    pub const fn one_dark() -> Self {
+        Self {
+            background: rgb(0x28, 0x2c, 0x34),
+            foreground: rgb(0xab, 0xb2, 0xbf),
+            cursor: rgb(0x52, 0x8b, 0xff),
+            selection: rgb(0x3e, 0x44, 0x51),
+            ansi: [
+                rgb(0x28, 0x2c, 0x34),
+                rgb(0xe0, 0x6c, 0x75),
+                rgb(0x98, 0xc3, 0x79),
+                rgb(0xe5, 0xc0, 0x7b),
+                rgb(0x61, 0xaf, 0xef),
+                rgb(0xc6, 0x78, 0xdd),
+                rgb(0x56, 0xb6, 0xc2),
+                rgb(0xab, 0xb2, 0xbf),
+                rgb(0x5c, 0x63, 0x70),
+                rgb(0xe0, 0x6c, 0x75),
+                rgb(0x98, 0xc3, 0x79),
+                rgb(0xe5, 0xc0, 0x7b),
+                rgb(0x61, 0xaf, 0xef),
+                rgb(0xc6, 0x78, 0xdd),
+                rgb(0x56, 0xb6, 0xc2),
+                rgb(0xff, 0xff, 0xff),
+            ],
+            sidebar_background: rgb(0x21, 0x25, 0x2b),
+            sidebar_hover: rgb(0x2c, 0x31, 0x3a),
+            sidebar_active: rgb(0x3a, 0x3f, 0x4b),
+            sidebar_text: rgb(0xab, 0xb2, 0xbf),
+            sidebar_text_dim: rgb(0x5c, 0x63, 0x70),
+            accent: rgb(0x61, 0xaf, 0xef),
+            border: rgb(0x3a, 0x3f, 0x4b),
+            diff_add_background: rgb(0x24, 0x34, 0x2a),
+            diff_remove_background: rgb(0x38, 0x26, 0x2a),
+            diff_add_text: rgb(0x98, 0xc3, 0x79),
+            diff_remove_text: rgb(0xe0, 0x6c, 0x75),
+            diff_hunk_text: rgb(0x61, 0xaf, 0xef),
+            diff_meta_text: rgb(0x5c, 0x63, 0x70),
+        }
+    }
+
+    /// Solarized Dark.
+    pub const fn solarized_dark() -> Self {
+        Self {
+            background: rgb(0x00, 0x2b, 0x36),
+            foreground: rgb(0x83, 0x94, 0x96),
+            cursor: rgb(0x93, 0xa1, 0xa1),
+            selection: rgb(0x07, 0x36, 0x42),
+            ansi: [
+                rgb(0x07, 0x36, 0x42),
+                rgb(0xdc, 0x32, 0x2f),
+                rgb(0x85, 0x99, 0x00),
+                rgb(0xb5, 0x89, 0x00),
+                rgb(0x26, 0x8b, 0xd2),
+                rgb(0xd3, 0x36, 0x82),
+                rgb(0x2a, 0xa1, 0x98),
+                rgb(0xee, 0xe8, 0xd5),
+                rgb(0x58, 0x6e, 0x75),
+                rgb(0xcb, 0x4b, 0x16),
+                rgb(0x58, 0x6e, 0x75),
+                rgb(0x65, 0x7b, 0x83),
+                rgb(0x83, 0x94, 0x96),
+                rgb(0x6c, 0x71, 0xc4),
+                rgb(0x93, 0xa1, 0xa1),
+                rgb(0xfd, 0xf6, 0xe3),
+            ],
+            sidebar_background: rgb(0x00, 0x22, 0x2c),
+            sidebar_hover: rgb(0x07, 0x36, 0x42),
+            sidebar_active: rgb(0x0a, 0x4b, 0x5a),
+            sidebar_text: rgb(0x93, 0xa1, 0xa1),
+            sidebar_text_dim: rgb(0x58, 0x6e, 0x75),
+            accent: rgb(0x26, 0x8b, 0xd2),
+            border: rgb(0x07, 0x36, 0x42),
+            diff_add_background: rgb(0x0b, 0x33, 0x2d),
+            diff_remove_background: rgb(0x33, 0x1c, 0x24),
+            diff_add_text: rgb(0x85, 0x99, 0x00),
+            diff_remove_text: rgb(0xdc, 0x32, 0x2f),
+            diff_hunk_text: rgb(0x26, 0x8b, 0xd2),
+            diff_meta_text: rgb(0x58, 0x6e, 0x75),
+        }
+    }
+
+    /// GitHub Dark.
+    pub const fn github_dark() -> Self {
+        Self {
+            background: rgb(0x0d, 0x11, 0x17),
+            foreground: rgb(0xc9, 0xd1, 0xd9),
+            cursor: rgb(0x58, 0xa6, 0xff),
+            selection: rgb(0x26, 0x4f, 0x78),
+            ansi: [
+                rgb(0x48, 0x4f, 0x58),
+                rgb(0xff, 0x7b, 0x72),
+                rgb(0x3f, 0xb9, 0x50),
+                rgb(0xd2, 0x99, 0x22),
+                rgb(0x58, 0xa6, 0xff),
+                rgb(0xbc, 0x8c, 0xff),
+                rgb(0x39, 0xc5, 0xcf),
+                rgb(0xb1, 0xba, 0xc4),
+                rgb(0x6e, 0x76, 0x81),
+                rgb(0xff, 0xa1, 0x98),
+                rgb(0x56, 0xd3, 0x64),
+                rgb(0xe3, 0xb3, 0x41),
+                rgb(0x79, 0xc0, 0xff),
+                rgb(0xd2, 0xa8, 0xff),
+                rgb(0x56, 0xd4, 0xdd),
+                rgb(0xf0, 0xf6, 0xfc),
+            ],
+            sidebar_background: rgb(0x01, 0x04, 0x09),
+            sidebar_hover: rgb(0x16, 0x1b, 0x22),
+            sidebar_active: rgb(0x21, 0x26, 0x2d),
+            sidebar_text: rgb(0xc9, 0xd1, 0xd9),
+            sidebar_text_dim: rgb(0x8b, 0x94, 0x9e),
+            accent: rgb(0x58, 0xa6, 0xff),
+            border: rgb(0x30, 0x36, 0x3d),
+            diff_add_background: rgb(0x12, 0x26, 0x1e),
+            diff_remove_background: rgb(0x2d, 0x12, 0x14),
+            diff_add_text: rgb(0x3f, 0xb9, 0x50),
+            diff_remove_text: rgb(0xff, 0x7b, 0x72),
+            diff_hunk_text: rgb(0x58, 0xa6, 0xff),
+            diff_meta_text: rgb(0x8b, 0x94, 0x9e),
+        }
+    }
+
+    /// Kanagawa.
+    pub const fn kanagawa() -> Self {
+        Self {
+            background: rgb(0x1f, 0x1f, 0x28),
+            foreground: rgb(0xdc, 0xd7, 0xba),
+            cursor: rgb(0xc8, 0xc0, 0x93),
+            selection: rgb(0x2d, 0x4f, 0x67),
+            ansi: [
+                rgb(0x09, 0x06, 0x18),
+                rgb(0xc3, 0x40, 0x43),
+                rgb(0x76, 0x94, 0x6a),
+                rgb(0xc0, 0xa3, 0x6e),
+                rgb(0x7e, 0x9c, 0xd8),
+                rgb(0x95, 0x7f, 0xb8),
+                rgb(0x6a, 0x95, 0x89),
+                rgb(0xc8, 0xc0, 0x93),
+                rgb(0x72, 0x71, 0x69),
+                rgb(0xe8, 0x24, 0x24),
+                rgb(0x98, 0xbb, 0x6c),
+                rgb(0xe6, 0xc3, 0x84),
+                rgb(0x7f, 0xb4, 0xca),
+                rgb(0x93, 0x8a, 0xa9),
+                rgb(0x7a, 0xa8, 0x9f),
+                rgb(0xdc, 0xd7, 0xba),
+            ],
+            sidebar_background: rgb(0x16, 0x16, 0x1d),
+            sidebar_hover: rgb(0x2a, 0x2a, 0x37),
+            sidebar_active: rgb(0x36, 0x36, 0x46),
+            sidebar_text: rgb(0xdc, 0xd7, 0xba),
+            sidebar_text_dim: rgb(0x72, 0x71, 0x69),
+            accent: rgb(0x7e, 0x9c, 0xd8),
+            border: rgb(0x2a, 0x2a, 0x37),
+            diff_add_background: rgb(0x22, 0x33, 0x27),
+            diff_remove_background: rgb(0x33, 0x22, 0x27),
+            diff_add_text: rgb(0x98, 0xbb, 0x6c),
+            diff_remove_text: rgb(0xc3, 0x40, 0x43),
+            diff_hunk_text: rgb(0x7e, 0x9c, 0xd8),
+            diff_meta_text: rgb(0x72, 0x71, 0x69),
         }
     }
 
@@ -190,4 +535,50 @@ pub fn to_linear(rgb: Rgb, alpha: f32) -> [f32; 4] {
     }
 
     [channel(rgb.r), channel(rgb.g), channel(rgb.b), alpha]
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn resolves_theme_aliases() {
+        assert_eq!(
+            Theme::from_name("tokyo_night").map(|theme| theme.background),
+            Some(Theme::tokyo_night().background)
+        );
+        assert_eq!(
+            Theme::from_name("Catppuccin Mocha").map(|theme| theme.background),
+            Some(Theme::catppuccin_mocha().background)
+        );
+        assert!(Theme::from_name("dracula").is_some());
+        assert!(Theme::from_name("nord").is_some());
+        assert!(Theme::from_name("gruvbox").is_some());
+        assert!(Theme::from_name("one-dark").is_some());
+        assert!(Theme::from_name("solarized").is_some());
+        assert!(Theme::from_name("github").is_some());
+        assert!(Theme::from_name("kanagawa").is_some());
+        assert!(Theme::from_name("does-not-exist").is_none());
+    }
+
+    #[test]
+    fn themes_have_distinct_backgrounds_and_complete_ansi_palettes() {
+        let themes = [
+            Theme::tokyo_night(),
+            Theme::catppuccin_mocha(),
+            Theme::dracula(),
+            Theme::nord(),
+            Theme::gruvbox_dark(),
+            Theme::one_dark(),
+            Theme::solarized_dark(),
+            Theme::github_dark(),
+            Theme::kanagawa(),
+        ];
+        for (index, theme) in themes.iter().enumerate() {
+            assert_eq!(theme.ansi.len(), 16);
+            for other in &themes[index + 1..] {
+                assert_ne!(theme.background, other.background);
+            }
+        }
+    }
 }

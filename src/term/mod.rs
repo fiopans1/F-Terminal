@@ -1,5 +1,6 @@
 pub mod color;
 pub mod frame;
+pub mod program_status;
 
 use alacritty_terminal::event::{Event, EventListener};
 use alacritty_terminal::grid::{Dimensions, Scroll};
@@ -12,6 +13,7 @@ use winit::event_loop::EventLoopProxy;
 use crate::event::UserEvent;
 use crate::term::color::Theme;
 use crate::term::frame::Frame;
+use crate::term::program_status::{ProgramNotification, ProgramRecord, ProgramStatus};
 use crate::workspace::PaneId;
 
 /// Forwards VT state-machine events to the UI thread, tagged with the pane
@@ -75,6 +77,7 @@ impl Dimensions for GridSize {
 pub struct Terminal {
     term: Term<EventProxy>,
     parser: vte::ansi::Processor,
+    program_status: ProgramStatus,
     size: GridSize,
     scrollback_limit: usize,
 }
@@ -95,6 +98,7 @@ impl Terminal {
         Self {
             term,
             parser: vte::ansi::Processor::new(),
+            program_status: ProgramStatus::default(),
             size,
             scrollback_limit,
         }
@@ -110,7 +114,32 @@ impl Terminal {
     }
 
     pub fn feed(&mut self, bytes: &[u8]) {
+        self.program_status.feed(bytes);
         self.parser.advance(&mut self.term, bytes);
+    }
+
+    pub fn program_status_revision(&self) -> u64 {
+        self.program_status.revision()
+    }
+
+    pub fn has_program_status(&self) -> bool {
+        self.program_status.has_records()
+    }
+
+    pub fn program_status(&self) -> Vec<ProgramRecord> {
+        self.program_status.snapshot()
+    }
+
+    pub fn clear_active_program_status(&mut self) {
+        self.program_status.clear_active();
+    }
+
+    pub fn take_program_status_replies(&mut self) -> Vec<String> {
+        self.program_status.take_replies()
+    }
+
+    pub fn take_program_notifications(&mut self) -> Vec<ProgramNotification> {
+        self.program_status.take_notifications()
     }
 
     pub fn resize(&mut self, size: GridSize) {
