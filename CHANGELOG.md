@@ -14,20 +14,24 @@ usa [Versionado Semántico](https://semver.org/lang/es/).
   F-Terminal, estados en tiempo real vía `OSC 7501`, watcher de procesos y
   soporte opcional de hooks de Junie.
 - Agent Mode permite forzar un escaneo inmediato con `R`/`F5` o el botón
-  **REFRESH**, y terminar el proceso seleccionado con `X`/`Supr` o **KILL PID**
-  (confirmación en dos pasos; `SIGTERM` y después `SIGKILL` si es necesario).
+  **Actualizar**, y terminar el proceso seleccionado con `X`/`Supr` o
+  **Matar PID** (confirmación en dos pasos; `SIGTERM` y después `SIGKILL` si es
+  necesario).
 - Zoom del terminal con `Cmd/Ctrl+=`, `Cmd/Ctrl+-` y `Cmd/Ctrl+0`; el valor se
   guarda en `font_size` y se aplica sin reiniciar.
 - `Shift+Enter` envía `LF` para insertar saltos de línea en agentes como
   OpenCode, Claude Code y Codex; `Ctrl+Insert`/`Shift+Insert` copian y pegan.
+- Rediseño de las ventanas Git, Code Review y Agentes: carcasa común, escala
+  tipográfica legible, botones y foco consistentes, scrollbars, estados vacíos
+  accionables y copy en español. El tema Foundry estrena la nueva identidad.
 - El explorador de archivos tiene un botón para subir al directorio padre y
   mantiene la navegación manual hasta que cambie el cwd del pane.
 - Nueva sección `[agents]` en `config.toml` (`enabled`, `show_external`,
   `poll_interval_ms`).
 - `Cmd+Shift+S` / `Ctrl+Shift+S` abre `config.toml` en el editor integrado; el
   elemento de menú «Abrir configuración…» hace lo mismo.
-- Temas: Catppuccin Mocha, Dracula, Nord, Gruvbox Dark, One Dark, Solarized
-  Dark, GitHub Dark y Kanagawa, además de Tokyo Night.
+- Temas: Foundry, Catppuccin Mocha, Dracula, Nord, Gruvbox Dark, One Dark,
+  Solarized Dark, GitHub Dark y Kanagawa, además de Tokyo Night.
 - `padding_left` añade un margen izquierdo configurable al texto del terminal
   sin recuperar el marco en los demás lados.
 - El editor resalta `.jsx`, `.mjs`, `.cjs`, `.ts` y `.tsx` con la gramática de
@@ -56,8 +60,8 @@ usa [Versionado Semántico](https://semver.org/lang/es/).
 - Integración de firma con SignPath Foundation preparada y desactivada hasta
   configurar sus secretos y variables. Incluye política de firma
   (`CODE_SIGNING.md`) y artifact configuration de ejemplo.
-- GitHub Dark es ahora el tema por defecto; la plantilla documenta todas las
-  paletas disponibles.
+- Foundry es ahora el tema por defecto: grafito frío con acento de latón, una
+  identidad propia para F-Terminal; la plantilla documenta todas las paletas.
 - El gestor Git usa `Cmd+Shift+M` / `Ctrl+Shift+M`; `Ctrl+Shift+G` queda libre
   porque Windows lo intercepta para la grabación de la Xbox Game Bar.
 - Las burbujas de rama y de `+N/-N` del footer son más grandes, con borde,
@@ -69,7 +73,7 @@ usa [Versionado Semántico](https://semver.org/lang/es/).
 ### Fixed
 
 - Los títulos de ventana que solo contienen una ruta (ConPTY/cmd.exe en
-  Windows) se ignoran; la sesión vuelve a mostrar **New session** en vez del
+  Windows) se ignoran; la sesión vuelve a mostrar **Nueva sesión** en vez del
   directorio actual.
 - El watcher de procesos de Agent Mode se reinicia si no responde en 8 segundos
   o si su hilo terminó, en lugar de quedarse sin actualizar la lista.

@@ -37,6 +37,7 @@ impl Theme {
     pub fn from_name(name: &str) -> Option<Self> {
         let normalized = name.trim().to_ascii_lowercase().replace(['_', ' '], "-");
         match normalized.as_str() {
+            "foundry" | "foundry-dark" | "fundicion" | "fundición" => Some(Self::foundry()),
             "tokyo-night" | "tokyo" => Some(Self::tokyo_night()),
             "catppuccin-mocha" | "catppuccin" => Some(Self::catppuccin_mocha()),
             "dracula" => Some(Self::dracula()),
@@ -47,6 +48,49 @@ impl Theme {
             "github-dark" | "github" => Some(Self::github_dark()),
             "kanagawa" => Some(Self::kanagawa()),
             _ => None,
+        }
+    }
+
+    /// F-Terminal's own palette: dark foundry iron with a warm brass accent.
+    /// The accent is deliberately warm against the cool graphite surfaces so
+    /// the app does not read as another blue-on-black IDE theme.
+    pub const fn foundry() -> Self {
+        Self {
+            background: rgb(0x10, 0x17, 0x19),
+            foreground: rgb(0xd6, 0xe2, 0xe2),
+            cursor: rgb(0xe5, 0xb5, 0x67),
+            selection: rgb(0x28, 0x48, 0x4b),
+            ansi: [
+                rgb(0x1b, 0x26, 0x29),
+                rgb(0xd9, 0x7b, 0x73),
+                rgb(0x8f, 0xbf, 0x9f),
+                rgb(0xd8, 0xb3, 0x6a),
+                rgb(0x6f, 0xa8, 0xb8),
+                rgb(0xb5, 0x8a, 0xa5),
+                rgb(0x7f, 0xb5, 0xa8),
+                rgb(0xc9, 0xd6, 0xd6),
+                rgb(0x4b, 0x5d, 0x60),
+                rgb(0xe5, 0x8c, 0x82),
+                rgb(0xa6, 0xd1, 0xaf),
+                rgb(0xe8, 0xc7, 0x7e),
+                rgb(0x85, 0xbc, 0xcb),
+                rgb(0xc7, 0x9a, 0xb7),
+                rgb(0x96, 0xc9, 0xbc),
+                rgb(0xf0, 0xf6, 0xf6),
+            ],
+            sidebar_background: rgb(0x0c, 0x12, 0x14),
+            sidebar_hover: rgb(0x17, 0x21, 0x24),
+            sidebar_active: rgb(0x22, 0x31, 0x34),
+            sidebar_text: rgb(0xd6, 0xe2, 0xe2),
+            sidebar_text_dim: rgb(0x8f, 0xa3, 0xa4),
+            accent: rgb(0xdf, 0xa8, 0x61),
+            border: rgb(0x26, 0x36, 0x3a),
+            diff_add_background: rgb(0x14, 0x25, 0x1f),
+            diff_remove_background: rgb(0x2b, 0x18, 0x18),
+            diff_add_text: rgb(0x8f, 0xbf, 0x9f),
+            diff_remove_text: rgb(0xd9, 0x7b, 0x73),
+            diff_hunk_text: rgb(0x6f, 0xa8, 0xb8),
+            diff_meta_text: rgb(0x8f, 0xa3, 0xa4),
         }
     }
 
@@ -544,6 +588,10 @@ mod tests {
     #[test]
     fn resolves_theme_aliases() {
         assert_eq!(
+            Theme::from_name("foundry").map(|theme| theme.background),
+            Some(Theme::foundry().background)
+        );
+        assert_eq!(
             Theme::from_name("tokyo_night").map(|theme| theme.background),
             Some(Theme::tokyo_night().background)
         );
@@ -564,6 +612,7 @@ mod tests {
     #[test]
     fn themes_have_distinct_backgrounds_and_complete_ansi_palettes() {
         let themes = [
+            Theme::foundry(),
             Theme::tokyo_night(),
             Theme::catppuccin_mocha(),
             Theme::dracula(),

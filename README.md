@@ -56,6 +56,8 @@ welcome.
 - Terminal real con PTY (Unix) y **ConPTY** (Windows), sin emulación de shell.
 - Render GPU con `wgpu` y texto con `glyphon`/`cosmic-text`.
 - Sidebar con árbol de sesiones y panes, más explorador de archivos.
+- Identidad visual **Foundry** (grafito frío y latón cálido) y carcasa común en
+  Git, Code Review y Agentes: cabecera, tipografía, foco y estados vacíos.
 - Sesiones plegables con panes hijos y splits derecha/abajo; divisores
   arrastrables.
 - Cada pane tiene su propio shell, cwd, scrollback y estado VT.
@@ -428,7 +430,7 @@ cambios se aplican al reiniciar la app.
 El fichero se lee al arrancar: reinicia la app para aplicar cambios. Si el TOML
 no se puede leer o parsear, se usan los valores por defecto y se escribe un
 aviso en el log. Los números fuera de rango se recortan; un `render.mode`
-desconocido cae a `isolated` y un tema desconocido a GitHub Dark.
+desconocido cae a `isolated` y un tema desconocido a Foundry.
 
 ### Ejemplo completo
 
@@ -448,7 +450,7 @@ ui_font_size = 12.5
 # El valor por defecto depende de la plataforma:
 # false en macOS, true en Linux/Windows.
 option_as_meta = false
-theme = "github-dark"
+theme = "foundry"
 
 [terminal]
 # Historial por pane en la sesión activa.
@@ -496,13 +498,27 @@ defecto), para que el texto no quede pegado a la sidebar. El resto de lados
 sigue sin marco; `padding` sigue controlando un inset en los cuatro lados si se
 quiere.
 
+### Identidad visual
+
+**Foundry** es la identidad propia de F-Terminal: superficies de grafito con un
+punto de verde petróleo y un acento cálido de latón. El latón marca la acción
+principal, el foco y la rama actual; el verde petróleo queda para el trabajo en
+curso y los estados informativos. No es una variante de GitHub Dark: el
+contraste cálido/frío busca que la app se reconozca de un vistazo.
+
+La carcasa de las ventanas Git, Code Review y Agentes comparte alturas
+(cabecera de 56 px, footer de 28 px), una escala tipográfica mínima de 11 px,
+botones de 30 px, foco visible y copy en español. Los estados vacíos explican
+qué hacer a continuación y las listas largas muestran scrollbar.
+
 ### Temas
 
 `theme` selecciona la paleta completa (terminal, sidebar, diffs y Code Review):
 
 | Valor | Tema |
 |---|---|
-| `github-dark` (por defecto) | GitHub Dark |
+| `foundry` (por defecto) | Foundry |
+| `github-dark` | GitHub Dark |
 | `tokyo-night` | Tokyo Night |
 | `catppuccin-mocha` | Catppuccin Mocha |
 | `dracula` | Dracula |
@@ -513,7 +529,7 @@ quiere.
 | `kanagawa` | Kanagawa |
 
 Se aceptan guiones o guiones bajos y algunos alias (`gruvbox`, `onedark`,
-`solarized`, `github`). Un nombre desconocido cae en GitHub Dark y se escribe un
+`solarized`, `github`). Un nombre desconocido cae en Foundry y se escribe un
 aviso en el log.
 
 ### Prefijo `user@host`
@@ -648,8 +664,8 @@ En fish se omite el historial inline porque fish ya trae autosugerencias.
 
 La sidebar tiene dos modos:
 
-- **SESSIONS**: árbol de sesiones/workspaces y sus panes.
-- **FILES**: explorador del cwd del pane enfocado.
+- **Sesiones**: árbol de sesiones/workspaces y sus panes.
+- **Archivos**: explorador del cwd del pane enfocado.
 
 ### Árbol de sesiones
 
@@ -660,7 +676,7 @@ Cada sesión es un workspace con uno o más panes:
   hijos, con conectores `├`/`└`.
 - El padre muestra un chevron `▾`/`▸` para plegar o desplegar sus hijos y un
   contador de panes.
-- El título inicial de una sesión es **New session**. Cuando el shell envía su
+- El título inicial de una sesión es **Nueva sesión**. Cuando el shell envía su
   título por OSC, el padre se actualiza.
 - Los títulos que son solo una ruta (por ejemplo, el directorio actual que
   reporta ConPTY/cmd.exe en Windows) se ignoran para no ensuciar la sidebar.
@@ -675,8 +691,8 @@ Cada sesión es un workspace con uno o más panes:
 Acciones:
 
 - `+` crea una nueva sesión con el shell por defecto.
-- `▾` abre el selector de perfiles; solo aparece en SESSIONS.
-- `F` cambia a FILES; `T` vuelve a SESSIONS.
+- `▾` abre el selector de perfiles; solo aparece en Sesiones.
+- `F` cambia a Archivos; `T` vuelve a Sesiones.
 - `«` colapsa la sidebar; el rail `»` la recupera.
 - Rueda del ratón para hacer scroll si hay muchas sesiones o panes.
 
@@ -770,18 +786,18 @@ Se abre con `Cmd+Shift+R` / `Ctrl+Shift+R` o desde el menú de macOS.
 
 Es una **ventana nativa independiente**: la terminal principal sigue usable.
 
-### Pestaña LOCAL
+### Pestaña Locales
 
-- **Working changes**: cambios locales, incluidos untracked.
-- **Branch vs main/master**: diff de la rama actual contra la base.
+- **Cambios locales**: cambios del árbol de trabajo, incluidos untracked.
+- **Rama contra main/master**: diff de la rama actual contra la base.
 - **Últimos 15 commits**.
 - `↑↓` para mover, `Enter` o clic para abrir, `R` para refrescar.
 
-### Pestaña PULL / MERGE REQUESTS
+### Pestaña Pull requests / Merge requests
 
 - Detecta el proveedor a partir del remoto `origin`:
-  - **GitHub**: la pestaña se llama **PULL REQUESTS** y usa `#123`.
-  - **GitLab**: la pestaña se llama **MERGE REQUESTS** y usa `!123`.
+  - **GitHub**: la pestaña se llama **Pull requests** y usa `#123`.
+  - **GitLab**: la pestaña se llama **Merge requests** y usa `!123`.
 - Lista los cambios abiertos del remoto.
 - Carga paginada de hasta 1.000 PRs/MRs.
 - Buscador por número, título, autor o rama; admite varios términos separados
@@ -941,8 +957,9 @@ En la pestaña **REFS**:
 
 ## Agent Mode
 
-Se abre con `Cmd+Shift+A` / `Ctrl+Shift+A` o desde el menú de macOS. Es una
-**ventana independiente** que puede estar abierta mientras usas la terminal,
+Se abre con `Cmd+Shift+A` / `Ctrl+Shift+A` o desde el menú de macOS. La ventana
+y el menú usan el nombre **Agentes**; Agent Mode es el nombre de la función. Es
+una **ventana independiente** que puede estar abierta mientras usas la terminal,
 Code Review o el gestor Git.
 
 Muestra todos los agentes detectados, tanto los que corren dentro de
@@ -959,12 +976,12 @@ modo lectura). La lista se ordena por prioridad:
 
 Estados:
 
-- **Working**: el agente está generando o ejecutando herramientas.
-- **Needs permission / Needs answer / Needs login**: el agente está bloqueado.
-- **Needs attention**: notificación o campana sin estado estructurado.
-- **Done / Error**: el turno terminó; el aviso desaparece al enfocar el pane.
-- **Idle**: el agente sigue vivo, esperando el siguiente prompt.
-- **Running** (externo): proceso detectado, sin estado en tiempo real.
+- **Trabajando**: el agente está generando o ejecutando herramientas.
+- **Pide permiso / Pide respuesta / Pide login**: el agente está bloqueado.
+- **Requiere atención**: notificación o campana sin estado estructurado.
+- **Terminado / Error**: el turno terminó; el aviso desaparece al enfocar el pane.
+- **Inactivo**: el agente sigue vivo, esperando el siguiente prompt.
+- **En ejecución** (externo): proceso detectado, sin estado en tiempo real.
 
 ### Detección
 
@@ -1054,7 +1071,7 @@ Cambia `working` por `done`, `error` o `end` en cada hook.
 
 No configures un hook `PermissionRequest` solo para registrar el estado: en
 Junie, un hook de permiso que termina con éxito sin decisión **autoaprueba** la
-acción. Los permisos pendientes se muestran como **Needs attention** mediante
+acción. Los permisos pendientes se muestran como **Requiere atención** mediante
 la campana, el título y la actividad del terminal.
 
 ### Configuración
@@ -1099,10 +1116,10 @@ poll_interval_ms = 2000
 | Cambiar de terminal | `Cmd+Shift+[` / `]`, `Cmd+1..9`, `Ctrl+Tab` |
 | Mover foco entre panes | `Cmd+Alt+flechas`, `Cmd+\`` |
 | Mostrar/ocultar sidebar | `Cmd+B` |
-| Cambiar SESSIONS / FILES | `Cmd+Shift+F` |
+| Cambiar Sesiones / Archivos | `Cmd+Shift+F` |
 | Abrir Code Review | `Cmd+Shift+R` |
 | Abrir gestor Git | `Cmd+Shift+M` |
-| Abrir Agent Mode | `Cmd+Shift+A` |
+| Abrir Agentes | `Cmd+Shift+A` |
 | Abrir ajustes (`config.toml`) | `Cmd+Shift+S` |
 | Abrir explorador | `Cmd+Shift+O` |
 | Guardar en el editor | `Cmd+S` |
@@ -1122,10 +1139,10 @@ poll_interval_ms = 2000
 | Cambiar de terminal | `Ctrl+Tab`, `Ctrl+Shift+Tab`, `Ctrl+Shift+[ / ]` |
 | Mover foco entre panes | `Ctrl+Alt+flechas`, `Ctrl+Shift+\`` |
 | Mostrar/ocultar sidebar | `Ctrl+Shift+B` |
-| Cambiar SESSIONS / FILES | `Ctrl+Shift+F` |
+| Cambiar Sesiones / Archivos | `Ctrl+Shift+F` |
 | Abrir Code Review | `Ctrl+Shift+R` |
 | Abrir gestor Git | `Ctrl+Shift+M` |
-| Abrir Agent Mode | `Ctrl+Shift+A` |
+| Abrir Agentes | `Ctrl+Shift+A` |
 | Abrir ajustes (`config.toml`) | `Ctrl+Shift+S` |
 | Abrir explorador | `Ctrl+Shift+O` |
 | Guardar en el editor | `Ctrl+S` |

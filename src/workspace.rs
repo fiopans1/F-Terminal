@@ -275,8 +275,8 @@ impl Workspace {
 
         self.tabs.push(Tab {
             id: tab_id,
-            title: "New session".to_owned(),
-            default_title: "New session".to_owned(),
+            title: "Nueva sesión".to_owned(),
+            default_title: "Nueva sesión".to_owned(),
             layout: LayoutNode::Leaf(pane_id),
             focused: pane_id,
             panes: HashMap::new(),

@@ -48,8 +48,8 @@ pub fn diff(remote: &RemoteInfo, id: u64, tokens: &ForgeTokens) -> Result<String
 }
 
 pub fn parse_list(body: &str) -> Result<Vec<RemoteChange>> {
-    let pulls: Vec<GithubPull> =
-        serde_json::from_str(body).context("failed to parse the GitHub pull request list")?;
+    let pulls: Vec<GithubPull> = serde_json::from_str(body)
+        .context("no se pudo interpretar la lista de pull requests de GitHub")?;
     Ok(pulls.into_iter().map(RemoteChange::from).collect())
 }
 

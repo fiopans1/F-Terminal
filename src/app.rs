@@ -15,7 +15,7 @@ use winit::dpi::{LogicalSize, PhysicalPosition, PhysicalSize};
 use winit::event::{ElementState, Ime, MouseButton, MouseScrollDelta, WindowEvent};
 use winit::event_loop::{ActiveEventLoop, ControlFlow, EventLoopProxy};
 use winit::keyboard::{Key, KeyCode, ModifiersState, NamedKey, PhysicalKey};
-use winit::window::{Window, WindowId};
+use winit::window::{Theme as WindowTheme, Window, WindowId};
 
 use crate::agent_window::AgentWindow;
 use crate::agents::{
@@ -48,6 +48,7 @@ use crate::sidebar::{
 use crate::term::color::{Rgb, Theme, to_linear};
 use crate::term::frame::{Background, Cursor, CursorShapeKind, Frame, Row, Run};
 use crate::term::program_status::{BlockKind, ProgramRecord, ProgramState};
+use crate::ui;
 use crate::workspace::{CloseOutcome, Pane, PaneId, SplitDirection, TabId, Workspace};
 
 pub struct App {
@@ -139,7 +140,8 @@ impl App {
         let attributes = Window::default_attributes()
             .with_title("Code Review — F-Terminal")
             .with_inner_size(LogicalSize::new(1280.0, 820.0))
-            .with_min_inner_size(LogicalSize::new(800.0, 500.0))
+            .with_min_inner_size(LogicalSize::new(720.0, 480.0))
+            .with_theme(Some(WindowTheme::Dark))
             .with_visible(false);
 
         let window = match event_loop.create_window(attributes) {
@@ -176,7 +178,8 @@ impl App {
         let attributes = Window::default_attributes()
             .with_title("Git — F-Terminal")
             .with_inner_size(LogicalSize::new(1280.0, 820.0))
-            .with_min_inner_size(LogicalSize::new(900.0, 560.0))
+            .with_min_inner_size(LogicalSize::new(820.0, 520.0))
+            .with_theme(Some(WindowTheme::Dark))
             .with_visible(false);
 
         let window = match event_loop.create_window(attributes) {
@@ -204,9 +207,10 @@ impl App {
         }
 
         let attributes = Window::default_attributes()
-            .with_title("Agent Mode — F-Terminal")
+            .with_title("Agentes — F-Terminal")
             .with_inner_size(LogicalSize::new(980.0, 640.0))
-            .with_min_inner_size(LogicalSize::new(720.0, 460.0))
+            .with_min_inner_size(LogicalSize::new(640.0, 420.0))
+            .with_theme(Some(WindowTheme::Dark))
             .with_visible(false);
 
         let window = match event_loop.create_window(attributes) {
@@ -925,6 +929,7 @@ impl WindowState {
             .with_title("F-Terminal")
             .with_inner_size(LogicalSize::new(1100.0, 700.0))
             .with_min_inner_size(LogicalSize::new(520.0, 260.0))
+            .with_theme(Some(WindowTheme::Dark))
             .with_visible(false);
         let window = Arc::new(event_loop.create_window(attributes)?);
         window.set_ime_allowed(true);
@@ -1853,7 +1858,7 @@ impl WindowState {
             && menu.pane == pane_id
         {
             menu.loading = false;
-            menu.error = Some("Could not start the Git branch reader".to_owned());
+            menu.error = Some("No se pudo leer las ramas de Git".to_owned());
         }
     }
 
@@ -1898,7 +1903,7 @@ impl WindowState {
         }
 
         let name = branch.name.clone();
-        menu.busy = Some(format!("Checking out {name}…"));
+        menu.busy = Some(format!("Cambiando a {name}…"));
         menu.error = None;
         let pane_id = menu.pane;
         let cwd = menu.cwd.clone();
@@ -1929,7 +1934,7 @@ impl WindowState {
             && menu.pane == pane_id
         {
             menu.busy = None;
-            menu.error = Some("Could not start the Git checkout".to_owned());
+            menu.error = Some("No se pudo iniciar el checkout de Git".to_owned());
         }
         self.window.request_redraw();
     }
@@ -2027,7 +2032,7 @@ impl WindowState {
         let proxy = self.proxy.clone();
         let thread_cwd = cwd.clone();
         let summary = ReviewSummary {
-            title: "Working changes".to_owned(),
+            title: "Cambios locales".to_owned(),
             subtitle: String::new(),
             kind: ReviewKind::Working,
         };
@@ -2050,7 +2055,7 @@ impl WindowState {
             && diff.generation == generation
         {
             diff.loading = false;
-            diff.error = Some("Could not start the diff reader".to_owned());
+            diff.error = Some("No se pudo iniciar la lectura del diff".to_owned());
         }
     }
 
@@ -4891,7 +4896,7 @@ impl WindowState {
         let scale = self.renderer.scale_factor() as f32;
         let metrics = self.renderer.cell_metrics();
         let ui_font_size = self.renderer.physical(config.ui_font_size);
-        let header_font_size = (ui_font_size * 0.82).max(9.0);
+        let header_font_size = (ui_font_size * 0.95).max(10.0);
 
         self.refresh_completion(config);
 
@@ -5115,13 +5120,13 @@ impl WindowState {
                     .as_ref()
                     .map(|detail| {
                         format!(
-                            "WORKING DIFF · {} files · +{} -{}",
+                            "Cambios locales · {} archivos · +{} −{}",
                             detail.files.len(),
                             detail.additions,
                             detail.deletions
                         )
                     })
-                    .unwrap_or_else(|| "WORKING DIFF".to_owned())
+                    .unwrap_or_else(|| "Cambios locales".to_owned())
             } else {
                 self.editor
                     .as_ref()
@@ -5422,11 +5427,11 @@ impl WindowState {
 
         let header_line_height = header_font_size * 1.35;
         let title = if layout.profile_menu {
-            "NEW TERMINAL"
+            "Nueva terminal"
         } else {
             match layout.mode {
-                SidebarMode::Terminals => "SESSIONS",
-                SidebarMode::Files => "FILES",
+                SidebarMode::Terminals => "Sesiones",
+                SidebarMode::Files => "Archivos",
             }
         };
         labels.push(Label {
@@ -5573,7 +5578,7 @@ impl WindowState {
 
             if self.shells.profiles.is_empty() {
                 labels.push(Label {
-                    text: "No shells detected".into(),
+                    text: "No se detectaron shells".into(),
                     x: layout.list.x + layout.padding,
                     y: layout.list.y + layout.padding,
                     width: (layout.list.width - layout.padding * 2.0).max(1.0),
@@ -6126,8 +6131,8 @@ fn branch_menu_layout(
     ui_font_size: f32,
 ) -> BranchMenuLayout {
     let padding = (6.0 * scale).max(4.0);
-    let header_height = (ui_font_size * 1.5).max(16.0 * scale);
-    let row_height = (ui_font_size * 1.75).max(20.0 * scale);
+    let header_height = (ui_font_size * 1.75).max(22.0 * scale);
+    let row_height = (ui_font_size * 1.75).max(24.0 * scale);
     let message_height = if menu.error.is_some() || menu.busy.is_some() {
         row_height
     } else {
@@ -6230,7 +6235,7 @@ fn build_diff_rows(detail: &ReviewDetail) -> Vec<DiffRow> {
         if file.binary {
             rows.push(DiffRow {
                 kind: DiffRowKind::Meta,
-                text: "Binary file".to_owned(),
+                text: "Archivo binario".to_owned(),
             });
             continue;
         }
@@ -6290,7 +6295,7 @@ fn build_diff_frame(
         } else if let Some(error) = &diff.error {
             (error.replace('\n', " "), theme.diff_remove_text)
         } else {
-            ("No changes".to_owned(), theme.sidebar_text_dim)
+            ("Sin cambios".to_owned(), theme.sidebar_text_dim)
         };
         let text: String = text.chars().take(cols).collect();
         let mut row = Row::default();
@@ -6404,26 +6409,26 @@ fn build_branch_menu(
         to_linear(theme.sidebar_background, 1.0),
     ));
 
+    let tokens = ui::Tokens::new(ui_font_size, scale);
     let padding = (6.0 * scale).max(4.0);
-    let header_font = (ui_font_size * 0.78).max(8.0 * scale);
     labels.push(Label {
-        text: "BRANCHES".into(),
+        text: "Ramas".into(),
         x: rect.x + padding,
         y: rect.y + padding,
         width: (rect.width - padding * 2.0).max(1.0),
-        font_size: header_font,
+        font_size: tokens.caption,
         color: theme.sidebar_text_dim,
         bold: true,
     });
 
-    let font = (ui_font_size * 0.88).max(9.0 * scale);
+    let font = tokens.small;
     let line = font * 1.35;
 
     if menu.branches.is_empty() {
         let text = if menu.loading {
-            "Loading branches…"
+            "Cargando ramas…"
         } else {
-            "No local branches"
+            "Sin ramas locales"
         };
         labels.push(Label {
             text: text.into(),
@@ -6822,7 +6827,7 @@ fn push_diff_icon(quads: &mut Vec<Quad>, x: f32, y: f32, size: f32, scale: f32, 
 
 fn agent_state_color(theme: &Theme, state: &AgentState) -> Rgb {
     match state {
-        AgentState::Working => theme.accent,
+        AgentState::Working => theme.ansi[6],
         AgentState::Blocked(_) | AgentState::Attention => theme.ansi[3],
         AgentState::Error => theme.ansi[1],
         AgentState::Done => theme.ansi[2],
@@ -7307,8 +7312,8 @@ mod tests {
         }
 
         assert_eq!(
-            clean_pty_title("New session", true).as_deref(),
-            Some("New session")
+            clean_pty_title("Nueva sesión", true).as_deref(),
+            Some("Nueva sesión")
         );
         assert_eq!(
             clean_pty_title("  vim README.md  ", true).as_deref(),
@@ -7463,7 +7468,7 @@ mod tests {
             branches,
             selected: 1,
             loading: false,
-            error: Some("checkout failed".into()),
+            error: Some("falló el checkout".into()),
             busy: None,
         };
         let theme = Theme::tokyo_night();
@@ -7487,12 +7492,12 @@ mod tests {
         );
 
         assert!(!quads.is_empty());
-        assert!(labels.iter().any(|label| label.text == "BRANCHES"));
+        assert!(labels.iter().any(|label| label.text == "Ramas"));
         assert!(labels.iter().any(|label| label.text == "branch-0"));
-        assert!(labels.iter().any(|label| label.text == "checkout failed"));
+        assert!(labels.iter().any(|label| label.text == "falló el checkout"));
 
         menu.error = None;
-        menu.busy = Some("Checking out branch-1…".into());
+        menu.busy = Some("Cambiando a branch-1…".into());
         labels.clear();
         build_branch_menu(
             &menu,
@@ -7510,7 +7515,7 @@ mod tests {
         assert!(
             labels
                 .iter()
-                .any(|label| label.text == "Checking out branch-1…")
+                .any(|label| label.text == "Cambiando a branch-1…")
         );
     }
 
@@ -7518,7 +7523,7 @@ mod tests {
     fn diff_rows_format_files_and_line_numbers() {
         let detail = ReviewDetail {
             summary: ReviewSummary {
-                title: "Working changes".to_owned(),
+                title: "Cambios locales".to_owned(),
                 subtitle: String::new(),
                 kind: ReviewKind::Working,
             },

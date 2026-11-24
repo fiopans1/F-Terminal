@@ -46,10 +46,10 @@ pub fn repository_root(start: &Path) -> Result<PathBuf> {
     };
 
     let output = command::run(start, &["rev-parse", "--show-toplevel"])
-        .with_context(|| format!("failed to inspect {}", start.display()))?;
+        .with_context(|| format!("no se pudo inspeccionar {}", start.display()))?;
     let root = output.stdout.trim();
     if root.is_empty() {
-        bail!("not a git repository: {}", start.display());
+        bail!("no es un repositorio Git: {}", start.display());
     }
     Ok(PathBuf::from(root))
 }

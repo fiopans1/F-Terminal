@@ -111,7 +111,7 @@ impl MenuState {
         let code = MenuItem::with_id("open-code", "Abrir en VS Code", true, None);
         let review = MenuItem::with_id("code-review", "Code Review", true, None);
         let git = MenuItem::with_id("git-manager", "Git", true, None);
-        let agent = MenuItem::with_id("agent-mode", "Agent Mode", true, None);
+        let agent = MenuItem::with_id("agent-mode", "Agentes", true, None);
         let settings = MenuItem::with_id("open-settings", "Abrir configuración…", true, None);
 
         let separator_one = PredefinedMenuItem::separator();

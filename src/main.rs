@@ -25,6 +25,7 @@ mod review_window;
 mod shell;
 mod sidebar;
 mod term;
+mod ui;
 mod workspace;
 
 use winit::event_loop::{ControlFlow, EventLoop};

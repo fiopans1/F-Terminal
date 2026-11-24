@@ -100,7 +100,7 @@ impl Default for Config {
             // On macOS Option is used for characters like @ and accents on
             // non-US layouts, so keep composition enabled by default there.
             option_as_meta: cfg!(not(target_os = "macos")),
-            theme: Theme::github_dark(),
+            theme: Theme::foundry(),
             scrollback_lines: 6_000,
             hidden_scrollback_lines: 3_000,
             scrollback_budget_mb: 0,
@@ -277,7 +277,7 @@ impl FileConfig {
             if let Some(palette) = Theme::from_name(&normalized) {
                 config.theme = palette;
             } else {
-                log::warn!("unknown theme {theme:?}; using github-dark");
+                log::warn!("unknown theme {theme:?}; using foundry");
             }
         }
 
@@ -508,9 +508,9 @@ show_user_in_prompt = true
 sidebar_width = 210.0
 ui_font_size = 12.5
 option_as_meta = {option_as_meta}
-# Temas: tokyo-night, catppuccin-mocha, dracula, nord, gruvbox-dark,
+# Temas: foundry, tokyo-night, catppuccin-mocha, dracula, nord, gruvbox-dark,
 # one-dark, solarized-dark, github-dark, kanagawa.
-theme = "github-dark"
+theme = "foundry"
 
 [terminal]
 # History per pane in the active session.
@@ -568,6 +568,7 @@ mod tests {
         assert_eq!(config.render_mode, RenderMode::Shared);
         assert!(config.completions);
         assert_eq!(config.completion_min_chars, 2);
+        assert_eq!(config.theme.background, Theme::foundry().background);
         assert!(config.agents.enabled);
         assert!(config.agents.show_external);
         assert_eq!(config.agents.poll_interval_ms, 2_000);

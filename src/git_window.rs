@@ -20,6 +20,7 @@ use crate::render::scene::{Label, PaneLayer, Scene};
 use crate::review::{FileStatus, ReviewDetail, ReviewKind, ReviewSummary};
 use crate::term::color::{Theme, to_linear};
 use crate::term::frame::Frame;
+use crate::ui::{self, ButtonKind, ButtonSpec, Tokens};
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum LeftTab {
@@ -136,15 +137,9 @@ enum RefKey {
 struct DrawContext<'a> {
     theme: &'a Theme,
     scale: f32,
-    ui_font: f32,
     metrics: crate::render::CellMetrics,
-}
-
-#[derive(Clone, Copy)]
-struct ButtonStyle<'a> {
-    theme: &'a Theme,
-    scale: f32,
-    font_size: f32,
+    tokens: Tokens,
+    cursor: (f32, f32),
 }
 
 struct Layout {
@@ -161,6 +156,7 @@ struct Layout {
     change_rows: Vec<(ChangeRowKind, Rect)>,
     ref_rows: Vec<(RefRowKind, Rect)>,
     history_rows: Vec<(usize, Rect)>,
+    history_area: Rect,
     detail_header: Rect,
     file_list: Option<Rect>,
     file_rows: Vec<(usize, Rect)>,
@@ -475,7 +471,7 @@ impl GitWindow {
             return;
         }
 
-        let was_commit = self.busy.as_deref() == Some("Committing");
+        let was_commit = self.busy.as_deref() == Some("Confirmando");
         self.busy = None;
 
         match result {
@@ -518,7 +514,7 @@ impl GitWindow {
 
         if spawned.is_err() {
             self.loading = false;
-            self.error = Some("failed to start the git snapshot loader".to_owned());
+            self.error = Some("No se pudo iniciar la lectura del repositorio Git".to_owned());
         }
         self.window.request_redraw();
     }
@@ -560,7 +556,7 @@ impl GitWindow {
         let target = self.detail_target_for_selection();
         let summary = match &target {
             DetailTarget::Working => ReviewSummary {
-                title: "Working tree".to_owned(),
+                title: "Árbol de trabajo".to_owned(),
                 subtitle: String::new(),
                 kind: ReviewKind::Working,
             },
@@ -607,7 +603,7 @@ impl GitWindow {
 
         if spawned.is_err() {
             self.detail_loading = false;
-            self.detail_error = Some("failed to start the diff loader".to_owned());
+            self.detail_error = Some("No se pudo iniciar la lectura del diff".to_owned());
         }
         self.window.request_redraw();
     }
@@ -642,7 +638,7 @@ impl GitWindow {
         if spawned.is_err() {
             self.busy = None;
             self.toast = Some((
-                "failed to start the git operation".to_owned(),
+                "No se pudo iniciar la operación de Git".to_owned(),
                 true,
                 Instant::now(),
             ));
@@ -1461,7 +1457,7 @@ impl GitWindow {
                             self.run_operation(GitAction::Pull);
                         } else {
                             self.toast = Some((
-                                "No upstream configured for this branch".to_owned(),
+                                "La rama no tiene upstream configurado".to_owned(),
                                 true,
                                 Instant::now(),
                             ));
@@ -1719,11 +1715,11 @@ impl GitWindow {
         let height = size.height.max(1) as f32;
         let scale = self.renderer.scale_factor() as f32;
         let metrics = self.renderer.cell_metrics();
-        let padding = (12.0 * scale).round();
+        let padding = ui::px(ui::GUTTER, scale);
 
-        let header = Rect::new(0.0, 0.0, width, (54.0 * scale).round());
-        let footer_height = (24.0 * scale).round();
-        let commit_height = (76.0 * scale).round();
+        let header = Rect::new(0.0, 0.0, width, ui::px(ui::HEADER_HEIGHT, scale));
+        let footer_height = ui::px(ui::FOOTER_HEIGHT, scale);
+        let commit_height = ui::px(84.0, scale);
         let footer = Rect::new(0.0, (height - footer_height).max(0.0), width, footer_height);
         let commit_panel = Rect::new(
             0.0,
@@ -1738,11 +1734,13 @@ impl GitWindow {
             (commit_panel.y - header.bottom()).max(1.0),
         );
 
-        let left_width = (300.0 * scale).min(body.width * 0.34).max(240.0 * scale);
+        let left_max = (body.width * 0.32).max(ui::px(220.0, scale));
+        let left_min = ui::px(250.0, scale).min(left_max);
+        let left_width = ui::px(300.0, scale).clamp(left_min, left_max);
         let left = Rect::new(body.x, body.y, left_width, body.height);
-        let min_center = (260.0 * scale).min(body.width * 0.25);
+        let min_center = ui::px(220.0, scale).min(body.width * 0.25);
         let max_right = (body.width - left_width - min_center).max(1.0);
-        let right_width = (body.width * 0.40).clamp(1.0, max_right);
+        let right_width = (body.width * 0.38).clamp(ui::px(240.0, scale).min(max_right), max_right);
         let center = Rect::new(
             left.right() + 1.0,
             body.y,
@@ -1756,7 +1754,7 @@ impl GitWindow {
             body.height,
         );
 
-        let close_size = (20.0 * scale).round();
+        let close_size = ui::px(ui::CLOSE_SIZE, scale);
         let close = Rect::new(
             width - padding - close_size,
             (header.height - close_size) / 2.0,
@@ -1764,13 +1762,13 @@ impl GitWindow {
             close_size,
         );
 
-        let button_height = (26.0 * scale).round();
+        let button_height = ui::px(ui::BUTTON_HEIGHT, scale);
         let button_y = (header.height - button_height) / 2.0;
         let gap = 6.0 * scale;
-        let refresh_width = 78.0 * scale;
-        let push_width = 54.0 * scale;
-        let pull_width = 54.0 * scale;
-        let fetch_width = 60.0 * scale;
+        let refresh_width = ui::px(92.0, scale);
+        let push_width = ui::px(58.0, scale);
+        let pull_width = ui::px(58.0, scale);
+        let fetch_width = ui::px(66.0, scale);
         let refresh = Rect::new(
             close.x - gap - refresh_width,
             button_y,
@@ -1821,7 +1819,7 @@ impl GitWindow {
             (HeaderAction::Refresh, refresh, has_snapshot && !busy),
         ];
 
-        let tabs_height = (34.0 * scale).round();
+        let tabs_height = ui::px(32.0, scale);
         let half = left.width / 2.0;
         let tabs = [
             Rect::new(left.x, left.y, half, tabs_height),
@@ -1833,7 +1831,7 @@ impl GitWindow {
             ),
         ];
 
-        let actions_height = (34.0 * scale).round();
+        let actions_height = ui::px(76.0, scale);
         let actions = Rect::new(
             left.x,
             (left.bottom() - actions_height).max(left.y + tabs_height),
@@ -1851,7 +1849,7 @@ impl GitWindow {
         let (change_rows, left_visible) = self.build_change_rows(list_area, scale);
         let (ref_rows, ref_visible) = self.build_ref_rows(list_area, scale);
 
-        let center_header_height = (30.0 * scale).round();
+        let center_header_height = ui::px(34.0, scale);
         let history_list = Rect::new(
             center.x,
             center.y + center_header_height,
@@ -1864,7 +1862,7 @@ impl GitWindow {
             right.x + padding,
             right.y + padding * 0.6,
             (right.width - padding * 2.0).max(1.0),
-            (72.0 * scale).round(),
+            ui::px(76.0, scale),
         );
         let detail = self.detail.as_ref();
         let files = detail.map(|_| {
@@ -1895,12 +1893,12 @@ impl GitWindow {
             .map(|area| (area.height / metrics.height).floor().max(1.0) as usize)
             .unwrap_or(1);
 
-        let panel_button_height = (30.0 * scale).round();
+        let panel_button_height = ui::px(ui::BUTTON_HEIGHT, scale);
         let panel_button_y = commit_panel.y + (commit_panel.height - panel_button_height) / 2.0;
         let panel_gap = 6.0 * scale;
-        let commit_width = 76.0 * scale;
-        let amend_width = 70.0 * scale;
-        let stash_width = 58.0 * scale;
+        let commit_width = ui::px(84.0, scale);
+        let amend_width = ui::px(76.0, scale);
+        let stash_width = ui::px(64.0, scale);
         let commit_rect = Rect::new(
             width - padding - commit_width,
             panel_button_y,
@@ -1964,6 +1962,7 @@ impl GitWindow {
             change_rows,
             ref_rows,
             history_rows,
+            history_area: history_list,
             detail_header,
             file_list: files,
             file_rows,
@@ -1990,12 +1989,18 @@ impl GitWindow {
     fn build_left_actions(&self, area: Rect, scale: f32) -> Vec<(LeftAction, Rect, bool)> {
         let busy = self.busy.is_some();
         let mut actions = Vec::new();
-        let height = (24.0 * scale).round();
-        let y = area.y + (area.height - height) / 2.0;
-        let gap = 5.0 * scale;
-        let mut x = area.x + 8.0 * scale;
+        let height = ui::px(28.0, scale);
+        let gap = ui::px(5.0, scale);
+        let start_x = area.x + ui::px(8.0, scale);
+        let right = area.right() - ui::px(8.0, scale);
+        let mut x = start_x;
+        let mut y = area.y + (area.height - height * 2.0 - gap) / 2.0;
 
         let mut push = |action: LeftAction, label_width: f32, enabled: bool| {
+            if x + label_width > right && x > start_x {
+                x = start_x;
+                y += height + gap;
+            }
             let rect = Rect::new(x, y, label_width, height);
             actions.push((action, rect, enabled));
             x += label_width + gap;
@@ -2010,16 +2015,24 @@ impl GitWindow {
                 .snapshot
                 .as_ref()
                 .is_some_and(|snapshot| snapshot.status.staged_count() > 0);
-            push(LeftAction::StageAll, 80.0 * scale, has_unstaged && !busy);
-            push(LeftAction::UnstageAll, 88.0 * scale, has_staged && !busy);
+            push(
+                LeftAction::StageAll,
+                ui::px(100.0, scale),
+                has_unstaged && !busy,
+            );
+            push(
+                LeftAction::UnstageAll,
+                ui::px(108.0, scale),
+                has_staged && !busy,
+            );
             let has_conflicts = self.snapshot.as_ref().is_some_and(|snapshot| {
                 snapshot.status.entries.iter().any(|entry| entry.conflicted)
             });
             if has_conflicts {
-                push(LeftAction::AbortMerge, 92.0 * scale, !busy);
+                push(LeftAction::AbortMerge, ui::px(82.0, scale), !busy);
             }
         } else {
-            push(LeftAction::NewBranch, 48.0 * scale, !busy);
+            push(LeftAction::NewBranch, ui::px(64.0, scale), !busy);
             if let Some(target) = self.selected_ref {
                 match target {
                     RefTarget::Local(index) => {
@@ -2028,16 +2041,16 @@ impl GitWindow {
                             .as_ref()
                             .and_then(|snapshot| snapshot.refs.local_branches.get(index))
                             .is_some_and(|branch| branch.current);
-                        push(LeftAction::Checkout, 76.0 * scale, !current && !busy);
-                        push(LeftAction::Merge, 56.0 * scale, !current && !busy);
-                        push(LeftAction::Delete, 58.0 * scale, !current && !busy);
+                        push(LeftAction::Checkout, ui::px(82.0, scale), !current && !busy);
+                        push(LeftAction::Merge, ui::px(62.0, scale), !current && !busy);
+                        push(LeftAction::Delete, ui::px(66.0, scale), !current && !busy);
                     }
                     RefTarget::Remote(_) => {
-                        push(LeftAction::Checkout, 76.0 * scale, !busy);
+                        push(LeftAction::Checkout, ui::px(82.0, scale), !busy);
                     }
                     RefTarget::Stash(_) => {
-                        push(LeftAction::StashPop, 42.0 * scale, !busy);
-                        push(LeftAction::StashDrop, 48.0 * scale, !busy);
+                        push(LeftAction::StashPop, ui::px(46.0, scale), !busy);
+                        push(LeftAction::StashDrop, ui::px(50.0, scale), !busy);
                     }
                     RefTarget::Tag(_) => {}
                 }
@@ -2048,7 +2061,7 @@ impl GitWindow {
     }
 
     fn build_change_rows(&mut self, area: Rect, scale: f32) -> (Vec<(ChangeRowKind, Rect)>, usize) {
-        let row_height = (28.0 * scale).round();
+        let row_height = ui::px(32.0, scale);
         let visible = (area.height / row_height).floor().max(1.0) as usize;
         let mut rows = Vec::new();
         let Some(snapshot) = &self.snapshot else {
@@ -2056,7 +2069,7 @@ impl GitWindow {
         };
 
         let mut kinds = Vec::new();
-        kinds.push(ChangeRowKind::Section("STAGED"));
+        kinds.push(ChangeRowKind::Section("Preparados"));
         kinds.extend(
             snapshot
                 .status
@@ -2066,7 +2079,7 @@ impl GitWindow {
                 .filter(|(_, entry)| entry.staged)
                 .map(|(index, _)| ChangeRowKind::Entry(ListKind::Staged, index)),
         );
-        kinds.push(ChangeRowKind::Section("CHANGES"));
+        kinds.push(ChangeRowKind::Section("Cambios"));
         kinds.extend(
             snapshot
                 .status
@@ -2110,7 +2123,7 @@ impl GitWindow {
     }
 
     fn build_ref_rows(&mut self, area: Rect, scale: f32) -> (Vec<(RefRowKind, Rect)>, usize) {
-        let row_height = (28.0 * scale).round();
+        let row_height = ui::px(32.0, scale);
         let visible = (area.height / row_height).floor().max(1.0) as usize;
         let mut rows = Vec::new();
         let Some(snapshot) = &self.snapshot else {
@@ -2118,22 +2131,22 @@ impl GitWindow {
         };
 
         let mut kinds = Vec::new();
-        kinds.push(RefRowKind::Section("BRANCHES"));
+        kinds.push(RefRowKind::Section("Ramas"));
         kinds.extend(
             (0..snapshot.refs.local_branches.len())
                 .map(|index| RefRowKind::Target(RefTarget::Local(index))),
         );
-        kinds.push(RefRowKind::Section("REMOTES"));
+        kinds.push(RefRowKind::Section("Remotos"));
         kinds.extend(
             (0..snapshot.refs.remote_branches.len())
                 .map(|index| RefRowKind::Target(RefTarget::Remote(index))),
         );
-        kinds.push(RefRowKind::Section("TAGS"));
+        kinds.push(RefRowKind::Section("Tags"));
         kinds.extend(
             (0..snapshot.refs.tags.len()).map(|index| RefRowKind::Target(RefTarget::Tag(index))),
         );
         if !snapshot.refs.stashes.is_empty() {
-            kinds.push(RefRowKind::Section("STASHES"));
+            kinds.push(RefRowKind::Section("Stash"));
             kinds.extend(
                 (0..snapshot.refs.stashes.len())
                     .map(|index| RefRowKind::Target(RefTarget::Stash(index))),
@@ -2173,7 +2186,7 @@ impl GitWindow {
     }
 
     fn build_history_rows(&mut self, area: Rect, scale: f32) -> (Vec<(usize, Rect)>, usize) {
-        let row_height = (38.0 * scale).round();
+        let row_height = ui::px(40.0, scale);
         let visible = (area.height / row_height).floor().max(1.0) as usize;
         let total = self.commit_count() + 1;
 
@@ -2208,8 +2221,8 @@ impl GitWindow {
         let Some(area) = area else {
             return (Vec::new(), 1);
         };
-        let title_height = (24.0 * scale).round();
-        let row_height = (24.0 * scale).round();
+        let title_height = ui::px(28.0, scale);
+        let row_height = ui::px(32.0, scale);
         let visible = ((area.height - title_height) / row_height).floor().max(1.0) as usize;
         let total = self.detail.as_ref().map_or(0, |detail| detail.files.len());
 
@@ -2289,6 +2302,8 @@ impl GitWindow {
         let scale = self.renderer.scale_factor() as f32;
         let metrics = self.renderer.cell_metrics();
         let ui_font = self.renderer.physical(config.ui_font_size);
+        let tokens = Tokens::new(ui_font, scale);
+        let cursor = (self.cursor.x as f32, self.cursor.y as f32);
         let layout = self.layout();
 
         let mut quads = Vec::new();
@@ -2323,8 +2338,9 @@ impl GitWindow {
         let context = DrawContext {
             theme,
             scale,
-            ui_font,
             metrics,
+            tokens,
+            cursor,
         };
         self.draw_detail(&context, &layout, &mut diff_frame, &mut quads, &mut labels);
         if let Some((area, frame)) = &diff_frame {
@@ -2338,6 +2354,14 @@ impl GitWindow {
         }
         self.draw_commit_panel(theme, scale, ui_font, &layout, &mut quads, &mut labels);
         self.draw_footer(theme, scale, ui_font, &layout, &mut quads, &mut labels);
+
+        let focus_rect = match self.focus {
+            Focus::Changes | Focus::Refs => layout.left,
+            Focus::History => layout.center,
+            Focus::Detail => layout.right,
+            Focus::Message => layout.message,
+        };
+        ui::focus_ring(&mut quads, focus_rect, theme, scale);
 
         let scene = Scene {
             panes: scene_panes,
@@ -2373,12 +2397,20 @@ impl GitWindow {
             to_linear(theme.border, 1.0),
         ));
 
+        let tokens = Tokens::new(ui_font, scale);
+        let cursor = (self.cursor.x as f32, self.cursor.y as f32);
+        let actions_x = layout
+            .header_buttons
+            .first()
+            .map_or(layout.close.x, |(_, rect, _)| rect.x);
+        let context_width = (actions_x - layout.padding - ui::px(16.0, scale)).max(1.0);
+
         labels.push(Label {
-            text: "GIT".into(),
+            text: "Git".into(),
             x: layout.padding,
-            y: layout.header.y + 7.0 * scale,
-            width: 60.0 * scale,
-            font_size: (ui_font * 1.05).max(14.0),
+            y: layout.header.y + ui::px(8.0, scale),
+            width: ui::px(54.0, scale),
+            font_size: tokens.title,
             color: theme.sidebar_text,
             bold: true,
         });
@@ -2390,34 +2422,28 @@ impl GitWindow {
             .unwrap_or_else(|| self.directory.display().to_string());
         labels.push(Label {
             text: repo,
-            x: layout.padding + 56.0 * scale,
-            y: layout.header.y + 8.0 * scale,
-            width: (layout
-                .header_buttons
-                .first()
-                .map_or(layout.close.x, |(_, rect, _)| rect.x)
-                - layout.padding
-                - 64.0 * scale)
-                .max(1.0),
-            font_size: ui_font * 0.82,
+            x: layout.padding + ui::px(54.0, scale),
+            y: layout.header.y + ui::px(11.0, scale),
+            width: context_width,
+            font_size: tokens.small,
             color: theme.sidebar_text_dim,
             bold: false,
         });
 
         let subtitle = match &self.snapshot {
-            None => "loading repository…".to_owned(),
+            None => "Cargando repositorio…".to_owned(),
             Some(snapshot) => {
                 let branch = snapshot.status.branch.clone().unwrap_or_else(|| {
                     if snapshot.status.detached {
-                        "detached HEAD".to_owned()
+                        "HEAD separado".to_owned()
                     } else {
-                        "no branch".to_owned()
+                        "sin rama".to_owned()
                     }
                 });
                 let mut value = branch;
                 if let Some(upstream) = &snapshot.status.upstream {
                     value.push_str(&format!(
-                        "  ·  {upstream}  ↑{} ↓{}",
+                        " · {upstream}  ↑{} ↓{}",
                         snapshot.status.ahead, snapshot.status.behind
                     ));
                 }
@@ -2426,17 +2452,11 @@ impl GitWindow {
         };
         labels.push(Label {
             text: subtitle,
-            x: layout.padding + 56.0 * scale,
-            y: layout.header.y + 27.0 * scale,
-            width: (layout
-                .header_buttons
-                .first()
-                .map_or(layout.close.x, |(_, rect, _)| rect.x)
-                - layout.padding
-                - 64.0 * scale)
-                .max(1.0),
-            font_size: ui_font * 0.76,
-            color: theme.sidebar_text_dim,
+            x: layout.padding + ui::px(54.0, scale),
+            y: layout.header.y + ui::px(32.0, scale),
+            width: context_width,
+            font_size: tokens.caption,
+            color: theme.accent,
             bold: false,
         });
 
@@ -2445,32 +2465,42 @@ impl GitWindow {
                 HeaderAction::Fetch => "Fetch",
                 HeaderAction::Pull => "Pull",
                 HeaderAction::Push => "Push",
-                HeaderAction::Refresh => "Refresh",
+                HeaderAction::Refresh => "Actualizar",
             };
-            push_button(
+            ui::button(
                 quads,
                 labels,
-                *rect,
-                text,
-                *enabled,
-                false,
-                ButtonStyle {
-                    theme,
-                    scale,
-                    font_size: ui_font * 0.78,
+                ButtonSpec {
+                    rect: *rect,
+                    label: text,
+                    kind: if *action == HeaderAction::Refresh {
+                        ButtonKind::Ghost
+                    } else {
+                        ButtonKind::Secondary
+                    },
+                    enabled: *enabled,
+                    hovered: rect.contains(cursor.0, cursor.1),
+                    focused: false,
                 },
+                theme,
+                tokens,
             );
         }
 
-        labels.push(Label {
-            text: "×".into(),
-            x: layout.close.x + (layout.close.width - ui_font * 0.55) / 2.0,
-            y: layout.close.y + (layout.close.height - ui_font * 1.35) / 2.0,
-            width: layout.close.width,
-            font_size: ui_font * 1.1,
-            color: theme.sidebar_text_dim,
-            bold: false,
-        });
+        ui::icon_button(
+            quads,
+            labels,
+            ui::IconButtonSpec {
+                rect: layout.close,
+                glyph: "×",
+                enabled: true,
+                hovered: layout.close.contains(cursor.0, cursor.1),
+                focused: false,
+                danger: false,
+            },
+            theme,
+            tokens,
+        );
     }
 
     fn draw_left(
@@ -2497,10 +2527,13 @@ impl GitWindow {
             to_linear(theme.border, 1.0),
         ));
 
-        let tabs = ["CHANGES", "REFS"];
+        let tokens = Tokens::new(ui_font, scale);
+        let cursor = (self.cursor.x as f32, self.cursor.y as f32);
+        let tabs = ["Cambios", "Refs"];
         for (index, rect) in layout.tabs.iter().enumerate() {
             let active = (index == 0 && self.left_tab == LeftTab::Changes)
                 || (index == 1 && self.left_tab == LeftTab::Refs);
+            let hovered = rect.contains(cursor.0, cursor.1);
             quads.push(Quad::new(
                 rect.x,
                 rect.y,
@@ -2509,6 +2542,8 @@ impl GitWindow {
                 to_linear(
                     if active {
                         theme.sidebar_active
+                    } else if hovered {
+                        theme.sidebar_hover
                     } else {
                         theme.sidebar_background
                     },
@@ -2527,9 +2562,9 @@ impl GitWindow {
             labels.push(Label {
                 text: tabs[index].into(),
                 x: rect.x + 10.0 * scale,
-                y: rect.y + 8.0 * scale,
+                y: rect.y + (rect.height - tokens.caption * 1.35) / 2.0,
                 width: (rect.width - 14.0 * scale).max(1.0),
-                font_size: ui_font * 0.76,
+                font_size: tokens.caption,
                 color: if active {
                     theme.sidebar_text
                 } else {
@@ -2547,28 +2582,29 @@ impl GitWindow {
 
         for (action, rect, enabled) in &layout.left_actions {
             let text = match action {
-                LeftAction::StageAll => "Stage all",
-                LeftAction::UnstageAll => "Unstage all",
-                LeftAction::AbortMerge => "Abort merge",
-                LeftAction::NewBranch => "New",
+                LeftAction::StageAll => "Preparar todo",
+                LeftAction::UnstageAll => "Quitar todo",
+                LeftAction::AbortMerge => "Abortar",
+                LeftAction::NewBranch => "Nueva",
                 LeftAction::Checkout => "Checkout",
                 LeftAction::Merge => "Merge",
-                LeftAction::Delete => "Delete",
+                LeftAction::Delete => "Borrar",
                 LeftAction::StashPop => "Pop",
                 LeftAction::StashDrop => "Drop",
             };
-            push_button(
+            ui::button(
                 quads,
                 labels,
-                *rect,
-                text,
-                *enabled,
-                false,
-                ButtonStyle {
-                    theme,
-                    scale,
-                    font_size: ui_font * 0.72,
+                ButtonSpec {
+                    rect: *rect,
+                    label: text,
+                    kind: ButtonKind::Ghost,
+                    enabled: *enabled,
+                    hovered: rect.contains(cursor.0, cursor.1),
+                    focused: false,
                 },
+                theme,
+                tokens,
             );
         }
     }
@@ -2582,7 +2618,10 @@ impl GitWindow {
         quads: &mut Vec<Quad>,
         labels: &mut Vec<Label>,
     ) {
+        let tokens = Tokens::new(ui_font, scale);
+        let cursor = (self.cursor.x as f32, self.cursor.y as f32);
         let Some(snapshot) = &self.snapshot else {
+            ui::skeleton_rows(quads, layout.list_area, 4, theme, scale);
             return;
         };
 
@@ -2590,16 +2629,16 @@ impl GitWindow {
             match kind {
                 ChangeRowKind::Section(title) => {
                     let text = match *title {
-                        "STAGED" => format!("STAGED {}", snapshot.status.staged_count()),
-                        "CHANGES" => format!("CHANGES {}", snapshot.status.unstaged_count()),
+                        "Preparados" => format!("Preparados {}", snapshot.status.staged_count()),
+                        "Cambios" => format!("Cambios {}", snapshot.status.unstaged_count()),
                         _ => (*title).into(),
                     };
                     labels.push(Label {
                         text,
-                        x: rect.x + 6.0 * scale,
-                        y: rect.y + 6.0 * scale,
-                        width: (rect.width - 12.0 * scale).max(1.0),
-                        font_size: ui_font * 0.68,
+                        x: rect.x + 8.0 * scale,
+                        y: rect.y + (rect.height - tokens.caption * 1.35) / 2.0,
+                        width: (rect.width - 16.0 * scale).max(1.0),
+                        font_size: tokens.caption,
                         color: theme.sidebar_text_dim,
                         bold: true,
                     });
@@ -2609,14 +2648,24 @@ impl GitWindow {
                         continue;
                     };
                     let selected = self.selected_change == Some((*list, *index));
-                    if selected {
+                    let hovered = rect.contains(cursor.0, cursor.1);
+                    if selected || hovered {
                         quads.push(Quad::new(
                             rect.x,
                             rect.y,
                             rect.width,
                             rect.height,
-                            to_linear(theme.sidebar_active, 1.0),
+                            to_linear(
+                                if selected {
+                                    theme.sidebar_active
+                                } else {
+                                    theme.sidebar_hover
+                                },
+                                1.0,
+                            ),
                         ));
+                    }
+                    if selected {
                         quads.push(Quad::new(
                             rect.x,
                             rect.y,
@@ -2629,19 +2678,19 @@ impl GitWindow {
                     let color = change_color(entry.kind, theme);
                     labels.push(Label {
                         text: entry.kind.code().into(),
-                        x: rect.x + 8.0 * scale,
-                        y: rect.y + (rect.height - ui_font * 1.35) / 2.0,
-                        width: 18.0 * scale,
-                        font_size: ui_font * 0.82,
+                        x: rect.x + 10.0 * scale,
+                        y: rect.y + (rect.height - tokens.small * 1.35) / 2.0,
+                        width: 20.0 * scale,
+                        font_size: tokens.small,
                         color,
                         bold: true,
                     });
                     labels.push(Label {
                         text: entry.display_path(),
-                        x: rect.x + 28.0 * scale,
-                        y: rect.y + (rect.height - ui_font * 1.35) / 2.0,
-                        width: (rect.width - 88.0 * scale).max(1.0),
-                        font_size: ui_font * 0.8,
+                        x: rect.x + 32.0 * scale,
+                        y: rect.y + (rect.height - tokens.small * 1.35) / 2.0,
+                        width: (rect.width - 94.0 * scale).max(1.0),
+                        font_size: tokens.small,
                         color: theme.sidebar_text,
                         bold: selected,
                     });
@@ -2649,29 +2698,29 @@ impl GitWindow {
                     if *list == ListKind::Staged {
                         labels.push(Label {
                             text: "−".into(),
-                            x: rect.right() - 20.0 * scale,
-                            y: rect.y + (rect.height - ui_font * 1.35) / 2.0,
+                            x: rect.right() - 22.0 * scale,
+                            y: rect.y + (rect.height - tokens.body * 1.35) / 2.0,
                             width: 16.0 * scale,
-                            font_size: ui_font,
+                            font_size: tokens.body,
                             color: theme.sidebar_text_dim,
                             bold: false,
                         });
                     } else {
                         labels.push(Label {
                             text: "+".into(),
-                            x: rect.right() - 44.0 * scale,
-                            y: rect.y + (rect.height - ui_font * 1.35) / 2.0,
+                            x: rect.right() - 48.0 * scale,
+                            y: rect.y + (rect.height - tokens.body * 1.35) / 2.0,
                             width: 16.0 * scale,
-                            font_size: ui_font,
+                            font_size: tokens.body,
                             color: theme.diff_add_text,
                             bold: true,
                         });
                         labels.push(Label {
                             text: "×".into(),
-                            x: rect.right() - 20.0 * scale,
-                            y: rect.y + (rect.height - ui_font * 1.35) / 2.0,
+                            x: rect.right() - 22.0 * scale,
+                            y: rect.y + (rect.height - tokens.body * 1.35) / 2.0,
                             width: 16.0 * scale,
-                            font_size: ui_font,
+                            font_size: tokens.body,
                             color: theme.sidebar_text_dim,
                             bold: false,
                         });
@@ -2681,15 +2730,25 @@ impl GitWindow {
         }
 
         if snapshot.status.entries.is_empty() {
-            labels.push(Label {
-                text: "Working tree clean".into(),
-                x: layout.list_area.x + layout.padding,
-                y: layout.list_area.y + layout.padding,
-                width: (layout.list_area.width - layout.padding * 2.0).max(1.0),
-                font_size: ui_font * 0.82,
-                color: theme.sidebar_text_dim,
-                bold: false,
-            });
+            ui::empty_state(
+                quads,
+                labels,
+                layout.list_area,
+                "Árbol limpio",
+                "No hay cambios pendientes. Puedes cambiar de rama o revisar el historial.",
+                theme,
+                tokens,
+            );
+        } else {
+            ui::scrollbar(
+                quads,
+                layout.list_area,
+                self.changes_offset,
+                self.change_row_count(),
+                layout.left_visible,
+                theme,
+                scale,
+            );
         }
     }
 
@@ -2702,7 +2761,10 @@ impl GitWindow {
         quads: &mut Vec<Quad>,
         labels: &mut Vec<Label>,
     ) {
+        let tokens = Tokens::new(ui_font, scale);
+        let cursor = (self.cursor.x as f32, self.cursor.y as f32);
         let Some(snapshot) = &self.snapshot else {
+            ui::skeleton_rows(quads, layout.list_area, 5, theme, scale);
             return;
         };
 
@@ -2711,23 +2773,31 @@ impl GitWindow {
                 RefRowKind::Section(title) => {
                     labels.push(Label {
                         text: (*title).into(),
-                        x: rect.x + 6.0 * scale,
-                        y: rect.y + 6.0 * scale,
-                        width: (rect.width - 12.0 * scale).max(1.0),
-                        font_size: ui_font * 0.68,
+                        x: rect.x + 8.0 * scale,
+                        y: rect.y + (rect.height - tokens.caption * 1.35) / 2.0,
+                        width: (rect.width - 16.0 * scale).max(1.0),
+                        font_size: tokens.caption,
                         color: theme.sidebar_text_dim,
                         bold: true,
                     });
                 }
                 RefRowKind::Target(target) => {
                     let selected = self.selected_ref == Some(*target);
-                    if selected {
+                    let hovered = rect.contains(cursor.0, cursor.1);
+                    if selected || hovered {
                         quads.push(Quad::new(
                             rect.x,
                             rect.y,
                             rect.width,
                             rect.height,
-                            to_linear(theme.sidebar_active, 1.0),
+                            to_linear(
+                                if selected {
+                                    theme.sidebar_active
+                                } else {
+                                    theme.sidebar_hover
+                                },
+                                1.0,
+                            ),
                         ));
                         quads.push(Quad::new(
                             rect.x,
@@ -2784,15 +2854,37 @@ impl GitWindow {
 
                     labels.push(Label {
                         text,
-                        x: rect.x + 8.0 * scale,
-                        y: rect.y + (rect.height - ui_font * 1.35) / 2.0,
-                        width: (rect.width - 14.0 * scale).max(1.0),
-                        font_size: ui_font * 0.8,
+                        x: rect.x + 10.0 * scale,
+                        y: rect.y + (rect.height - tokens.small * 1.35) / 2.0,
+                        width: (rect.width - 18.0 * scale).max(1.0),
+                        font_size: tokens.small,
                         color,
                         bold,
                     });
                 }
             }
+        }
+
+        if self.ref_row_count() == 0 {
+            ui::empty_state(
+                quads,
+                labels,
+                layout.list_area,
+                "Sin referencias",
+                "No hay ramas, remotos, tags ni stashes que mostrar.",
+                theme,
+                tokens,
+            );
+        } else {
+            ui::scrollbar(
+                quads,
+                layout.list_area,
+                self.refs_offset,
+                self.ref_row_count(),
+                layout.left_visible,
+                theme,
+                scale,
+            );
         }
     }
 
@@ -2805,6 +2897,19 @@ impl GitWindow {
         quads: &mut Vec<Quad>,
         labels: &mut Vec<Label>,
     ) {
+        let tokens = Tokens::new(ui_font, scale);
+        let cursor = (self.cursor.x as f32, self.cursor.y as f32);
+        if self.snapshot.is_none() {
+            quads.push(Quad::new(
+                layout.center.x,
+                layout.center.y,
+                layout.center.width,
+                layout.center.height,
+                to_linear(theme.background, 1.0),
+            ));
+            ui::skeleton_rows(quads, layout.history_area, 6, theme, scale);
+            return;
+        }
         quads.push(Quad::new(
             layout.center.x,
             layout.center.y,
@@ -2821,24 +2926,32 @@ impl GitWindow {
         ));
 
         labels.push(Label {
-            text: "HISTORY".into(),
+            text: "Historial".into(),
             x: layout.center.x + layout.padding,
-            y: layout.center.y + 8.0 * scale,
+            y: layout.center.y + ui::px(8.0, scale),
             width: (layout.center.width - layout.padding * 2.0).max(1.0),
-            font_size: ui_font * 0.72,
+            font_size: tokens.caption,
             color: theme.sidebar_text_dim,
             bold: true,
         });
 
         for (index, rect) in &layout.history_rows {
             let selected = *index == self.selected_history;
-            if selected {
+            let hovered = rect.contains(cursor.0, cursor.1);
+            if selected || hovered {
                 quads.push(Quad::new(
                     rect.x,
                     rect.y,
                     rect.width,
                     rect.height,
-                    to_linear(theme.sidebar_active, 1.0),
+                    to_linear(
+                        if selected {
+                            theme.sidebar_active
+                        } else {
+                            theme.sidebar_hover
+                        },
+                        1.0,
+                    ),
                 ));
                 quads.push(Quad::new(
                     rect.x,
@@ -2865,20 +2978,20 @@ impl GitWindow {
                     to_linear(theme.accent, 1.0),
                 ));
                 labels.push(Label {
-                    text: "Working tree".into(),
+                    text: "Árbol de trabajo".into(),
                     x: rect.x + 26.0 * scale,
-                    y: rect.y + 4.0 * scale,
+                    y: rect.y + ui::px(5.0, scale),
                     width: (rect.width - 32.0 * scale).max(1.0),
-                    font_size: ui_font * 0.84,
+                    font_size: tokens.small,
                     color: theme.sidebar_text,
                     bold: true,
                 });
                 labels.push(Label {
-                    text: format!("{staged} staged · {unstaged} changes"),
+                    text: format!("{staged} preparados · {unstaged} cambios"),
                     x: rect.x + 26.0 * scale,
-                    y: rect.y + 21.0 * scale,
+                    y: rect.y + ui::px(23.0, scale),
                     width: (rect.width - 32.0 * scale).max(1.0),
-                    font_size: ui_font * 0.7,
+                    font_size: tokens.caption,
                     color: theme.sidebar_text_dim,
                     bold: false,
                 });
@@ -2904,27 +3017,27 @@ impl GitWindow {
             labels.push(Label {
                 text: commit.short.clone(),
                 x: rect.x + 24.0 * scale,
-                y: rect.y + 4.0 * scale,
+                y: rect.y + ui::px(5.0, scale),
                 width: 58.0 * scale,
-                font_size: ui_font * 0.78,
+                font_size: tokens.small,
                 color: theme.accent,
                 bold: false,
             });
             labels.push(Label {
                 text: commit.subject.clone(),
                 x: rect.x + 84.0 * scale,
-                y: rect.y + 4.0 * scale,
+                y: rect.y + ui::px(5.0, scale),
                 width: (rect.width - 90.0 * scale).max(1.0),
-                font_size: ui_font * 0.82,
+                font_size: tokens.small,
                 color: theme.sidebar_text,
                 bold: selected,
             });
             labels.push(Label {
                 text: format!("{} · {}", commit.author, commit.date),
                 x: rect.x + 84.0 * scale,
-                y: rect.y + 21.0 * scale,
+                y: rect.y + ui::px(23.0, scale),
                 width: (rect.width * 0.55).max(1.0),
-                font_size: ui_font * 0.68,
+                font_size: tokens.caption,
                 color: theme.sidebar_text_dim,
                 bold: false,
             });
@@ -2932,13 +3045,35 @@ impl GitWindow {
                 labels.push(Label {
                     text: commit.refs.join("  ·  "),
                     x: rect.x + rect.width * 0.6,
-                    y: rect.y + 21.0 * scale,
+                    y: rect.y + ui::px(23.0, scale),
                     width: (rect.width * 0.4 - 8.0 * scale).max(1.0),
-                    font_size: ui_font * 0.68,
+                    font_size: tokens.caption,
                     color: theme.diff_hunk_text,
                     bold: false,
                 });
             }
+        }
+
+        if self.commit_count() == 0 {
+            ui::empty_state(
+                quads,
+                labels,
+                layout.history_area,
+                "Sin historial",
+                "Este repositorio todavía no tiene commits.",
+                theme,
+                tokens,
+            );
+        } else {
+            ui::scrollbar(
+                quads,
+                layout.history_area,
+                self.history_offset,
+                self.commit_count() + 1,
+                layout.history_visible,
+                theme,
+                scale,
+            );
         }
     }
 
@@ -2953,8 +3088,9 @@ impl GitWindow {
         let DrawContext {
             theme,
             scale,
-            ui_font,
             metrics,
+            tokens,
+            cursor,
         } = *context;
 
         quads.push(Quad::new(
@@ -2980,8 +3116,8 @@ impl GitWindow {
                 )
             });
             (
-                "WORKING TREE".to_owned(),
-                format!("{staged} staged · {unstaged} changes"),
+                "Árbol de trabajo".to_owned(),
+                format!("{staged} preparados · {unstaged} cambios"),
             )
         } else if let Some(commit) = self.selected_commit() {
             (
@@ -2994,7 +3130,7 @@ impl GitWindow {
                 ),
             )
         } else {
-            ("DETAIL".to_owned(), String::new())
+            ("Detalle".to_owned(), String::new())
         };
 
         labels.push(Label {
@@ -3002,27 +3138,27 @@ impl GitWindow {
             x: layout.detail_header.x,
             y: layout.detail_header.y,
             width: layout.detail_header.width,
-            font_size: ui_font * 0.9,
+            font_size: tokens.section,
             color: theme.sidebar_text,
             bold: true,
         });
         labels.push(Label {
             text: subtitle,
             x: layout.detail_header.x,
-            y: layout.detail_header.y + 22.0 * scale,
+            y: layout.detail_header.y + ui::px(24.0, scale),
             width: layout.detail_header.width,
-            font_size: ui_font * 0.72,
+            font_size: tokens.caption,
             color: theme.sidebar_text_dim,
             bold: false,
         });
 
         if self.detail_loading {
             labels.push(Label {
-                text: "Loading diff…".into(),
+                text: "Cargando diff…".into(),
                 x: layout.detail_header.x,
-                y: layout.detail_header.y + 44.0 * scale,
+                y: layout.detail_header.y + ui::px(44.0, scale),
                 width: layout.detail_header.width,
-                font_size: ui_font * 0.8,
+                font_size: tokens.small,
                 color: theme.sidebar_text_dim,
                 bold: false,
             });
@@ -3030,9 +3166,9 @@ impl GitWindow {
             labels.push(Label {
                 text: error.clone(),
                 x: layout.detail_header.x,
-                y: layout.detail_header.y + 44.0 * scale,
+                y: layout.detail_header.y + ui::px(44.0, scale),
                 width: layout.detail_header.width,
-                font_size: ui_font * 0.74,
+                font_size: tokens.caption,
                 color: theme.diff_remove_text,
                 bold: false,
             });
@@ -3040,26 +3176,26 @@ impl GitWindow {
 
         let Some(detail) = &self.detail else {
             if !self.detail_loading && self.detail_error.is_none() {
-                labels.push(Label {
-                    text: "Select a commit or a working-tree change".into(),
-                    x: layout.right.x + layout.padding,
-                    y: layout.right.y + 90.0 * scale,
-                    width: (layout.right.width - layout.padding * 2.0).max(1.0),
-                    font_size: ui_font * 0.82,
-                    color: theme.sidebar_text_dim,
-                    bold: false,
-                });
+                ui::empty_state(
+                    quads,
+                    labels,
+                    layout.right,
+                    "Nada seleccionado",
+                    "Selecciona un commit o un cambio del árbol de trabajo para ver el diff.",
+                    theme,
+                    tokens,
+                );
             }
             return;
         };
 
         if let Some(files) = layout.file_list {
             labels.push(Label {
-                text: format!("FILES · {}", detail.files.len()),
+                text: format!("Archivos · {}", detail.files.len()),
                 x: files.x + layout.padding,
-                y: files.y + 5.0 * scale,
+                y: files.y + ui::px(5.0, scale),
                 width: (files.width - layout.padding * 2.0).max(1.0),
-                font_size: ui_font * 0.7,
+                font_size: tokens.caption,
                 color: theme.sidebar_text_dim,
                 bold: true,
             });
@@ -3069,13 +3205,21 @@ impl GitWindow {
                     continue;
                 };
                 let selected = *index == self.selected_file;
-                if selected {
+                let hovered = rect.contains(cursor.0, cursor.1);
+                if selected || hovered {
                     quads.push(Quad::new(
                         rect.x,
                         rect.y,
                         rect.width,
                         rect.height,
-                        to_linear(theme.sidebar_active, 1.0),
+                        to_linear(
+                            if selected {
+                                theme.sidebar_active
+                            } else {
+                                theme.sidebar_hover
+                            },
+                            1.0,
+                        ),
                     ));
                     quads.push(Quad::new(
                         rect.x,
@@ -3088,31 +3232,40 @@ impl GitWindow {
                 labels.push(Label {
                     text: file_status_code(file.status).into(),
                     x: rect.x + 10.0 * scale,
-                    y: rect.y + (rect.height - ui_font * 1.35) / 2.0,
+                    y: rect.y + (rect.height - tokens.small * 1.35) / 2.0,
                     width: 18.0 * scale,
-                    font_size: ui_font * 0.76,
+                    font_size: tokens.small,
                     color: file_status_color(file.status, theme),
                     bold: true,
                 });
                 labels.push(Label {
                     text: file.path.clone(),
                     x: rect.x + 30.0 * scale,
-                    y: rect.y + (rect.height - ui_font * 1.35) / 2.0,
+                    y: rect.y + (rect.height - tokens.small * 1.35) / 2.0,
                     width: (rect.width - 130.0 * scale).max(1.0),
-                    font_size: ui_font * 0.76,
+                    font_size: tokens.small,
                     color: theme.sidebar_text,
                     bold: selected,
                 });
                 labels.push(Label {
                     text: format!("+{} −{}", file.additions, file.deletions),
                     x: rect.right() - 90.0 * scale,
-                    y: rect.y + (rect.height - ui_font * 1.35) / 2.0,
+                    y: rect.y + (rect.height - tokens.caption * 1.35) / 2.0,
                     width: 80.0 * scale,
-                    font_size: ui_font * 0.7,
+                    font_size: tokens.caption,
                     color: theme.sidebar_text_dim,
                     bold: false,
                 });
             }
+            ui::scrollbar(
+                quads,
+                files,
+                self.file_offset,
+                detail.files.len(),
+                layout.files_visible,
+                theme,
+                scale,
+            );
         }
 
         let Some(file) = detail.files.get(self.selected_file) else {
@@ -3122,9 +3275,9 @@ impl GitWindow {
             labels.push(Label {
                 text: format!("{}  ·  +{} −{}", file.path, file.additions, file.deletions),
                 x: title.x,
-                y: title.y + 4.0 * scale,
+                y: title.y + ui::px(4.0, scale),
                 width: title.width,
-                font_size: ui_font * 0.76,
+                font_size: tokens.small,
                 color: theme.sidebar_text,
                 bold: true,
             });
@@ -3140,21 +3293,21 @@ impl GitWindow {
             ));
             if file.binary {
                 labels.push(Label {
-                    text: "Binary file".into(),
+                    text: "Archivo binario".into(),
                     x: area.x,
                     y: area.y,
                     width: area.width,
-                    font_size: ui_font,
+                    font_size: tokens.small,
                     color: theme.sidebar_text_dim,
                     bold: false,
                 });
             } else if file.lines.is_empty() {
                 labels.push(Label {
-                    text: "No textual changes".into(),
+                    text: "Sin cambios de texto".into(),
                     x: area.x,
                     y: area.y,
                     width: area.width,
-                    font_size: ui_font,
+                    font_size: tokens.small,
                     color: theme.sidebar_text_dim,
                     bold: false,
                 });
@@ -3169,6 +3322,15 @@ impl GitWindow {
                     quads,
                 );
                 *diff_frame = Some((area, frame));
+                ui::scrollbar(
+                    quads,
+                    area,
+                    self.scroll_row,
+                    file.lines.len(),
+                    layout.diff_visible,
+                    theme,
+                    scale,
+                );
             }
         }
     }
@@ -3197,6 +3359,8 @@ impl GitWindow {
             to_linear(theme.border, 1.0),
         ));
 
+        let tokens = Tokens::new(ui_font, scale);
+        let cursor = (self.cursor.x as f32, self.cursor.y as f32);
         quads.push(Quad::new(
             layout.message.x,
             layout.message.y,
@@ -3227,10 +3391,10 @@ impl GitWindow {
         };
         labels.push(Label {
             text,
-            x: layout.message.x + 8.0 * scale,
-            y: layout.message.y + (layout.message.height - ui_font * 1.35) / 2.0,
-            width: (layout.message.width - 14.0 * scale).max(1.0),
-            font_size: ui_font * 0.8,
+            x: layout.message.x + 10.0 * scale,
+            y: layout.message.y + (layout.message.height - tokens.small * 1.35) / 2.0,
+            width: (layout.message.width - 18.0 * scale).max(1.0),
+            font_size: tokens.small,
             color: if self.message.is_empty() {
                 theme.sidebar_text_dim
             } else {
@@ -3245,19 +3409,25 @@ impl GitWindow {
                 PanelAction::Amend => "Amend",
                 PanelAction::Stash => "Stash",
             };
-            push_button(
+            let primary = matches!(action, PanelAction::Commit)
+                || matches!(action, PanelAction::Amend) && self.amend;
+            ui::button(
                 quads,
                 labels,
-                *rect,
-                text,
-                *enabled,
-                matches!(action, PanelAction::Commit)
-                    || matches!(action, PanelAction::Amend) && self.amend,
-                ButtonStyle {
-                    theme,
-                    scale,
-                    font_size: ui_font * 0.76,
+                ButtonSpec {
+                    rect: *rect,
+                    label: text,
+                    kind: if primary {
+                        ButtonKind::Primary
+                    } else {
+                        ButtonKind::Ghost
+                    },
+                    enabled: *enabled,
+                    hovered: rect.contains(cursor.0, cursor.1),
+                    focused: false,
                 },
+                theme,
+                tokens,
             );
         }
     }
@@ -3286,21 +3456,22 @@ impl GitWindow {
             to_linear(theme.border, 1.0),
         ));
 
+        let tokens = Tokens::new(ui_font, scale);
         let hint = match self.focus {
             Focus::Changes => {
-                "↑↓ archivo · Enter stage/unstage · Supr descartar · R refrescar · Tab panel"
+                "↑↓ archivo · Enter preparar/quitar · Supr descartar · R actualizar · Tab panel"
             }
-            Focus::Refs => "↑↓ rama · Enter checkout · M merge · N nueva · D borrar · R refrescar",
-            Focus::History => "↑↓ commit · PgUp/PgDn · R refrescar · Tab panel",
+            Focus::Refs => "↑↓ rama · Enter checkout · M merge · N nueva · D borrar · R actualizar",
+            Focus::History => "↑↓ commit · PgUp/PgDn · R actualizar · Tab panel",
             Focus::Detail => "↑↓ archivo · PgUp/PgDn diff · ←→ horizontal · Tab panel",
             Focus::Message => "Enter commit · Esc salir · Cmd/Ctrl+W cerrar",
         };
         labels.push(Label {
             text: hint.into(),
             x: layout.footer.x + layout.padding,
-            y: layout.footer.y + 4.0 * scale,
+            y: layout.footer.y + (layout.footer.height - tokens.caption * 1.35) / 2.0,
             width: (layout.footer.width * 0.6).max(1.0),
-            font_size: ui_font * 0.7,
+            font_size: tokens.caption,
             color: theme.sidebar_text_dim,
             bold: false,
         });
@@ -3326,9 +3497,9 @@ impl GitWindow {
             labels.push(Label {
                 text,
                 x: layout.footer.x + layout.footer.width * 0.6,
-                y: layout.footer.y + 4.0 * scale,
+                y: layout.footer.y + (layout.footer.height - tokens.caption * 1.35) / 2.0,
                 width: (layout.footer.width * 0.4 - layout.padding).max(1.0),
-                font_size: ui_font * 0.7,
+                font_size: tokens.caption,
                 color,
                 bold: false,
             });
@@ -3344,6 +3515,8 @@ impl GitWindow {
         quads: &mut Vec<Quad>,
         labels: &mut Vec<Label>,
     ) {
+        let tokens = Tokens::new(ui_font, scale);
+        let cursor = (self.cursor.x as f32, self.cursor.y as f32);
         quads.push(Quad::new(
             0.0,
             0.0,
@@ -3379,18 +3552,18 @@ impl GitWindow {
         labels.push(Label {
             text: title,
             x: panel.x + 16.0 * scale,
-            y: panel.y + 16.0 * scale,
-            width: (panel.width - 32.0 * scale).max(1.0),
-            font_size: ui_font * 0.95,
+            y: panel.y + ui::px(16.0, scale),
+            width: (panel.width - ui::px(32.0, scale)).max(1.0),
+            font_size: tokens.section,
             color: theme.sidebar_text,
             bold: true,
         });
         labels.push(Label {
             text: message,
             x: panel.x + 16.0 * scale,
-            y: panel.y + 52.0 * scale,
-            width: (panel.width - 32.0 * scale).max(1.0),
-            font_size: ui_font * 0.8,
+            y: panel.y + ui::px(52.0, scale),
+            width: (panel.width - ui::px(32.0, scale)).max(1.0),
+            font_size: tokens.small,
             color: theme.sidebar_text_dim,
             bold: false,
         });
@@ -3411,9 +3584,9 @@ impl GitWindow {
                     format!("{input_value}▌")
                 },
                 x: input_rect.x + 8.0 * scale,
-                y: input_rect.y + (input_rect.height - ui_font * 1.35) / 2.0,
+                y: input_rect.y + (input_rect.height - tokens.small * 1.35) / 2.0,
                 width: (input_rect.width - 14.0 * scale).max(1.0),
-                font_size: ui_font * 0.82,
+                font_size: tokens.small,
                 color: if input_value.is_empty() {
                     theme.sidebar_text_dim
                 } else {
@@ -3433,27 +3606,32 @@ impl GitWindow {
             } else {
                 "Cancelar"
             };
-            push_button(
+            ui::button(
                 quads,
                 labels,
-                *rect,
-                text,
-                true,
-                *confirm,
-                ButtonStyle {
-                    theme,
-                    scale,
-                    font_size: ui_font * 0.78,
+                ButtonSpec {
+                    rect: *rect,
+                    label: text,
+                    kind: if *confirm {
+                        ButtonKind::Primary
+                    } else {
+                        ButtonKind::Ghost
+                    },
+                    enabled: true,
+                    hovered: rect.contains(cursor.0, cursor.1),
+                    focused: false,
                 },
+                theme,
+                tokens,
             );
         }
 
         labels.push(Label {
             text: "Enter confirmar · Esc cancelar".into(),
             x: panel.x + 16.0 * scale,
-            y: panel.bottom() - 62.0 * scale,
-            width: (panel.width - 32.0 * scale).max(1.0),
-            font_size: ui_font * 0.7,
+            y: panel.bottom() - ui::px(62.0, scale),
+            width: (panel.width - ui::px(32.0, scale)).max(1.0),
+            font_size: tokens.caption,
             color: theme.sidebar_text_dim,
             bold: false,
         });
@@ -3524,53 +3702,4 @@ fn push_outline(quads: &mut Vec<Quad>, rect: Rect, thickness: f32, color: [f32; 
         rect.height,
         color,
     ));
-}
-
-fn push_button(
-    quads: &mut Vec<Quad>,
-    labels: &mut Vec<Label>,
-    rect: Rect,
-    text: &str,
-    enabled: bool,
-    primary: bool,
-    style: ButtonStyle<'_>,
-) {
-    let ButtonStyle {
-        theme,
-        scale,
-        font_size,
-    } = style;
-
-    let background = if !enabled {
-        theme.sidebar_background
-    } else if primary {
-        theme.accent
-    } else {
-        theme.sidebar_active
-    };
-    let color = if !enabled {
-        theme.sidebar_text_dim
-    } else if primary {
-        theme.background
-    } else {
-        theme.sidebar_text
-    };
-
-    quads.push(Quad::rounded(
-        rect.x,
-        rect.y,
-        rect.width,
-        rect.height,
-        (rect.height / 2.0).min(6.0 * scale),
-        to_linear(background, 1.0),
-    ));
-    labels.push(Label {
-        text: text.to_owned(),
-        x: rect.x + 8.0 * scale,
-        y: rect.y + (rect.height - font_size * 1.35) / 2.0,
-        width: (rect.width - 14.0 * scale).max(1.0),
-        font_size,
-        color,
-        bold: false,
-    });
 }

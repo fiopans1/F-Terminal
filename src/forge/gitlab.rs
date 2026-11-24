@@ -54,14 +54,14 @@ pub fn diff(remote: &RemoteInfo, id: u64, tokens: &ForgeTokens) -> Result<String
 }
 
 pub fn parse_list(body: &str) -> Result<Vec<RemoteChange>> {
-    let merge_requests: Vec<GitLabMr> =
-        serde_json::from_str(body).context("failed to parse the GitLab merge request list")?;
+    let merge_requests: Vec<GitLabMr> = serde_json::from_str(body)
+        .context("no se pudo interpretar la lista de merge requests de GitLab")?;
     Ok(merge_requests.into_iter().map(RemoteChange::from).collect())
 }
 
 pub fn build_diff(body: &str) -> Result<String> {
-    let response: ChangesResponse =
-        serde_json::from_str(body).context("failed to parse the GitLab merge request changes")?;
+    let response: ChangesResponse = serde_json::from_str(body)
+        .context("no se pudo interpretar los cambios del merge request de GitLab")?;
 
     let mut diff = String::new();
     for change in &response.changes {

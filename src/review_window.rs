@@ -19,6 +19,7 @@ use crate::review::{
     self, CodeReview, FileDiff, FileStatus, RemoteChange, ReviewDetail, ReviewSummary,
 };
 use crate::term::color::to_linear;
+use crate::ui::{self, Tokens};
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum Focus {
@@ -37,6 +38,7 @@ struct Layout {
     header: Rect,
     footer: Rect,
     close: Rect,
+    refresh: Rect,
     reviews: Rect,
     tabs: [Rect; 2],
     search: Option<Rect>,
@@ -205,6 +207,23 @@ impl ReviewWindow {
         self.window.request_redraw();
     }
 
+    fn refresh_current(&mut self) {
+        match self.mode {
+            ListMode::Local => {
+                self.review.refresh();
+                self.reviewed.clear();
+                self.selected_file = 0;
+                self.file_offset = 0;
+            }
+            ListMode::PullRequests => {
+                self.review.prs_loaded = false;
+                self.start_prs_load();
+                self.pr_selected = 0;
+                self.pr_offset = 0;
+            }
+        }
+    }
+
     fn start_prs_load(&mut self) {
         if self.review.prs_loading {
             return;
@@ -233,7 +252,8 @@ impl ReviewWindow {
 
         if let Err(error) = spawned {
             self.review.prs_loading = false;
-            self.review.prs_error = Some(format!("failed to start pull request loading: {error}"));
+            self.review.prs_error =
+                Some(format!("No se pudieron cargar los pull requests: {error}"));
         }
 
         self.window.request_redraw();
@@ -387,7 +407,7 @@ impl ReviewWindow {
 
         if let Err(error) = spawned {
             self.review.loading = false;
-            self.review.error = Some(format!("failed to start code review: {error}"));
+            self.review.error = Some(format!("No se pudo abrir Code Review: {error}"));
         }
 
         self.window.request_redraw();
@@ -552,20 +572,7 @@ impl ReviewWindow {
                     start_detail = true;
                 }
                 Key::Character(character) if character.as_str() == "r" && !command => {
-                    match self.mode {
-                        ListMode::Local => {
-                            self.review.refresh();
-                            self.reviewed.clear();
-                            self.selected_file = 0;
-                            self.file_offset = 0;
-                        }
-                        ListMode::PullRequests => {
-                            self.review.prs_loaded = false;
-                            self.start_prs_load();
-                            self.pr_selected = 0;
-                            self.pr_offset = 0;
-                        }
-                    }
+                    self.refresh_current();
                 }
                 Key::Character(character) if character.as_str() == "/" && !command => {
                     if self.mode != ListMode::PullRequests {
@@ -678,6 +685,12 @@ impl ReviewWindow {
 
         if layout.close.contains(x, y) {
             self.close_requested = true;
+            return;
+        }
+
+        if layout.refresh.contains(x, y) {
+            self.refresh_current();
+            self.window.request_redraw();
             return;
         }
 
@@ -799,14 +812,14 @@ impl ReviewWindow {
         let height = size.height.max(1) as f32;
         let scale = self.renderer.scale_factor() as f32;
         let metrics = self.renderer.cell_metrics();
-        let padding = (12.0 * scale).round();
+        let padding = ui::px(ui::GUTTER, scale);
 
-        let header = Rect::new(0.0, 0.0, width, (48.0 * scale).round());
+        let header = Rect::new(0.0, 0.0, width, ui::px(ui::HEADER_HEIGHT, scale));
         let footer = Rect::new(
             0.0,
-            height - (26.0 * scale).round(),
+            height - ui::px(ui::FOOTER_HEIGHT, scale),
             width,
-            (26.0 * scale).round(),
+            ui::px(ui::FOOTER_HEIGHT, scale),
         );
         let body = Rect::new(
             0.0,
@@ -814,15 +827,23 @@ impl ReviewWindow {
             width,
             (footer.y - header.bottom()).max(1.0),
         );
-        let close_size = (20.0 * scale).round();
+        let close_size = ui::px(ui::CLOSE_SIZE, scale);
         let close = Rect::new(
             width - padding - close_size,
             (header.height - close_size) / 2.0,
             close_size,
             close_size,
         );
+        let refresh = Rect::new(
+            (close.x - close_size - ui::px(8.0, scale)).max(padding),
+            close.y,
+            close_size,
+            close_size,
+        );
 
-        let reviews_width = (280.0 * scale).min(body.width * 0.32).max(180.0 * scale);
+        let reviews_width = ui::px(300.0, scale)
+            .min(body.width * 0.32)
+            .max(ui::px(200.0, scale).min(body.width * 0.4));
         let reviews = Rect::new(body.x, body.y, reviews_width, body.height);
         let content = Rect::new(
             reviews.right() + 1.0,
@@ -831,7 +852,7 @@ impl ReviewWindow {
             body.height,
         );
 
-        let tabs_height = (34.0 * scale).round();
+        let tabs_height = ui::px(32.0, scale);
         let half = reviews.width / 2.0;
         let tabs = [
             Rect::new(reviews.x, reviews.y, half, tabs_height),
@@ -845,15 +866,15 @@ impl ReviewWindow {
         let search = (self.mode == ListMode::PullRequests).then(|| {
             Rect::new(
                 reviews.x + 8.0 * scale,
-                reviews.y + tabs_height + 6.0 * scale,
+                reviews.y + tabs_height + ui::px(8.0, scale),
                 (reviews.width - 16.0 * scale).max(1.0),
-                (28.0 * scale).round(),
+                ui::px(32.0, scale),
             )
         });
         let list_top = reviews.y
             + tabs_height
             + if self.mode == ListMode::PullRequests {
-                (6.0 + 28.0 + 6.0) * scale
+                (8.0 + 32.0 + 8.0) * scale
             } else {
                 0.0
             };
@@ -863,7 +884,7 @@ impl ReviewWindow {
             reviews.width,
             (reviews.bottom() - list_top).max(1.0),
         );
-        let reviews_visible = (list_area.height / (50.0 * scale).max(1.0))
+        let reviews_visible = (list_area.height / ui::px(56.0, scale).max(1.0))
             .floor()
             .max(1.0) as usize;
 
@@ -895,20 +916,22 @@ impl ReviewWindow {
         let mut review_rows = Vec::new();
         let end = (start + reviews_visible).min(count);
         for position in start..end {
-            let y = list_area.y + (position - start) as f32 * (50.0 * scale);
+            let y = list_area.y + (position - start) as f32 * ui::px(56.0, scale);
             review_rows.push((
                 position,
                 Rect::new(
                     reviews.x + 6.0 * scale,
                     y,
                     (reviews.width - 12.0 * scale).max(1.0),
-                    (50.0 * scale - 4.0).max(1.0),
+                    ui::px(52.0, scale).max(1.0),
                 ),
             ));
         }
 
         let detail = self.review.detail.as_ref();
-        let files_width = (280.0 * scale).min(content.width * 0.4).max(160.0 * scale);
+        let files_width = ui::px(300.0, scale)
+            .min(content.width * 0.4)
+            .max(ui::px(180.0, scale).min(content.width * 0.45));
         let files = detail.map(|_| Rect::new(content.x, content.y, files_width, content.height));
         let diff = detail.map(|_| {
             Rect::new(
@@ -924,7 +947,7 @@ impl ReviewWindow {
                     area.x + padding,
                     area.y + padding * 0.5,
                     (area.width - padding * 2.0).max(1.0),
-                    (30.0 * scale).round(),
+                    ui::px(32.0, scale),
                 );
                 let text = Rect::new(
                     area.x + padding,
@@ -936,8 +959,9 @@ impl ReviewWindow {
             })
             .unwrap_or((None, None));
 
-        let pane_title_height = (30.0 * scale).round();
-        let file_visible = (((body.height - pane_title_height) / (38.0 * scale).max(1.0))
+        let pane_title_height = ui::px(32.0, scale);
+        let file_area_height = files.map(|rect| rect.height).unwrap_or(body.height);
+        let file_visible = (((file_area_height - pane_title_height) / ui::px(38.0, scale).max(1.0))
             .floor()
             .max(1.0)) as usize;
         let diff_visible = diff_text
@@ -962,14 +986,14 @@ impl ReviewWindow {
             for index in self.file_offset..end {
                 let y = files.y
                     + pane_title_height
-                    + (index - self.file_offset) as f32 * (38.0 * scale);
+                    + (index - self.file_offset) as f32 * ui::px(38.0, scale);
                 file_rows.push((
                     index,
                     Rect::new(
                         files.x + 6.0 * scale,
                         y,
                         (files.width - 12.0 * scale).max(1.0),
-                        (38.0 * scale - 4.0).max(1.0),
+                        ui::px(34.0, scale).max(1.0),
                     ),
                 ));
             }
@@ -979,6 +1003,7 @@ impl ReviewWindow {
             header,
             footer,
             close,
+            refresh,
             reviews,
             tabs,
             search,
@@ -1002,7 +1027,8 @@ impl ReviewWindow {
         let scale = self.renderer.scale_factor() as f32;
         let metrics = self.renderer.cell_metrics();
         let ui_font = self.renderer.physical(config.ui_font_size);
-        let title_font = (ui_font * 1.15).max(14.0);
+        let tokens = Tokens::new(ui_font, scale);
+        let cursor = (self.cursor.x as f32, self.cursor.y as f32);
         let layout = self.layout(config);
 
         let mut quads = Vec::new();
@@ -1038,17 +1064,17 @@ impl ReviewWindow {
         ));
 
         labels.push(Label {
-            text: "CODE REVIEW".into(),
+            text: "Code Review".into(),
             x: layout.padding,
-            y: layout.header.y + 7.0 * scale,
-            width: (layout.close.x - layout.padding * 2.0).max(1.0),
-            font_size: title_font,
+            y: layout.header.y + ui::px(8.0, scale),
+            width: (layout.refresh.x - layout.padding * 2.0).max(1.0),
+            font_size: tokens.title,
             color: theme.sidebar_text,
             bold: true,
         });
         let subtitle = if let Some(detail) = &self.review.detail {
             format!(
-                "{} · {} files · +{} −{} · {}",
+                "{} · {} archivos · +{} −{} · {}",
                 detail.summary.title,
                 detail.files.len(),
                 detail.additions,
@@ -1062,22 +1088,41 @@ impl ReviewWindow {
         labels.push(Label {
             text: subtitle,
             x: layout.padding,
-            y: layout.header.y + 27.0 * scale,
-            width: (layout.close.x - layout.padding * 2.0).max(1.0),
-            font_size: ui_font * 0.78,
+            y: layout.header.y + ui::px(33.0, scale),
+            width: (layout.refresh.x - layout.padding * 2.0).max(1.0),
+            font_size: tokens.caption,
             color: theme.sidebar_text_dim,
             bold: false,
         });
 
-        labels.push(Label {
-            text: "×".into(),
-            x: layout.close.x + (layout.close.width - ui_font * 0.6) / 2.0,
-            y: layout.close.y + (layout.close.height - ui_font * 1.35) / 2.0,
-            width: layout.close.width,
-            font_size: ui_font * 1.15,
-            color: theme.sidebar_text_dim,
-            bold: false,
-        });
+        ui::icon_button(
+            &mut quads,
+            &mut labels,
+            ui::IconButtonSpec {
+                rect: layout.close,
+                glyph: "×",
+                enabled: true,
+                hovered: layout.close.contains(cursor.0, cursor.1),
+                focused: false,
+                danger: false,
+            },
+            theme,
+            tokens,
+        );
+        ui::icon_button(
+            &mut quads,
+            &mut labels,
+            ui::IconButtonSpec {
+                rect: layout.refresh,
+                glyph: "↻",
+                enabled: true,
+                hovered: layout.refresh.contains(cursor.0, cursor.1),
+                focused: false,
+                danger: false,
+            },
+            theme,
+            tokens,
+        );
 
         // Reviews pane: tabs, search and list.
         quads.push(Quad::new(
@@ -1098,9 +1143,9 @@ impl ReviewWindow {
         let remote_label = self
             .review
             .forge
-            .map_or("REMOTE CHANGES", ForgeKind::tab_label);
+            .map_or("Cambios remotos", ForgeKind::tab_label);
         let tab_labels = [
-            format!("LOCAL {}", self.review.reviews.len()),
+            format!("Locales {}", self.review.reviews.len()),
             if self.review.prs_error.is_some() {
                 format!("{remote_label} !")
             } else {
@@ -1110,6 +1155,7 @@ impl ReviewWindow {
         for (index, rect) in layout.tabs.iter().enumerate() {
             let active = (index == 0 && self.mode == ListMode::Local)
                 || (index == 1 && self.mode == ListMode::PullRequests);
+            let hovered = rect.contains(cursor.0, cursor.1);
             quads.push(Quad::new(
                 rect.x,
                 rect.y,
@@ -1118,6 +1164,8 @@ impl ReviewWindow {
                 to_linear(
                     if active {
                         theme.sidebar_active
+                    } else if hovered {
+                        theme.sidebar_hover
                     } else {
                         theme.sidebar_background
                     },
@@ -1143,9 +1191,9 @@ impl ReviewWindow {
             labels.push(Label {
                 text: tab_labels[index].clone(),
                 x: rect.x + 10.0 * scale,
-                y: rect.y + 8.0 * scale,
+                y: rect.y + (rect.height - tokens.caption * 1.35) / 2.0,
                 width: (rect.width - 14.0 * scale).max(1.0),
-                font_size: ui_font * 0.76,
+                font_size: tokens.caption,
                 color: if active {
                     theme.sidebar_text
                 } else {
@@ -1190,9 +1238,9 @@ impl ReviewWindow {
             labels.push(Label {
                 text,
                 x: search.x + 8.0 * scale,
-                y: search.y + 5.0 * scale,
+                y: search.y + (search.height - tokens.small * 1.35) / 2.0,
                 width: (search.width - 14.0 * scale).max(1.0),
-                font_size: ui_font * 0.82,
+                font_size: tokens.small,
                 color: if self.search.is_empty() {
                     theme.sidebar_text_dim
                 } else {
@@ -1223,7 +1271,7 @@ impl ReviewWindow {
                     else {
                         continue;
                     };
-                    let draft = if pull.draft { " · draft" } else { "" };
+                    let draft = if pull.draft { " · borrador" } else { "" };
                     (
                         pull.list_title(),
                         format!(
@@ -1235,13 +1283,21 @@ impl ReviewWindow {
             };
 
             let selected = *position == self.selected_index();
-            if selected {
+            let hovered = rect.contains(cursor.0, cursor.1);
+            if selected || hovered {
                 quads.push(Quad::new(
                     rect.x,
                     rect.y,
                     rect.width,
                     rect.height,
-                    to_linear(theme.sidebar_active, 1.0),
+                    to_linear(
+                        if selected {
+                            theme.sidebar_active
+                        } else {
+                            theme.sidebar_hover
+                        },
+                        1.0,
+                    ),
                 ));
                 quads.push(Quad::new(
                     rect.x,
@@ -1255,9 +1311,9 @@ impl ReviewWindow {
             labels.push(Label {
                 text: title,
                 x: rect.x + 8.0 * scale,
-                y: rect.y + 5.0 * scale,
+                y: rect.y + ui::px(7.0, scale),
                 width: (rect.width - 14.0 * scale).max(1.0),
-                font_size: ui_font,
+                font_size: tokens.small,
                 color: if selected {
                     theme.sidebar_text
                 } else {
@@ -1268,49 +1324,85 @@ impl ReviewWindow {
             labels.push(Label {
                 text: subtitle,
                 x: rect.x + 8.0 * scale,
-                y: rect.y + 26.0 * scale,
+                y: rect.y + ui::px(30.0, scale),
                 width: (rect.width - 14.0 * scale).max(1.0),
-                font_size: ui_font * 0.74,
+                font_size: tokens.caption,
                 color: theme.sidebar_text_dim,
                 bold: false,
             });
         }
 
         if self.mode == ListMode::PullRequests && layout.review_rows.is_empty() {
-            let changes_name = self
-                .review
-                .forge
-                .map_or("remote changes", ForgeKind::changes_name);
-            let empty = self
-                .review
-                .forge
-                .map_or("No open remote changes.".to_owned(), |forge| {
-                    forge.empty_message().to_owned()
+            if let Some(error) = &self.review.prs_error {
+                labels.push(Label {
+                    text: error.clone(),
+                    x: layout.list_area.x + layout.padding,
+                    y: layout.list_area.y + layout.padding,
+                    width: (layout.list_area.width - layout.padding * 2.0).max(1.0),
+                    font_size: tokens.small,
+                    color: theme.diff_remove_text,
+                    bold: false,
                 });
-            let (message, color) = if self.review.prs_loading {
-                (
-                    format!("Loading open {changes_name}…"),
-                    theme.sidebar_text_dim,
-                )
-            } else if let Some(error) = &self.review.prs_error {
-                (error.clone(), theme.diff_remove_text)
+            } else if self.review.prs_loading {
+                ui::skeleton_rows(&mut quads, layout.list_area, 4, theme, scale);
             } else if self.review.pull_requests.is_empty() {
-                (empty, theme.sidebar_text_dim)
+                let empty = self
+                    .review
+                    .forge
+                    .map_or("No hay cambios remotos abiertos.".to_owned(), |forge| {
+                        forge.empty_message().to_owned()
+                    });
+                ui::empty_state(
+                    &mut quads,
+                    &mut labels,
+                    layout.list_area,
+                    "Sin pull requests",
+                    &empty,
+                    theme,
+                    tokens,
+                );
             } else {
-                (
-                    "No matches for this search.".to_owned(),
-                    theme.sidebar_text_dim,
-                )
-            };
-            labels.push(Label {
-                text: message,
-                x: layout.list_area.x + layout.padding,
-                y: layout.list_area.y + layout.padding,
-                width: (layout.list_area.width - layout.padding * 2.0).max(1.0),
-                font_size: ui_font * 0.82,
-                color,
-                bold: false,
-            });
+                ui::empty_state(
+                    &mut quads,
+                    &mut labels,
+                    layout.list_area,
+                    "Sin resultados",
+                    "Prueba con otra búsqueda.",
+                    theme,
+                    tokens,
+                );
+            }
+        }
+        if self.mode == ListMode::Local && layout.review_rows.is_empty() {
+            if self.review.loading {
+                ui::skeleton_rows(&mut quads, layout.list_area, 4, theme, scale);
+            } else {
+                ui::empty_state(
+                    &mut quads,
+                    &mut labels,
+                    layout.list_area,
+                    "Sin reviews",
+                    "No hay cambios ni commits locales para revisar. Pulsa R para actualizar.",
+                    theme,
+                    tokens,
+                );
+            }
+        }
+        ui::scrollbar(
+            &mut quads,
+            layout.list_area,
+            if self.mode == ListMode::Local {
+                self.review.list_offset
+            } else {
+                self.pr_offset
+            },
+            self.item_count(),
+            layout.reviews_visible,
+            theme,
+            scale,
+        );
+        if self.focus == Focus::Reviews {
+            ui::focus_ring(&mut quads, layout.reviews, theme, scale);
         }
 
         let detail = self.review.detail.as_ref();
@@ -1338,11 +1430,11 @@ impl ReviewWindow {
                     .filter(|file| self.is_reviewed(file))
                     .count();
                 labels.push(Label {
-                    text: format!("FILES · {reviewed}/{} revisados", detail.files.len()),
+                    text: format!("Archivos · {reviewed}/{} revisados", detail.files.len()),
                     x: files.x + layout.padding,
-                    y: files.y + 8.0 * scale,
+                    y: files.y + ui::px(9.0, scale),
                     width: (files.width - layout.padding * 2.0).max(1.0),
-                    font_size: ui_font * 0.82,
+                    font_size: tokens.caption,
                     color: theme.sidebar_text_dim,
                     bold: true,
                 });
@@ -1352,14 +1444,22 @@ impl ReviewWindow {
                         continue;
                     };
                     let selected = *index == self.selected_file;
+                    let hovered = rect.contains(cursor.0, cursor.1);
                     let reviewed = self.is_reviewed(file);
-                    if selected {
+                    if selected || hovered {
                         quads.push(Quad::new(
                             rect.x,
                             rect.y,
                             rect.width,
                             rect.height,
-                            to_linear(theme.sidebar_active, 1.0),
+                            to_linear(
+                                if selected {
+                                    theme.sidebar_active
+                                } else {
+                                    theme.sidebar_hover
+                                },
+                                1.0,
+                            ),
                         ));
                         quads.push(Quad::new(
                             rect.x,
@@ -1381,9 +1481,9 @@ impl ReviewWindow {
                     labels.push(Label {
                         text: check.into(),
                         x: rect.x + 6.0 * scale,
-                        y: rect.y + 7.0 * scale,
+                        y: rect.y + ui::px(8.0, scale),
                         width: 18.0 * scale,
-                        font_size: ui_font,
+                        font_size: tokens.small,
                         color: if reviewed {
                             theme.accent
                         } else {
@@ -1394,9 +1494,9 @@ impl ReviewWindow {
                     labels.push(Label {
                         text: format!("{status}  {}", file.path),
                         x: rect.x + 28.0 * scale,
-                        y: rect.y + 4.0 * scale,
+                        y: rect.y + ui::px(5.0, scale),
                         width: (rect.width - 34.0 * scale).max(1.0),
-                        font_size: ui_font * 0.86,
+                        font_size: tokens.small,
                         color: if reviewed {
                             theme.sidebar_text_dim
                         } else {
@@ -1407,9 +1507,9 @@ impl ReviewWindow {
                     labels.push(Label {
                         text: format!("+{} −{}", file.additions, file.deletions),
                         x: rect.x + 28.0 * scale,
-                        y: rect.y + 20.0 * scale,
+                        y: rect.y + ui::px(23.0, scale),
                         width: (rect.width - 34.0 * scale).max(1.0),
-                        font_size: ui_font * 0.7,
+                        font_size: tokens.caption,
                         color: theme.sidebar_text_dim,
                         bold: false,
                     });
@@ -1446,28 +1546,28 @@ impl ReviewWindow {
                         x: title.x,
                         y: title.y,
                         width: title.width,
-                        font_size: ui_font * 0.9,
+                        font_size: tokens.small,
                         color: theme.sidebar_text,
                         bold: true,
                     });
 
                     if file.binary {
                         labels.push(Label {
-                            text: "Binary file".into(),
+                            text: "Archivo binario".into(),
                             x: area.x,
                             y: area.y,
                             width: area.width,
-                            font_size: ui_font,
+                            font_size: tokens.small,
                             color: theme.sidebar_text_dim,
                             bold: false,
                         });
                     } else if file.lines.is_empty() {
                         labels.push(Label {
-                            text: "No textual changes".into(),
+                            text: "Sin cambios de texto".into(),
                             x: area.x,
                             y: area.y,
                             width: area.width,
-                            font_size: ui_font,
+                            font_size: tokens.small,
                             color: theme.sidebar_text_dim,
                             bold: false,
                         });
@@ -1484,17 +1584,26 @@ impl ReviewWindow {
                                 &mut quads,
                             ),
                         ));
+                        ui::scrollbar(
+                            &mut quads,
+                            area,
+                            self.review.scroll_row,
+                            file.lines.len(),
+                            layout.diff_visible,
+                            theme,
+                            scale,
+                        );
                     }
                 } else {
-                    labels.push(Label {
-                        text: "Select a file".into(),
-                        x: area.x,
-                        y: area.y,
-                        width: area.width,
-                        font_size: ui_font,
-                        color: theme.sidebar_text_dim,
-                        bold: false,
-                    });
+                    ui::empty_state(
+                        &mut quads,
+                        &mut labels,
+                        area,
+                        "Nada seleccionado",
+                        "Selecciona un archivo para ver su diff.",
+                        theme,
+                        tokens,
+                    );
                 }
             }
 
@@ -1511,25 +1620,20 @@ impl ReviewWindow {
 
             let focus = self.focus;
             if let Some(area) = match focus {
-                Focus::Reviews => Some(layout.reviews),
                 Focus::Files => layout.files,
                 Focus::Diff => layout.diff,
+                Focus::Reviews => None,
             } {
-                push_outline(
-                    &mut quads,
-                    area,
-                    (2.0 * scale).max(1.0),
-                    to_linear(theme.accent, 0.8),
-                );
+                ui::focus_ring(&mut quads, area, theme, scale);
             }
 
             let hint = self.hint(focus);
             labels.push(Label {
                 text: hint.into(),
                 x: layout.footer.x + layout.padding,
-                y: layout.footer.y + 5.0 * scale,
+                y: layout.footer.y + (layout.footer.height - tokens.caption * 1.35) / 2.0,
                 width: (layout.footer.width - layout.padding * 2.0).max(1.0),
-                font_size: ui_font * 0.76,
+                font_size: tokens.caption,
                 color: theme.sidebar_text_dim,
                 bold: false,
             });
@@ -1546,69 +1650,64 @@ impl ReviewWindow {
         }
 
         // No detail: loading/error/welcome.
-        let (message, is_error) = match self.mode {
-            ListMode::PullRequests => {
-                let changes_name = self
-                    .review
-                    .forge
-                    .map_or("remote changes", ForgeKind::changes_name);
-                if self.review.prs_loading {
-                    (format!("Loading open {changes_name}…"), false)
-                } else if let Some(error) = &self.review.prs_error {
-                    (error.clone(), true)
-                } else if self.review.pull_requests.is_empty() {
-                    let empty = self.review.forge.map_or(
-                        "No open remote changes found in this repository.".to_owned(),
-                        |forge| forge.empty_message().to_owned(),
-                    );
-                    (empty, false)
-                } else {
-                    (
-                        "Selecciona un pull request o merge request de la izquierda y pulsa Enter."
-                            .to_owned(),
-                        false,
-                    )
-                }
-            }
-            ListMode::Local => {
-                if self.review.loading {
-                    ("Loading review…".to_owned(), false)
-                } else if let Some(error) = &self.review.error {
-                    (error.clone(), true)
-                } else if self.review.reviews.is_empty() {
-                    (
-                        "No changes or commits found in this repository.".to_owned(),
-                        false,
-                    )
-                } else {
-                    (
-                        "Selecciona una review de la izquierda y pulsa Enter.".to_owned(),
-                        false,
-                    )
-                }
-            }
+        let error = match self.mode {
+            ListMode::PullRequests => self.review.prs_error.clone(),
+            ListMode::Local => self.review.error.clone(),
         };
-        labels.push(Label {
-            text: message,
-            x: layout.content.x + layout.padding,
-            y: layout.content.y + 24.0 * scale,
-            width: (layout.content.width - layout.padding * 2.0).max(1.0),
-            font_size: ui_font,
-            color: if is_error {
-                theme.diff_remove_text
-            } else {
-                theme.sidebar_text_dim
-            },
-            bold: false,
-        });
+        if let Some(error) = error {
+            labels.push(Label {
+                text: error,
+                x: layout.content.x + layout.padding,
+                y: layout.content.y + ui::px(24.0, scale),
+                width: (layout.content.width - layout.padding * 2.0).max(1.0),
+                font_size: tokens.small,
+                color: theme.diff_remove_text,
+                bold: false,
+            });
+        } else {
+            let (title, body) = match self.mode {
+                ListMode::PullRequests if self.review.prs_loading => (
+                    "Cargando pull requests…",
+                    "Consultando el forge configurado.",
+                ),
+                ListMode::PullRequests if self.review.pull_requests.is_empty() => (
+                    "Sin pull requests",
+                    "No hay cambios remotos abiertos en este repositorio. Pulsa R para actualizar.",
+                ),
+                ListMode::PullRequests => (
+                    "Elige un pull request",
+                    "Selecciona un pull request o merge request de la izquierda y pulsa Enter.",
+                ),
+                ListMode::Local if self.review.loading => {
+                    ("Cargando review…", "Leyendo commits y cambios locales.")
+                }
+                ListMode::Local if self.review.reviews.is_empty() => (
+                    "Sin cambios",
+                    "No hay cambios ni commits en este repositorio. Pulsa R para actualizar.",
+                ),
+                ListMode::Local => (
+                    "Elige una review",
+                    "Selecciona una review de la izquierda y pulsa Enter.",
+                ),
+            };
+            ui::empty_state(
+                &mut quads,
+                &mut labels,
+                layout.content,
+                title,
+                body,
+                theme,
+                tokens,
+            );
+        }
 
         let hint = self.hint(Focus::Reviews);
         labels.push(Label {
             text: hint.into(),
             x: layout.footer.x + layout.padding,
-            y: layout.footer.y + 5.0 * scale,
+            y: layout.footer.y + (layout.footer.height - tokens.caption * 1.35) / 2.0,
             width: (layout.footer.width - layout.padding * 2.0).max(1.0),
-            font_size: ui_font * 0.76,
+            font_size: tokens.caption,
             color: theme.sidebar_text_dim,
             bold: false,
         });
