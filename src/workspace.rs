@@ -663,15 +663,12 @@ mod tests {
             first: Box::new(LayoutSpec::Leaf(0)),
             second: Box::new(LayoutSpec::Leaf(0)),
         };
-        assert!(
-            workspace
-                .restore_terminal(&layout, 2, 0, None)
-                .is_none()
-        );
+        assert!(workspace.restore_terminal(&layout, 2, 0, None).is_none());
     }
 
     #[test]
-    fn splitting_a_leaf_replaces_it() {        let mut tree = LayoutNode::Leaf(PaneId(1));
+    fn splitting_a_leaf_replaces_it() {
+        let mut tree = LayoutNode::Leaf(PaneId(1));
         assert!(tree.split(PaneId(1), PaneId(2), SplitDirection::Down, 7));
         assert_eq!(tree.leaf_count(), 2);
         assert!(tree.contains(PaneId(1)));
@@ -699,7 +696,8 @@ mod tests {
     }
 
     #[test]
-    fn tab_lifecycle_tracks_the_active_tab() {        let mut workspace = Workspace::new();
+    fn tab_lifecycle_tracks_the_active_tab() {
+        let mut workspace = Workspace::new();
 
         let (first_tab, first_pane) = workspace.create_terminal();
         let (second_tab, _second_pane) = workspace.create_terminal();

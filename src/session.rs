@@ -518,10 +518,8 @@ mod tests {
 
     #[test]
     fn writes_session_metadata_and_scrollback() {
-        let dir = std::env::temp_dir().join(format!(
-            "f-terminal-session-test-{}",
-            std::process::id()
-        ));
+        let dir =
+            std::env::temp_dir().join(format!("f-terminal-session-test-{}", std::process::id()));
         let _ = fs::remove_dir_all(&dir);
         fs::create_dir_all(&dir).unwrap();
 
@@ -558,8 +556,7 @@ mod tests {
         let parsed: SessionState = serde_json::from_str(&text).unwrap();
         assert_eq!(parsed, state);
 
-        let scrollback =
-            fs::read(dir.join("session-scrollback/0000000000000007.ansi")).unwrap();
+        let scrollback = fs::read(dir.join("session-scrollback/0000000000000007.ansi")).unwrap();
         assert!(String::from_utf8_lossy(&scrollback).contains("hello"));
 
         fs::remove_dir_all(&dir).ok();
