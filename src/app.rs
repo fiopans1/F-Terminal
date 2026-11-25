@@ -731,6 +731,12 @@ impl ApplicationHandler<UserEvent> for App {
 
         event_loop.set_control_flow(ControlFlow::WaitUntil(Instant::now() + wait));
     }
+
+    fn exiting(&mut self, _event_loop: &ActiveEventLoop) {
+        if let Some(state) = &mut self.window {
+            state.save_session(&self.config, true);
+        }
+    }
 }
 
 struct ViewLayout {
