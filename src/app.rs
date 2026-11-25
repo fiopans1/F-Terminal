@@ -5,6 +5,7 @@ use std::sync::Arc;
 use std::sync::mpsc::Sender;
 use std::time::{Duration, Instant};
 
+use anyhow::Context;
 use alacritty_terminal::event::{Event, WindowSize};
 use alacritty_terminal::grid::Scroll;
 use alacritty_terminal::index::{Column, Line, Point, Side};
@@ -1055,9 +1056,7 @@ fn read_scrollbacks(paths: Vec<(PaneId, PathBuf)>) -> HashMap<PaneId, Vec<u8>> {
     std::thread::scope(|scope| {
         let handles: Vec<_> = paths
             .into_iter()
-            .map(|(pane, path)| {
-                scope.spawn(move || (pane, session::read_scrollback(&path)))
-            })
+            .map(|(pane, path)| scope.spawn(move || (pane, session::read_scrollback(&path))))
             .collect();
         handles
             .into_iter()
