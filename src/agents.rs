@@ -11,7 +11,7 @@
 //! Process scanning happens in a background thread and never blocks the UI.
 
 use std::collections::{HashMap, HashSet};
-use std::ffi::OsStr;
+use std::ffi::{OsStr, OsString};
 use std::fs;
 use std::io::{Read, Seek, SeekFrom};
 use std::path::{Path, PathBuf};
@@ -72,6 +72,20 @@ impl AgentKind {
             Self::Junie => "J",
             Self::Other(_) => "A",
         }
+    }
+
+    pub fn command_name(&self) -> Option<&str> {
+        match self {
+            Self::ClaudeCode => Some("claude"),
+            Self::Codex => Some("codex"),
+            Self::OpenCode => Some("opencode"),
+            Self::Junie => Some("junie"),
+            Self::Other(name) => (!name.is_empty()).then_some(name.as_str()),
+        }
+    }
+
+    pub fn launch_presets() -> [Self; 4] {
+        [Self::ClaudeCode, Self::Codex, Self::OpenCode, Self::Junie]
     }
 }
 
@@ -177,6 +191,14 @@ pub struct AgentRow {
     pub source: AgentSource,
     pub subagents: Vec<AgentChild>,
     pub seen: bool,
+    pub memory_bytes: Option<u64>,
+    pub cpu_tenths: Option<u16>,
+    pub child_processes: u32,
+    pub command: Option<String>,
+    pub git_branch: Option<String>,
+    pub git_diff: Option<(usize, usize)>,
+    pub last_output: Option<Instant>,
+    pub preview_lines: Vec<String>,
 }
 
 impl AgentRow {
@@ -215,6 +237,47 @@ impl AgentSnapshot {
             .filter(|row| !row.state.is_finished())
             .count()
     }
+
+    pub fn blocked_count(&self) -> usize {
+        self.rows
+            .iter()
+            .filter(|row| matches!(row.state, AgentState::Blocked(_) | AgentState::Attention))
+            .count()
+    }
+
+    pub fn total_memory_bytes(&self) -> u64 {
+        self.rows.iter().filter_map(|row| row.memory_bytes).sum()
+    }
+
+    pub fn total_cpu_tenths(&self) -> u32 {
+        self.rows
+            .iter()
+            .filter_map(|row| row.cpu_tenths.map(u32::from))
+            .sum()
+    }
+
+    pub fn total_subagents(&self) -> usize {
+        self.rows.iter().map(|row| row.subagents.len()).sum()
+    }
+
+    pub fn total_git_diff(&self) -> (usize, usize) {
+        let mut seen_cwds: HashSet<&Path> = HashSet::new();
+        let mut additions = 0usize;
+        let mut deletions = 0usize;
+        for row in &self.rows {
+            let Some((add, del)) = row.git_diff else {
+                continue;
+            };
+            if let Some(cwd) = row.cwd.as_deref()
+                && !seen_cwds.insert(cwd)
+            {
+                continue;
+            }
+            additions = additions.saturating_add(add);
+            deletions = deletions.saturating_add(del);
+        }
+        (additions, deletions)
+    }
 }
 
 #[derive(Clone, Debug)]
@@ -224,6 +287,10 @@ pub struct DetectedAgent {
     pub kind: AgentKind,
     pub cwd: Option<PathBuf>,
     pub started: u64,
+    pub memory_bytes: u64,
+    pub cpu_tenths: u16,
+    pub child_processes: u32,
+    pub command: Option<String>,
 }
 
 #[derive(Clone, Debug)]
@@ -363,6 +430,10 @@ fn scan(
                     kind,
                     cwd: None,
                     started: process.start_time(),
+                    memory_bytes: 0,
+                    cpu_tenths: 0,
+                    child_processes: count_descendants(pid, &children),
+                    command: format_command(process.cmd()),
                 });
                 // Descendants of an agent are its subagents or helper
                 // processes, not separate top-level agents.
@@ -388,14 +459,18 @@ fn scan(
                     kind,
                     cwd: None,
                     started: process.start_time(),
+                    memory_bytes: 0,
+                    cpu_tenths: 0,
+                    child_processes: count_descendants(pid, &children),
+                    command: format_command(process.cmd()),
                 });
             }
         }
     }
 
-    // `cwd` is only needed for agents that are actually displayed. Refreshing
-    // it for every process makes the global scan substantially more expensive
-    // on macOS and Windows.
+    // `cwd`, memory and CPU usage are only needed for agents that are actually
+    // displayed. Refreshing them for every process makes the global scan
+    // substantially more expensive on macOS and Windows.
     let detected_pids: Vec<Pid> = panes
         .iter()
         .chain(external.iter())
@@ -405,19 +480,69 @@ fn scan(
         system.refresh_processes_specifics(
             ProcessesToUpdate::Some(&detected_pids),
             false,
-            ProcessRefreshKind::nothing().with_cwd(UpdateKind::Always),
+            ProcessRefreshKind::nothing()
+                .with_cwd(UpdateKind::Always)
+                .with_memory()
+                .with_cpu(),
         );
         for agent in panes.iter_mut().chain(external.iter_mut()) {
-            agent.cwd = system
-                .process(Pid::from_u32(agent.pid))
-                .and_then(|process| process.cwd())
-                .map(Path::to_path_buf);
+            if let Some(process) = system.process(Pid::from_u32(agent.pid)) {
+                agent.cwd = process.cwd().map(Path::to_path_buf);
+                agent.memory_bytes = process.memory();
+                agent.cpu_tenths = cpu_to_tenths(process.cpu_usage());
+            }
         }
     }
 
     panes.sort_by_key(|agent| (agent.pane.map(|pane| pane.0), agent.pid));
     external.sort_by_key(|agent| agent.pid);
     (panes, external)
+}
+
+fn count_descendants(root: u32, children: &HashMap<u32, Vec<u32>>) -> u32 {
+    let mut visited = HashSet::new();
+    let mut stack = Vec::new();
+    if let Some(direct) = children.get(&root) {
+        stack.extend(direct.iter().copied());
+    }
+    let mut count = 0u32;
+    while let Some(pid) = stack.pop() {
+        if pid == root || !visited.insert(pid) {
+            continue;
+        }
+        count = count.saturating_add(1);
+        if let Some(kids) = children.get(&pid) {
+            stack.extend(kids.iter().copied());
+        }
+    }
+    count
+}
+
+fn format_command(cmd: &[OsString]) -> Option<String> {
+    let joined = cmd
+        .iter()
+        .map(|part| part.to_string_lossy())
+        .filter(|part| !part.is_empty())
+        .collect::<Vec<_>>()
+        .join(" ");
+    if joined.is_empty() {
+        return None;
+    }
+    const MAX_LEN: usize = 240;
+    if joined.chars().count() <= MAX_LEN {
+        Some(joined)
+    } else {
+        let mut truncated: String = joined.chars().take(MAX_LEN - 1).collect();
+        truncated.push('…');
+        Some(truncated)
+    }
+}
+
+fn cpu_to_tenths(usage: f32) -> u16 {
+    if !usage.is_finite() || usage <= 0.0 {
+        return 0;
+    }
+    (usage.clamp(0.0, 999.9) * 10.0).round() as u16
 }
 
 fn detect_process(process: &sysinfo::Process, allow_any_name: bool) -> Option<AgentKind> {
@@ -861,5 +986,68 @@ mod tests {
         assert_eq!(events[0].state, AgentState::Done);
 
         let _ = fs::remove_file(&path);
+    }
+
+    #[test]
+    fn counts_descendants_without_looping() {
+        let mut tree: HashMap<u32, Vec<u32>> = HashMap::new();
+        tree.insert(10, vec![20, 30]);
+        tree.insert(20, vec![40]);
+        tree.insert(40, vec![10]); // cycle back to root
+        assert_eq!(count_descendants(10, &tree), 3);
+        assert_eq!(count_descendants(99, &tree), 0);
+    }
+
+    #[test]
+    fn formats_command_and_clamps_cpu() {
+        assert_eq!(format_command(&[]), None);
+        assert_eq!(
+            format_command(&[OsString::from("claude"), OsString::from("--resume")]),
+            Some("claude --resume".into())
+        );
+        assert_eq!(cpu_to_tenths(-1.0), 0);
+        assert_eq!(cpu_to_tenths(f32::NAN), 0);
+        assert_eq!(cpu_to_tenths(12.34), 123);
+        assert_eq!(cpu_to_tenths(1500.0), 9999);
+    }
+
+    #[test]
+    fn aggregates_snapshot_telemetry_and_deduplicates_git_diff() {
+        let make_row = |id: u32, cwd: &str, mem: u64, cpu: u16, diff: (usize, usize)| AgentRow {
+            id: AgentId::External { pid: id },
+            kind: AgentKind::ClaudeCode,
+            state: AgentState::Working,
+            message: None,
+            title: None,
+            cwd: Some(PathBuf::from(cwd)),
+            pane: Some(PaneId(u64::from(id))),
+            tab_title: None,
+            pane_label: None,
+            pid: Some(id),
+            started: 0,
+            progress: None,
+            source: AgentSource::Process,
+            subagents: Vec::new(),
+            seen: false,
+            memory_bytes: Some(mem),
+            cpu_tenths: Some(cpu),
+            child_processes: 1,
+            command: None,
+            git_branch: Some("main".into()),
+            git_diff: Some(diff),
+            last_output: None,
+            preview_lines: Vec::new(),
+        };
+        let snapshot = AgentSnapshot {
+            rows: vec![
+                make_row(1, "/repo-a", 100, 15, (10, 4)),
+                make_row(2, "/repo-a", 250, 25, (10, 4)),
+                make_row(3, "/repo-b", 50, 10, (3, 1)),
+            ],
+            generated: None,
+        };
+        assert_eq!(snapshot.total_memory_bytes(), 400);
+        assert_eq!(snapshot.total_cpu_tenths(), 50);
+        assert_eq!(snapshot.total_git_diff(), (13, 5));
     }
 }

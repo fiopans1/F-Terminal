@@ -162,6 +162,20 @@ impl Config {
         }
     }
 
+    /// Read the config without falling back to defaults. Used by live reload so
+    /// a partially written file cannot reset the current configuration.
+    pub fn try_load() -> Option<Self> {
+        let path = config_path()?;
+        let text = fs::read_to_string(path).ok()?;
+        match Self::from_toml(&text) {
+            Ok(config) => Some(config),
+            Err(error) => {
+                log::warn!("could not reload config: {error}");
+                None
+            }
+        }
+    }
+
     pub fn from_toml(text: &str) -> Result<Self, toml::de::Error> {
         let file: FileConfig = toml::from_str(text)?;
         Ok(file.merge())

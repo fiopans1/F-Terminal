@@ -414,6 +414,39 @@ impl Workspace {
         self.active
     }
 
+    /// Move a tab to a new position, keeping the currently active tab active.
+    pub fn move_tab(&mut self, id: TabId, target: usize) -> bool {
+        let Some(from) = self.tabs.iter().position(|tab| tab.id == id) else {
+            return false;
+        };
+        if self.tabs.len() < 2 {
+            return false;
+        }
+
+        // `target` is an insertion index in the current list. Removing the tab
+        // shifts everything after it one slot to the left.
+        let mut target = target.min(self.tabs.len());
+        if from < target {
+            target -= 1;
+        }
+        if from == target {
+            return false;
+        }
+
+        let active = self.tabs.get(self.active).map(|tab| tab.id);
+        let tab = self.tabs.remove(from);
+        self.tabs.insert(target.min(self.tabs.len()), tab);
+
+        if let Some(active) = active {
+            self.active = self
+                .tabs
+                .iter()
+                .position(|tab| tab.id == active)
+                .unwrap_or(0);
+        }
+        true
+    }
+
     pub fn pane(&self, id: PaneId) -> Option<&Pane> {
         self.tabs.iter().find_map(|tab| tab.panes.get(&id))
     }
@@ -663,6 +696,28 @@ mod tests {
             second: Box::new(LayoutSpec::Leaf(0)),
         };
         assert!(workspace.restore_terminal(&layout, 2, 0, None).is_none());
+    }
+
+    #[test]
+    fn reordering_tabs_keeps_the_active_tab() {
+        let mut workspace = Workspace::new();
+        let (first, _) = workspace.create_terminal();
+        let (second, _) = workspace.create_terminal();
+        let (third, _) = workspace.create_terminal();
+        workspace.select_tab(second);
+        assert_eq!(workspace.active_tab_id(), Some(second));
+
+        assert!(workspace.move_tab(first, 3));
+        let order: Vec<TabId> = workspace.tabs.iter().map(|tab| tab.id).collect();
+        assert_eq!(order, vec![second, third, first]);
+        assert_eq!(workspace.active_tab_id(), Some(second));
+
+        assert!(workspace.move_tab(first, 0));
+        let order: Vec<TabId> = workspace.tabs.iter().map(|tab| tab.id).collect();
+        assert_eq!(order, vec![first, second, third]);
+        assert_eq!(workspace.active_tab_id(), Some(second));
+
+        assert!(!workspace.move_tab(second, 1));
     }
 
     #[test]

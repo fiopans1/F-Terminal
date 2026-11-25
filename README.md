@@ -61,6 +61,9 @@ welcome.
 - Sesiones plegables con panes hijos y splits derecha/abajo; divisores
   arrastrables.
 - Cada pane tiene su propio shell, cwd, scrollback y estado VT.
+- Búsqueda literal en scrollback con *smart case*, navegación y resaltado de
+  coincidencias; enlaces `OSC 8` y URLs planas con `Ctrl/Cmd+Click`.
+- Sidebar con sesiones reordenables arrastrando y orden persistido.
 - Selección con ratón, portapapeles, IME, bracketed paste y alternate screen.
 - Colores ANSI de 16/256/truecolor, OSC 4/10/11 y consultas DA/DSR.
 - Editor integrado con resaltado TextMate en background.
@@ -68,15 +71,16 @@ welcome.
   commits y **pull requests de GitHub o merge requests de GitLab** con buscador.
 - **Gestor Git** en ventana separada: stage/unstage, commit/amend, ramas,
   fetch/pull/push, merge, stash e historial con diff.
-- **Agent Mode** en ventana separada: agentes Claude Code, Codex, OpenCode y
-  Junie en tiempo real, con estados, mensajes, subagentes y salto al pane.
+- **Agent Mode** en ventana separada: centro de agentes con estados en tiempo
+  real, telemetría CPU/RAM, diff Git, consola en vivo, subagentes, búsqueda y
+  filtros, mensajes rápidos y lanzador de Claude Code, Codex, OpenCode y Junie.
 - Footer Git por terminal con dos burbujas: rama y `+N/-N`.
 - Autocompletado inline y popup: historial, comandos del `PATH`, rutas y
   ramas/tags de Git, sin indexar el disco ni lanzar `git` por pulsación.
 - Perfiles de shell: zsh, bash, fish, `cmd.exe`, Windows PowerShell,
   PowerShell 7, Git Bash, MSYS2/Cygwin y distribuciones WSL.
-- Configuración TOML con scrollback por sesión, presupuesto global opcional y
-  modo de render compartido o aislado.
+- Configuración TOML con scrollback por sesión, presupuesto global opcional,
+  modo de render compartido o aislado y recarga en caliente al guardar.
 - Instaladores nativos offline: DMG en macOS, EXE con UAC en Windows y
   paquetes DEB/RPM en Linux.
 - La terminal principal sigue usable mientras Code Review, el gestor Git o
@@ -363,12 +367,17 @@ primer arranque con una plantilla comentada y permisos `600` en Unix.
 La variable `F_TERMINAL_CONFIG` permite usar otra ruta.
 
 `Cmd+Shift+S` / `Ctrl+Shift+S` abre el `config.toml` en el editor integrado. Los
-cambios se aplican al reiniciar la app.
+cambios se aplican en caliente en cuanto se guarda el fichero: tema, tamaños de
+letra, márgenes, scrollback, perfil de shell por defecto, agentes y el resto de
+opciones de comportamiento. Los cambios estructurales —`font_family` y
+`render.mode`— siguen necesitando reiniciar la app; el resto se aplica sin
+perder las sesiones abiertas.
 
-El fichero se lee al arrancar: reinicia la app para aplicar cambios. Si el TOML
-no se puede leer o parsear, se usan los valores por defecto y se escribe un
-aviso en el log. Los números fuera de rango se recortan; un `render.mode`
-desconocido cae a `isolated` y un tema desconocido a Foundry.
+Si el TOML no se puede leer o parsear durante una recarga, se conserva la
+configuración anterior (no se restablecen los valores por defecto) y se escribe
+un aviso en el log. Al arrancar, un fichero inválido sí cae a los valores por
+defecto. Los números fuera de rango se recortan; un `render.mode` desconocido
+cae a `isolated` y un tema desconocido a Foundry.
 
 ### Ejemplo completo
 
@@ -563,6 +572,31 @@ El renderer no conoce `alacritty_terminal`: consume un `Frame` ya resuelto con
 texto, colores, fondos y cursor. Eso mantiene aislado el motor VT de la capa
 gráfica.
 
+### Búsqueda en scrollback y enlaces
+
+`Cmd+Shift+F` en macOS y `Ctrl+Shift+F` en Linux/Windows abren el buscador del
+pane enfocado. La búsqueda recorre el scrollback y la pantalla visible, trata la
+consulta como texto literal y usa *smart case*: en minúsculas ignora
+mayúsculas; si escribes alguna mayúscula, distingue. Los resultados se resaltan
+y se limitan a 2000 coincidencias para mantener la interfaz fluida.
+
+| Acción | Tecla |
+|---|---|
+| Abrir/cerrar el buscador | `Cmd+Shift+F` / `Ctrl+Shift+F` |
+| Buscar mientras escribes | cualquier texto |
+| Siguiente / anterior | `Enter` / `Shift+Enter` o `↓` / `↑` |
+| Borrar un carácter | `Backspace` |
+| Cerrar | `Esc` |
+
+El contador del cuadro muestra `posición/total`. Al abrir otro pane, cambiar de
+sesión o cerrar el pane buscado, el buscador se cierra.
+
+Los enlaces `OSC 8` y las URLs planas (`http://`, `https://`, `www.`, `mailto:`)
+se detectan al pasar el ratón y se subrayan con el color de acento. Para evitar
+aperturas accidentales, `Ctrl+Click` en Linux/Windows o `Cmd+Click` en macOS
+abre el enlace en el navegador predeterminado. Solo se permiten esos esquemas;
+`file://` y otros se ignoran.
+
 ---
 
 ## Autocompletado
@@ -631,6 +665,8 @@ Cada sesión es un workspace con uno o más panes:
 - `×` en el padre cierra la sesión completa.
 - `×` en un hijo cierra solo ese pane.
 - El pane enfocado se resalta con una barra de acento.
+- Arrastra una sesión desde su fila para reordenarla; una línea de acento marca
+  la posición de destino y el orden se guarda con la sesión.
 
 Acciones:
 
@@ -643,7 +679,7 @@ Acciones:
 Dentro de cada sesión:
 
 - `Cmd+D` / `Ctrl+Shift+D`: split a la derecha.
-- `Cmd+Shift+D` / `Ctrl+Shift+E`: split abajo.
+- `Cmd+Shift+D` / `Ctrl+Shift+Down`: split abajo.
 - Los nuevos panes aparecen como hijos del árbol y expanden la sesión.
 - Los divisores se arrastran con el ratón.
 - El pane enfocado muestra un borde de acento.
@@ -945,6 +981,32 @@ y el menú usan el nombre **Agentes**; Agent Mode es el nombre de la función. E
 una **ventana independiente** que puede estar abierta mientras usas la terminal,
 Code Review o el gestor Git.
 
+### Centro de Agentes
+
+La ventana funciona como un dashboard de supervisión:
+
+- **Cabecera**: agentes activos, pendientes de atención, **+ Lanzar**, **Vistos**,
+  **Actualizar** y cierre.
+- **KPIs**: activos/bloqueados, atención pendiente, CPU y RAM agregadas, y diff
+  Git acumulado por repositorio.
+- **Buscador**: filtra por nombre, estado, mensaje, título, pestaña, rama,
+  comando, ruta o PID. Los contadores de los filtros respetan la búsqueda.
+- **Filtros**: Todos, Atención, Activos y Terminados; filtro de origen
+  (internos/externos) y orden por prioridad, CPU, RAM, tiempo o nombre.
+- **Lista**: cada fila muestra estado, mensaje o última salida, repositorio,
+  rama con `+N/-N`, subagentes/procesos hijos, uptime, pane y telemetría.
+- **Inspector**: pestañas **Resumen**, **Consola** y **Subagentes**. La consola
+  conserva hasta 60 líneas de la pantalla visible y se desplaza con la rueda
+  del ratón.
+- **Acciones**: enfocar el pane, abrir Git o Code Review en su directorio,
+  copiar ruta/PID, marcar como visto y matar el proceso con confirmación.
+- **Respuesta rápida**: `I` abre el campo de mensaje; `Enter` lo envía al pane.
+  `Y` aprueba si el agente está bloqueado. También hay botones para aprobar,
+  enviar `Enter`, mandar `Ctrl+C` y pegar desde el portapapeles.
+- **Lanzador**: `N` abre la barra de perfiles; `1` Claude, `2` Codex,
+  `3` OpenCode y `4` Junie. Lanza el CLI en una pestaña nueva usando el
+  directorio del agente seleccionado (o el cwd enfocado).
+
 Muestra todos los agentes detectados, tanto los que corren dentro de
 F-Terminal como los que corren en otras terminales o IDEs (estos últimos en
 modo lectura). La lista se ordena por prioridad:
@@ -987,25 +1049,35 @@ aparte, y no bloquea la UI.
 
 ### Controles
 
-- `↑` / `↓`: mover la selección.
-- `PgUp` / `PgDn`, `Home` / `End`: desplazarse.
-- `Enter`: enfocar el pane del agente seleccionado.
-- `R` o `F5`, o el botón **REFRESH**: forzar un escaneo de procesos inmediato,
-  sin esperar al intervalo configurado.
-- `X` o `Supr`: terminar el proceso seleccionado. La primera pulsación arma la
-  acción y la segunda confirma; también se puede hacer clic en **KILL PID**.
-- `Tab` o `F`: cambiar entre ALL, ATTENTION, RUNNING y FINISHED.
-- `1`–`4`: elegir filtro directamente.
-- Clic en una fila para seleccionar; doble clic para enfocar.
-- `Esc`: cerrar la ventana.
+| Acción | Tecla |
+|---|---|
+| Mover selección | `↑` / `↓`, `J` / `K`, `PgUp` / `PgDn`, `Home` / `End` |
+| Enfocar pane del agente | `Enter` o doble clic |
+| Abrir mensaje rápido | `I` |
+| Aprobar prompt y/n | `Y` o botón **Aprobar** |
+| Enviar `Enter` / `Ctrl+C` | botones de la fila rápida |
+| Pegar en búsqueda o mensaje | `Ctrl/Cmd+V`, `Shift+Insert` |
+| Buscar | `/` o `Cmd/Ctrl+F`; `↑` / `↓` mueven la selección; `Esc` limpia |
+| Cambiar filtro de estado | `Tab` / `Shift+Tab`, `F`, `1`–`4` |
+| Cambiar origen | `E` |
+| Cambiar orden | `S` |
+| Pestañas del inspector | `[` / `]` |
+| Abrir lanzador | `N`; `1`–`4` eligen perfil |
+| Refrescar procesos | `R` o `F5`, o **Actualizar** |
+| Abrir Git / Code Review | `G` / `V` |
+| Copiar ruta o PID | `C` |
+| Marcar visto / todos vistos | `M` / `A` |
+| Matar proceso | `X`, `Supr` o `Backspace`; doble pulsación o **Matar PID** |
+| Cerrar ventana | `Esc`, `Cmd/Ctrl+W` o `×` |
 
-Al matar un agente se envía primero `SIGTERM`; si sigue vivo después de dos
+La primera pulsación de `X`/`Supr` arma el cierre y la segunda confirma. Al
+matar un agente se envía primero `SIGTERM`; si sigue vivo después de dos
 segundos, se fuerza `SIGKILL` (en Windows, `taskkill /F`). El aviso del resultado
 aparece en el pie de la ventana.
 
-Los agentes externos aparecen como `external` y no se pueden enfocar porque su
-PTY pertenece a otra aplicación. Sí se pueden terminar desde Agent Mode si
-tienen un PID conocido.
+Los agentes externos aparecen como `externo` y no se pueden enfocar ni
+responder porque su PTY pertenece a otra aplicación. Sí se pueden inspeccionar
+y terminar desde Agent Mode si tienen un PID conocido.
 
 ### Junie con hooks
 
@@ -1079,10 +1151,11 @@ poll_interval_ms = 2000
   llegar por el PTY.
 - En WSL los procesos Linux no son visibles desde `sysinfo` de Windows; los
   informes `OSC` sí pueden atravesar el PTY.
-- Los agentes externos no tienen estado en tiempo real; su única acción es
-  terminar el proceso.
-- No se aprueban ni deniegan acciones desde Agent Mode; `Enter` solo enfoca y
-  `X` termina el proceso del agente.
+- Los agentes externos no tienen estado en tiempo real; se pueden inspeccionar
+  (telemetría, comando, PID) y terminar, pero no controlar porque su PTY
+  pertenece a otra aplicación.
+- No hay aprobación estructurada: `Y`, `I` y los botones envían pulsaciones al
+  PTY; la decisión final la toma el CLI del agente.
 
 ---
 
@@ -1099,7 +1172,9 @@ poll_interval_ms = 2000
 | Cambiar de terminal | `Cmd+Shift+[` / `]`, `Cmd+1..9`, `Ctrl+Tab` |
 | Mover foco entre panes | `Cmd+Alt+flechas`, `Cmd+\`` |
 | Mostrar/ocultar sidebar | `Cmd+B` |
-| Cambiar Sesiones / Archivos | `Cmd+Shift+F` |
+| Cambiar Sesiones / Archivos | `Cmd+Shift+E` |
+| Buscar en el scrollback | `Cmd+Shift+F` |
+| Abrir enlace bajo el cursor | `Cmd+Click` |
 | Abrir Code Review | `Cmd+Shift+R` |
 | Abrir gestor Git | `Cmd+Shift+M` |
 | Abrir Agentes | `Cmd+Shift+A` |
@@ -1118,11 +1193,13 @@ poll_interval_ms = 2000
 | Nueva terminal (perfil por defecto) | `Ctrl+Shift+T` |
 | Elegir perfil de shell | `Ctrl+Shift+N` |
 | Cerrar pane | `Ctrl+Shift+W` |
-| Split derecha / abajo | `Ctrl+Shift+D` / `Ctrl+Shift+E` |
+| Split derecha / abajo | `Ctrl+Shift+D` / `Ctrl+Shift+Down` |
 | Cambiar de terminal | `Ctrl+Tab`, `Ctrl+Shift+Tab`, `Ctrl+Shift+[ / ]` |
 | Mover foco entre panes | `Ctrl+Alt+flechas`, `Ctrl+Shift+\`` |
 | Mostrar/ocultar sidebar | `Ctrl+Shift+B` |
-| Cambiar Sesiones / Archivos | `Ctrl+Shift+F` |
+| Cambiar Sesiones / Archivos | `Ctrl+Shift+E` |
+| Buscar en el scrollback | `Ctrl+Shift+F` |
+| Abrir enlace bajo el cursor | `Ctrl+Click` |
 | Abrir Code Review | `Ctrl+Shift+R` |
 | Abrir gestor Git | `Ctrl+Shift+M` |
 | Abrir Agentes | `Ctrl+Shift+A` |
@@ -1184,12 +1261,16 @@ OpenCode, Claude Code y Codex para insertar un salto de línea en el prompt.
 
 | Acción | Tecla |
 |---|---|
-| Mover selección | `↑` / `↓`, `PgUp` / `PgDn`, `Home` / `End` |
-| Enfocar pane del agente | `Enter` |
+| Mover selección | `↑` / `↓`, `J` / `K`, `PgUp` / `PgDn`, `Home` / `End` |
+| Enfocar pane del agente | `Enter` o doble clic |
+| Mensaje rápido / aprobar | `I` / `Y` |
+| Buscar | `/` o `Cmd/Ctrl+F` |
+| Cambiar filtro / origen / orden | `Tab`, `F`, `1`–`4` / `E` / `S` |
+| Pestañas del inspector | `[` / `]` |
+| Lanzador de agentes | `N`; `1`–`4` |
 | Refrescar procesos | `R` o `F5` |
 | Matar proceso (doble pulsación) | `X`, `Supr` o `Backspace` |
-| Cambiar filtro | `Tab` o `F`, `1`–`4` |
-| Cerrar ventana | `Esc`, `Cmd+W` / `Ctrl+Shift+W` o `×` |
+| Cerrar ventana | `Esc`, `Cmd/Ctrl+W` o `×` |
 
 ---
 
@@ -1264,7 +1345,7 @@ src/
     commands.rs    Índice del PATH y builtins
     paths.rs       Rutas y caché del directorio actual
     git.rs         Refs Git directas para ramas/tags
-  config.rs        Configuración TOML, validación y plantilla
+  config.rs        Configuración TOML, validación, plantilla y recarga en caliente
   diff_view.rs     Render compartido de diffs
   editor.rs        Editor mínimo
   event.rs         Eventos de background hacia la UI
@@ -1297,7 +1378,7 @@ src/
   sidebar.rs       Árbol de sesiones/panes, selector de shells y hit-testing
   workspace.rs     Sesiones (tabs), panes, splits y PTYs
   term/
-    mod.rs         Term + parser + selección
+    mod.rs         Term + parser + selección + búsqueda y enlaces
     color.rs       Paleta y conversión sRGB
     frame.rs       Snapshot del grid
     program_status.rs  Parser OSC 7501 y notificaciones
@@ -1414,7 +1495,8 @@ pero no se han validado en hardware real en este entorno.
 
 Limitaciones conocidas:
 
-- Sin pantalla de ajustes ni recarga en caliente del TOML.
+- Sin pantalla de ajustes; `font_family` y `render.mode` requieren reiniciar la
+  app, el resto de `config.toml` se recarga en caliente.
 - Editor sin undo/redo, selección, file watching ni autoguardado.
 - Code Review: soporte de GitHub y GitLab; sin comentarios inline, submit de
   reviews ni resaltado de sintaxis dentro del diff.
@@ -1427,7 +1509,6 @@ Limitaciones conocidas:
 - Footer Git cuenta cambios tracked; los untracked no suman.
 - Historial del gestor Git limitado a 300 commits.
 - Sin menú nativo en Windows/Linux; se usan atajos y controles propios.
-- Sin búsqueda en el scrollback.
 - Sin pestañas dentro de una misma ventana más allá del workspace.
 - Shells de Windows implementados por detección y ConPTY, pero pendientes de
   prueba manual en Windows.
@@ -1447,8 +1528,7 @@ Limitaciones conocidas:
 ## Roadmap
 
 - Validar perfiles de shell y ConPTY en Windows real.
-- Pantalla de ajustes, recarga en caliente del TOML y perfiles de shell
-  personalizados.
+- Pantalla de ajustes y perfiles de shell personalizados.
 - Selector de tema en la app (las paletas ya están disponibles vía TOML).
 - Añadir más perfiles: NuShell, fish en Windows, distros WSL concretas.
 - Git: tags, rebase, cherry-pick, revert, force push con lease y resolución de
@@ -1458,8 +1538,7 @@ Limitaciones conocidas:
 - Config por proveedor para hosts self-hosted con nombres arbitrarios.
 - Aprobaciones y discusiones de MRs/PRs.
 - Editor: undo/redo, selección, file watching y autoguardado.
-- Sidebar: reordenar arrastrando, renombrar y actividad en segundo plano.
-- Búsqueda en scrollback.
+- Sidebar: renombrar y actividad en segundo plano.
 - Integración de shell (OSC 133) para completar comandos multilínea con
   precisión y añadir flags/plugins específicos por comando.
 - Menú nativo en Windows/Linux.

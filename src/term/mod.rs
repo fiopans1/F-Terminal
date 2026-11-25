@@ -2,11 +2,14 @@ pub mod color;
 pub mod frame;
 pub mod program_status;
 
+use std::sync::OnceLock;
+
 use alacritty_terminal::event::{Event, EventListener};
 use alacritty_terminal::grid::{Dimensions, Grid, Scroll};
-use alacritty_terminal::index::{Point, Side};
+use alacritty_terminal::index::{Column, Direction, Point, Side};
 use alacritty_terminal::selection::{Selection, SelectionType};
 use alacritty_terminal::term::cell::{Cell, Flags};
+use alacritty_terminal::term::search::{RegexIter, RegexSearch};
 use alacritty_terminal::term::{Config as TermConfig, Term, TermDamage, TermMode};
 use winit::event_loop::EventLoopProxy;
 
@@ -181,12 +184,50 @@ impl Terminal {
         input_line_from(&self.term, self.size)
     }
 
+    /// Snapshot of the last `max_lines` non-empty visible viewport lines,
+    /// used by Agent Mode's live terminal preview.
+    pub fn tail_lines(&self, max_lines: usize) -> Vec<String> {
+        tail_lines_from(&self.term, max_lines)
+    }
+
     pub fn display_offset(&self) -> usize {
         self.term.grid().display_offset()
     }
 
     pub fn scroll(&mut self, scroll: Scroll) {
         self.term.scroll_display(scroll);
+    }
+
+    pub fn scroll_to_point(&mut self, point: Point) {
+        self.term.scroll_to_point(point);
+    }
+
+    /// Find an OSC 8 hyperlink or a plain URL under a terminal cell.
+    pub fn link_at(&self, point: Point) -> Option<(String, std::ops::RangeInclusive<Point>)> {
+        link_at_in_term(&self.term, point)
+    }
+
+    /// Search the scrollback and visible screen for a literal, smart-case
+    /// query. Results are capped so a broad query cannot allocate forever.
+    pub fn search_matches(
+        &self,
+        query: &str,
+        max_matches: usize,
+    ) -> Vec<std::ops::RangeInclusive<Point>> {
+        if query.is_empty() || max_matches == 0 {
+            return Vec::new();
+        }
+        // Smart case: an all-lowercase query ignores case, any uppercase
+        // character makes the search case-sensitive.
+        let pattern = search_pattern(query);
+        let Ok(mut regex) = RegexSearch::new(&pattern) else {
+            return Vec::new();
+        };
+        let start = Point::new(self.term.topmost_line(), Column(0));
+        let end = Point::new(self.term.bottommost_line(), self.term.last_column());
+        RegexIter::new(start, end, Direction::Right, &self.term, &mut regex)
+            .take(max_matches)
+            .collect()
     }
 
     pub fn frame(&self, theme: &Theme) -> Frame {
@@ -310,10 +351,173 @@ fn input_line_from<T: EventListener>(term: &Term<T>, size: GridSize) -> Option<I
     })
 }
 
+fn tail_lines_from<T: EventListener>(term: &Term<T>, max_lines: usize) -> Vec<String> {
+    if max_lines == 0 {
+        return Vec::new();
+    }
+    let cols = term.columns();
+    let screen_lines = term.screen_lines();
+    if cols == 0 || screen_lines == 0 {
+        return Vec::new();
+    }
+
+    let content = term.renderable_content();
+    let mut rows: Vec<String> = Vec::with_capacity(screen_lines);
+    let mut line = String::with_capacity(cols);
+
+    for (index, indexed) in content.display_iter.enumerate() {
+        if index > 0 && index % cols == 0 {
+            rows.push(std::mem::take(&mut line));
+        }
+        let cell = indexed.cell;
+        if cell
+            .flags
+            .intersects(Flags::WIDE_CHAR_SPACER | Flags::LEADING_WIDE_CHAR_SPACER)
+        {
+            continue;
+        }
+        if cell.flags.contains(Flags::HIDDEN) {
+            line.push(' ');
+        } else {
+            line.push(cell.c);
+        }
+    }
+    if !line.is_empty() && rows.len() < screen_lines {
+        rows.push(line);
+    }
+
+    let mut trimmed: Vec<String> = rows
+        .into_iter()
+        .map(|row| row.trim_end().to_owned())
+        .collect();
+    while trimmed.last().is_some_and(String::is_empty) {
+        trimmed.pop();
+    }
+
+    let keep_from = trimmed.len().saturating_sub(max_lines);
+    trimmed.drain(..keep_from);
+    trimmed
+}
+
+fn link_at_in_term<T: EventListener>(
+    term: &Term<T>,
+    point: Point,
+) -> Option<(String, std::ops::RangeInclusive<Point>)> {
+    if let Some(link) = term.grid()[point].hyperlink() {
+        let uri = link.uri().to_owned();
+        if is_link_uri(&uri) {
+            let mut start = point;
+            while start.column.0 > 0 {
+                let previous = Point::new(start.line, Column(start.column.0 - 1));
+                if term.grid()[previous]
+                    .hyperlink()
+                    .is_some_and(|other| other == link)
+                {
+                    start = previous;
+                } else {
+                    break;
+                }
+            }
+
+            let last_column = term.last_column().0;
+            let mut end = point;
+            while end.column.0 < last_column {
+                let next = Point::new(end.line, Column(end.column.0 + 1));
+                if term.grid()[next]
+                    .hyperlink()
+                    .is_some_and(|other| other == link)
+                {
+                    end = next;
+                } else {
+                    break;
+                }
+            }
+            return Some((uri, start..=end));
+        }
+    }
+
+    let start = term.line_search_left(point);
+    let end = term.line_search_right(point);
+    static LINK_REGEX: OnceLock<Option<RegexSearch>> = OnceLock::new();
+    let template = LINK_REGEX
+        .get_or_init(|| RegexSearch::new(r"(?:https?://|www\.)[^\s]+|mailto:[^\s]+").ok());
+    let mut regex = template.clone()?;
+    let iter = RegexIter::new(start, end, Direction::Right, term, &mut regex);
+    for matched in iter {
+        if matched.contains(&point) {
+            let text = term.bounds_to_string(*matched.start(), *matched.end());
+            if let Some(uri) = normalize_link(&text) {
+                return Some((uri, matched));
+            }
+        }
+    }
+    None
+}
+
+fn search_pattern(query: &str) -> String {
+    if query.chars().any(char::is_uppercase) {
+        regex_literal(query)
+    } else {
+        format!("(?i){}", regex_literal(query))
+    }
+}
+
+fn regex_literal(query: &str) -> String {
+    let mut escaped = String::with_capacity(query.len());
+    for character in query.chars() {
+        if "\\.^$*+?()[]{}|".contains(character) {
+            escaped.push('\\');
+        }
+        escaped.push(character);
+    }
+    escaped
+}
+
+fn is_link_uri(uri: &str) -> bool {
+    uri.starts_with("http://") || uri.starts_with("https://") || uri.starts_with("mailto:")
+}
+
+fn normalize_link(text: &str) -> Option<String> {
+    let mut text = text.trim();
+    loop {
+        let last = text.chars().last()?;
+        let strip = match last {
+            '.' | ',' | ';' | ':' | '!' | '?' => true,
+            ')' => {
+                text.chars().filter(|character| *character == ')').count()
+                    > text.chars().filter(|character| *character == '(').count()
+            }
+            ']' => {
+                text.chars().filter(|character| *character == ']').count()
+                    > text.chars().filter(|character| *character == '[').count()
+            }
+            '}' => {
+                text.chars().filter(|character| *character == '}').count()
+                    > text.chars().filter(|character| *character == '{').count()
+            }
+            _ => false,
+        };
+        if !strip {
+            break;
+        }
+        text = &text[..text.len() - last.len_utf8()];
+        text = text.trim_end();
+    }
+
+    if text.starts_with("www.") {
+        Some(format!("https://{text}"))
+    } else if is_link_uri(text) {
+        Some(text.to_owned())
+    } else {
+        None
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
     use alacritty_terminal::event::VoidListener;
+    use alacritty_terminal::index::Line;
     use alacritty_terminal::term::Config;
 
     fn line_for(bytes: &[u8]) -> Option<InputLine> {
@@ -343,5 +547,93 @@ mod tests {
     #[test]
     fn ignores_alternate_screen() {
         assert!(line_for(b"\x1b[?1049huser@host:~$ git").is_none());
+    }
+
+    #[test]
+    fn reads_tail_lines_trimmed() {
+        let size = GridSize { cols: 40, lines: 6 };
+        let mut term = Term::new(Config::default(), &size, VoidListener);
+        let mut parser: vte::ansi::Processor = vte::ansi::Processor::new();
+        parser.advance(&mut term, b"line 1\r\nline 2  \r\nline 3\r\nline 4");
+        assert_eq!(
+            tail_lines_from(&term, 2),
+            vec!["line 3".to_owned(), "line 4".to_owned()]
+        );
+        assert_eq!(tail_lines_from(&term, 0), Vec::<String>::new());
+    }
+
+    fn search_count(term: &Term<VoidListener>, query: &str) -> usize {
+        let mut regex = RegexSearch::new(&search_pattern(query)).unwrap();
+        let start = Point::new(term.topmost_line(), Column(0));
+        let end = Point::new(term.bottommost_line(), term.last_column());
+        RegexIter::new(start, end, Direction::Right, term, &mut regex).count()
+    }
+
+    #[test]
+    fn search_uses_smart_case() {
+        let size = GridSize { cols: 20, lines: 4 };
+        let mut term = Term::new(Config::default(), &size, VoidListener);
+        let mut parser: vte::ansi::Processor = vte::ansi::Processor::new();
+        parser.advance(&mut term, b"Hello\r\nhello\r\nHELLO");
+
+        assert_eq!(search_count(&term, "hello"), 3);
+        assert_eq!(search_count(&term, "Hello"), 1);
+    }
+
+    #[test]
+    fn search_treats_the_query_as_a_literal() {
+        assert_eq!(regex_literal("a.b[c]"), r"a\.b\[c\]");
+        assert_eq!(search_pattern("a.b"), r"(?i)a\.b");
+    }
+
+    #[test]
+    fn detects_plain_links_and_strips_trailing_punctuation() {
+        let size = GridSize { cols: 40, lines: 3 };
+        let mut term = Term::new(Config::default(), &size, VoidListener);
+        let mut parser: vte::ansi::Processor = vte::ansi::Processor::new();
+        parser.advance(&mut term, b"see https://example.com/docs).");
+
+        let point = Point::new(Line(0), Column(8));
+        let (uri, range) = link_at_in_term(&term, point).unwrap();
+        assert_eq!(uri, "https://example.com/docs");
+        assert!(range.contains(&point));
+        assert_eq!(link_at_in_term(&term, Point::new(Line(0), Column(0))), None);
+    }
+
+    #[test]
+    fn detects_osc8_hyperlinks_across_their_cells() {
+        let size = GridSize { cols: 20, lines: 2 };
+        let mut term = Term::new(Config::default(), &size, VoidListener);
+        let mut parser: vte::ansi::Processor = vte::ansi::Processor::new();
+        parser.advance(
+            &mut term,
+            b"\x1b]8;;https://example.com\x1b\\link\x1b]8;;\x1b\\",
+        );
+
+        let (uri, range) = link_at_in_term(&term, Point::new(Line(0), Column(1))).unwrap();
+        assert_eq!(uri, "https://example.com");
+        assert_eq!(*range.start(), Point::new(Line(0), Column(0)));
+        assert_eq!(*range.end(), Point::new(Line(0), Column(3)));
+    }
+
+    #[test]
+    fn link_normalization_strips_punctuation_and_rejects_unsafe_schemes() {
+        assert_eq!(
+            normalize_link("https://example.com).").as_deref(),
+            Some("https://example.com")
+        );
+        assert_eq!(
+            normalize_link("www.example.com").as_deref(),
+            Some("https://www.example.com")
+        );
+        assert_eq!(
+            normalize_link("https://en.wikipedia.org/wiki/Foo_(bar)").as_deref(),
+            Some("https://en.wikipedia.org/wiki/Foo_(bar)")
+        );
+        assert_eq!(normalize_link("file:///etc/passwd"), None);
+        assert_eq!(
+            normalize_link("mailto:dev@example.com").as_deref(),
+            Some("mailto:dev@example.com")
+        );
     }
 }

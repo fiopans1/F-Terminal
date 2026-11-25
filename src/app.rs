@@ -3,7 +3,7 @@ use std::io::IsTerminal;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::sync::mpsc::Sender;
-use std::time::{Duration, Instant};
+use std::time::{Duration, Instant, SystemTime};
 
 use alacritty_terminal::event::{Event, WindowSize};
 use alacritty_terminal::grid::Scroll;
@@ -16,7 +16,7 @@ use winit::dpi::{LogicalSize, PhysicalPosition, PhysicalSize};
 use winit::event::{ElementState, Ime, MouseButton, MouseScrollDelta, WindowEvent};
 use winit::event_loop::{ActiveEventLoop, ControlFlow, EventLoopProxy};
 use winit::keyboard::{Key, KeyCode, ModifiersState, NamedKey, PhysicalKey};
-use winit::window::{Theme as WindowTheme, Window, WindowId};
+use winit::window::{CursorIcon, Theme as WindowTheme, Window, WindowId};
 
 use crate::agent_window::AgentWindow;
 use crate::agents::{
@@ -68,6 +68,8 @@ pub struct App {
     agent: Option<AgentWindow>,
     shared_render: Option<SharedRenderResources>,
     _menu: Option<menu::MenuState>,
+    config_modified: Option<SystemTime>,
+    last_config_poll: Instant,
 }
 
 impl App {
@@ -89,6 +91,51 @@ impl App {
             agent: None,
             shared_render: None,
             _menu: None,
+            config_modified: config_modified_time(),
+            last_config_poll: Instant::now(),
+        }
+    }
+
+    fn poll_config_reload(&mut self) {
+        let now = Instant::now();
+        if now.duration_since(self.last_config_poll) < Duration::from_secs(1) {
+            return;
+        }
+        self.last_config_poll = now;
+
+        let Some(path) = config_path() else {
+            return;
+        };
+        let Ok(modified) = std::fs::metadata(&path).and_then(|metadata| metadata.modified()) else {
+            return;
+        };
+        if self.config_modified == Some(modified) {
+            return;
+        }
+
+        let Some(new_config) = Config::try_load() else {
+            self.config_modified = Some(modified);
+            return;
+        };
+        let old = std::mem::replace(&mut self.config, new_config);
+        self.config_modified = Some(modified);
+        log::info!("reloaded config from {}", path.display());
+        self.apply_config(&old);
+    }
+
+    fn apply_config(&mut self, old: &Config) {
+        if let Some(state) = &mut self.window {
+            state.apply_config(old, &self.config);
+            state.window.request_redraw();
+        }
+        if let Some(git) = &mut self.git {
+            git.apply_config(&self.config);
+        }
+        if let Some(review) = &mut self.review {
+            review.apply_config(&self.config);
+        }
+        if let Some(agent) = &mut self.agent {
+            agent.apply_config(&self.config);
         }
     }
 
@@ -219,9 +266,9 @@ impl App {
         }
 
         let attributes = Window::default_attributes()
-            .with_title("Agentes — F-Terminal")
-            .with_inner_size(LogicalSize::new(980.0, 640.0))
-            .with_min_inner_size(LogicalSize::new(640.0, 420.0))
+            .with_title("Centro de Agentes — F-Terminal")
+            .with_inner_size(LogicalSize::new(1140.0, 740.0))
+            .with_min_inner_size(LogicalSize::new(760.0, 480.0))
             .with_theme(Some(WindowTheme::Dark))
             .with_visible(false);
 
@@ -497,6 +544,90 @@ impl ApplicationHandler<UserEvent> for App {
                 }
                 return;
             }
+            UserEvent::SendAgentInput { pane, bytes, label } => {
+                let sent = self
+                    .window
+                    .as_mut()
+                    .is_some_and(|state| state.send_agent_input(pane, &bytes));
+                if let Some(agent) = &mut self.agent {
+                    if sent {
+                        agent
+                            .on_action_notice(format!("Enviado a pane {}: {label}", pane.0), false);
+                    } else {
+                        agent.on_action_notice(
+                            format!("El pane {} ya no está disponible", pane.0),
+                            true,
+                        );
+                    }
+                }
+                if sent {
+                    if let Some(state) = &mut self.window {
+                        state.window.request_redraw();
+                    }
+                    self.sync_agent_window();
+                }
+                return;
+            }
+            UserEvent::LaunchAgent { kind, cwd } => {
+                let launched = self
+                    .window
+                    .as_mut()
+                    .and_then(|state| state.launch_agent(&kind, cwd, &self.config));
+                if let Some(agent) = &mut self.agent {
+                    if let Some(pane) = launched {
+                        agent.on_action_notice(
+                            format!(
+                                "Lanzando {} en pane {} (Enter para enfocar)",
+                                kind.label(),
+                                pane.0
+                            ),
+                            false,
+                        );
+                    } else {
+                        agent.on_action_notice(format!("No se pudo lanzar {}", kind.label()), true);
+                    }
+                }
+                if launched.is_some() {
+                    if let Some(state) = &mut self.window {
+                        state.force_agent_refresh(&self.config);
+                        state.window.request_redraw();
+                    }
+                    self.sync_agent_window();
+                }
+                return;
+            }
+            UserEvent::MarkAgentSeen { id } => {
+                if let Some(state) = &mut self.window {
+                    state.mark_agent_seen(&id);
+                    state.window.request_redraw();
+                }
+                if let Some(agent) = &mut self.agent {
+                    agent.on_action_notice("Marcado como visto".into(), false);
+                }
+                self.sync_agent_window();
+                return;
+            }
+            UserEvent::MarkAllAgentsSeen => {
+                let marked = self
+                    .window
+                    .as_mut()
+                    .map(|state| {
+                        let count = state.mark_all_agents_seen();
+                        state.window.request_redraw();
+                        count
+                    })
+                    .unwrap_or(0);
+                if let Some(agent) = &mut self.agent {
+                    let text = if marked == 0 {
+                        "No había avisos pendientes por marcar".into()
+                    } else {
+                        format!("{marked} agente(s) marcados como vistos")
+                    };
+                    agent.on_action_notice(text, false);
+                }
+                self.sync_agent_window();
+                return;
+            }
             UserEvent::AgentsDetected {
                 generation,
                 panes,
@@ -698,6 +829,10 @@ impl ApplicationHandler<UserEvent> for App {
             | UserEvent::RefreshAgents
             | UserEvent::KillAgent { .. }
             | UserEvent::AgentKilled { .. }
+            | UserEvent::SendAgentInput { .. }
+            | UserEvent::LaunchAgent { .. }
+            | UserEvent::MarkAgentSeen { .. }
+            | UserEvent::MarkAllAgentsSeen
             | UserEvent::SetFontSize(_) => {}
         }
     }
@@ -707,9 +842,20 @@ impl ApplicationHandler<UserEvent> for App {
         let agent_open = self.agent.is_some();
 
         if let Some(state) = &mut self.window {
-            state.poll_background(&self.config);
+            state.poll_background(&self.config, agent_open);
             state.poll_agent_watcher(&self.config, agent_open);
             state.autosave_session(&self.config);
+            if state.search.as_ref().is_some_and(|search| search.dirty) {
+                state.refresh_search();
+            }
+            if agent_open
+                && state.agent_preview_dirty
+                && state.last_agent_preview_sync.elapsed() >= Duration::from_millis(800)
+            {
+                state.agent_preview_dirty = false;
+                state.last_agent_preview_sync = Instant::now();
+                state.agents_dirty = true;
+            }
             if state.agents_dirty {
                 state.rebuild_agent_snapshot();
                 state.window.request_redraw();
@@ -730,7 +876,10 @@ impl ApplicationHandler<UserEvent> for App {
             wait = wait.min(git.next_wake());
         }
 
-        event_loop.set_control_flow(ControlFlow::WaitUntil(Instant::now() + wait));
+        self.poll_config_reload();
+        event_loop.set_control_flow(ControlFlow::WaitUntil(
+            Instant::now() + wait.min(Duration::from_secs(1)),
+        ));
     }
 
     fn exiting(&mut self, _event_loop: &ActiveEventLoop) {
@@ -792,6 +941,30 @@ enum DragState {
     Editor,
 }
 
+#[derive(Clone, Copy, Debug)]
+struct SidebarDrag {
+    tab: TabId,
+    start_y: f32,
+    active: bool,
+    target: usize,
+}
+
+#[derive(Clone, Debug)]
+struct SearchState {
+    pane: PaneId,
+    query: String,
+    matches: Vec<std::ops::RangeInclusive<Point>>,
+    current: usize,
+    dirty: bool,
+}
+
+#[derive(Clone, Debug, PartialEq)]
+struct LinkHover {
+    pane: PaneId,
+    uri: String,
+    range: std::ops::RangeInclusive<Point>,
+}
+
 struct WindowState {
     window: Arc<Window>,
     renderer: Renderer,
@@ -799,6 +972,9 @@ struct WindowState {
     proxy: EventLoopProxy<UserEvent>,
     clipboard: Option<arboard::Clipboard>,
     sidebar: Sidebar,
+    sidebar_drag: Option<SidebarDrag>,
+    search: Option<SearchState>,
+    hovered_link: Option<LinkHover>,
     view: ViewLayout,
     modifiers: ModifiersState,
     window_focused: bool,
@@ -821,6 +997,8 @@ struct WindowState {
     hook_log: agents::HookLog,
     hook_states: HashMap<PaneId, HookState>,
     agents_dirty: bool,
+    agent_preview_dirty: bool,
+    last_agent_preview_sync: Instant,
     explorer: FileExplorer,
     explorer_scan_id: u64,
     explorer_pinned: bool,
@@ -950,6 +1128,7 @@ struct PendingSpawn {
     profile_id: String,
     session_key: u64,
     scrollback: Option<PathBuf>,
+    initial_command: Option<String>,
 }
 
 struct RestoredWorkspace {
@@ -1007,6 +1186,7 @@ fn restore_workspace(
                         profile_id,
                         session_key: saved.key,
                         scrollback,
+                        initial_command: None,
                     },
                 );
                 next_key = next_key.max(saved.key.saturating_add(1));
@@ -1032,6 +1212,7 @@ fn restore_workspace(
                 profile_id: shells.default_id.clone(),
                 session_key: next_key,
                 scrollback: None,
+                initial_command: None,
             },
         );
         next_key += 1;
@@ -1229,6 +1410,9 @@ impl WindowState {
             proxy,
             clipboard: None,
             sidebar: Sidebar::default(),
+            sidebar_drag: None,
+            search: None,
+            hovered_link: None,
             view: ViewLayout::empty(),
             modifiers: ModifiersState::empty(),
             window_focused: true,
@@ -1253,6 +1437,8 @@ impl WindowState {
             hook_log: agents::HookLog::new(),
             hook_states: HashMap::new(),
             agents_dirty: true,
+            agent_preview_dirty: false,
+            last_agent_preview_sync: Instant::now(),
             explorer: FileExplorer::empty(explorer_root),
             explorer_scan_id: 0,
             explorer_pinned: false,
@@ -1314,6 +1500,7 @@ impl WindowState {
                     profile_id: state.shells.default_id.clone(),
                     session_key,
                     scrollback: None,
+                    initial_command: None,
                 },
             );
             state.sync_layout(config)?;
@@ -1430,6 +1617,7 @@ impl WindowState {
                 self.relayout(config);
             }
             WindowEvent::Occluded(false) => self.window.request_redraw(),
+            WindowEvent::CursorLeft { .. } => self.clear_link_hover(),
             WindowEvent::RedrawRequested => self.on_redraw(config),
             WindowEvent::ModifiersChanged(modifiers) => {
                 self.modifiers = modifiers.state();
@@ -1438,7 +1626,10 @@ impl WindowState {
                 self.on_key(event, event_loop, config);
             }
             WindowEvent::Ime(Ime::Commit(text)) => {
-                if self.focus == Focus::Editor && self.editor.is_some() {
+                if self.search.is_some() {
+                    self.search_push(&text);
+                    self.window.request_redraw();
+                } else if self.focus == Focus::Editor && self.editor.is_some() {
                     if let Some(editor) = &mut self.editor {
                         editor.insert_str(&text);
                     }
@@ -1646,6 +1837,14 @@ impl WindowState {
             if let Some(pane) = self.workspace.pane_mut(*pane_id) {
                 if pane.resize(grid) {
                     self.dirty_panes.insert(*pane_id);
+                    if self
+                        .search
+                        .as_ref()
+                        .is_some_and(|search| search.pane == *pane_id)
+                        && let Some(search) = &mut self.search
+                    {
+                        search.dirty = true;
+                    }
                 }
             } else {
                 let spawn = match self.pending_spawns.remove(pane_id) {
@@ -1657,6 +1856,7 @@ impl WindowState {
                             profile_id: self.shells.default_id.clone(),
                             session_key,
                             scrollback: None,
+                            initial_command: None,
                         }
                     }
                 };
@@ -1712,6 +1912,9 @@ impl WindowState {
                 };
                 if pane.cwd.as_deref() == Some(spawn.cwd.as_path()) {
                     pane.git_status = cached_status;
+                }
+                if let Some(command) = spawn.initial_command {
+                    pane.session.write(format!("{command}\r").as_bytes());
                 }
                 self.workspace.insert_pane(pane);
                 spawned_panes.push(*pane_id);
@@ -1838,6 +2041,8 @@ impl WindowState {
     }
 
     fn new_terminal_with(&mut self, profile_id: &str, config: &Config) {
+        self.close_search();
+        self.clear_link_hover();
         self.refresh_cwds(config);
         let cwd = self.focused_cwd();
         let (tab_id, pane_id) = self.workspace.create_terminal();
@@ -1849,6 +2054,7 @@ impl WindowState {
                 profile_id: profile_id.to_owned(),
                 session_key,
                 scrollback: None,
+                initial_command: None,
             },
         );
         self.sidebar.profile_menu = false;
@@ -1871,6 +2077,8 @@ impl WindowState {
     }
 
     fn split_focused(&mut self, direction: SplitDirection, config: &Config) {
+        self.close_search();
+        self.clear_link_hover();
         self.refresh_cwds(config);
         let cwd = self.focused_cwd();
         let profile_id = self
@@ -1893,6 +2101,7 @@ impl WindowState {
                 profile_id,
                 session_key,
                 scrollback: None,
+                initial_command: None,
             },
         );
         self.focus = Focus::Terminal;
@@ -1916,6 +2125,14 @@ impl WindowState {
     }
 
     fn close_pane(&mut self, pane: PaneId, event_loop: &ActiveEventLoop, config: &Config) {
+        if self
+            .search
+            .as_ref()
+            .is_some_and(|search| search.pane == pane)
+        {
+            self.close_search();
+        }
+        self.clear_link_hover();
         match self.workspace.close_pane(pane) {
             CloseOutcome::NotFound => {}
             CloseOutcome::WorkspaceEmpty => {
@@ -1937,6 +2154,8 @@ impl WindowState {
     }
 
     fn close_tab(&mut self, tab: TabId, event_loop: &ActiveEventLoop, config: &Config) {
+        self.close_search();
+        self.clear_link_hover();
         match self.workspace.close_tab(tab) {
             CloseOutcome::NotFound => {}
             CloseOutcome::WorkspaceEmpty => {
@@ -1961,6 +2180,8 @@ impl WindowState {
     }
 
     fn select_pane(&mut self, tab: TabId, pane: PaneId, config: &Config) {
+        self.close_search();
+        self.clear_link_hover();
         self.workspace.select_tab(tab);
         if self.workspace.focus_pane(pane) {
             self.focus = Focus::Terminal;
@@ -1973,6 +2194,8 @@ impl WindowState {
     }
 
     fn select_tab(&mut self, tab: TabId, config: &Config) {
+        self.close_search();
+        self.clear_link_hover();
         if self.workspace.select_tab(tab) {
             self.focus = Focus::Terminal;
             self.relayout(config);
@@ -2200,6 +2423,9 @@ impl WindowState {
             if changed && self.view.panes.iter().any(|view| view.id == *pane_id) {
                 changed_visible = true;
             }
+            if changed && self.pane_has_agent(*pane_id) {
+                self.agents_dirty = true;
+            }
             if let Some(pane) = self.workspace.pane_mut(*pane_id) {
                 pane.git_status = status.clone();
             }
@@ -2390,6 +2616,8 @@ impl WindowState {
     }
 
     fn toggle_diff_view(&mut self, pane_id: PaneId, config: &Config) {
+        self.close_search();
+        self.clear_link_hover();
         let Some(cwd) = self
             .workspace
             .pane(pane_id)
@@ -2812,6 +3040,8 @@ impl WindowState {
     }
 
     fn open_file(&mut self, path: PathBuf, config: &Config) {
+        self.close_search();
+        self.clear_link_hover();
         match Editor::open(&path) {
             Ok(editor) => {
                 log::info!("editing {}", path.display());
@@ -2983,6 +3213,8 @@ impl WindowState {
     }
 
     fn focus_agent_pane(&mut self, pane: PaneId, config: &Config) -> bool {
+        self.close_search();
+        self.clear_link_hover();
         if !self.workspace.focus_pane(pane) {
             return false;
         }
@@ -2994,6 +3226,80 @@ impl WindowState {
         self.relayout(config);
         self.window.request_redraw();
         true
+    }
+
+    fn send_agent_input(&mut self, pane_id: PaneId, bytes: &[u8]) -> bool {
+        let Some(pane) = self.workspace.pane_mut(pane_id) else {
+            return false;
+        };
+        pane.session.write(bytes);
+        self.agents_dirty = true;
+        self.agent_preview_dirty = true;
+        true
+    }
+
+    fn launch_agent(
+        &mut self,
+        kind: &AgentKind,
+        cwd: Option<PathBuf>,
+        config: &Config,
+    ) -> Option<PaneId> {
+        let command = kind.command_name()?.to_owned();
+        self.refresh_cwds(config);
+        let cwd = cwd
+            .filter(|path| path.is_dir())
+            .unwrap_or_else(|| self.focused_cwd());
+        let profile_id = self.shells.default_id.clone();
+        let (tab_id, pane_id) = self.workspace.create_terminal();
+        let session_key = self.alloc_session_key();
+        self.pending_spawns.insert(
+            pane_id,
+            PendingSpawn {
+                cwd,
+                profile_id,
+                session_key,
+                scrollback: None,
+                initial_command: Some(command),
+            },
+        );
+        self.sidebar.profile_menu = false;
+        self.sidebar.hovered_profile = None;
+        self.focus = Focus::Terminal;
+        self.branch_menu = None;
+        self.sidebar.scroll = f32::MAX;
+
+        if let Err(error) = self.sync_layout(config) {
+            log::error!("failed to launch agent terminal: {error:#}");
+            self.pending_spawns.remove(&pane_id);
+            self.workspace.close_tab(tab_id);
+            let _ = self.sync_layout(config);
+            return None;
+        }
+        self.save_session(config, false);
+        self.update_window_title();
+        self.window.request_redraw();
+        Some(pane_id)
+    }
+
+    fn mark_agent_seen(&mut self, id: &AgentId) {
+        if self.seen_agents.insert(id.clone()) {
+            self.agents_dirty = true;
+            self.rebuild_agent_snapshot();
+        }
+    }
+
+    fn mark_all_agents_seen(&mut self) -> usize {
+        let mut count = 0usize;
+        for row in &self.agent_snapshot.rows {
+            if row.state.is_finished() && self.seen_agents.insert(row.id.clone()) {
+                count += 1;
+            }
+        }
+        if count > 0 {
+            self.agents_dirty = true;
+            self.rebuild_agent_snapshot();
+        }
+        count
     }
 
     fn pane_has_agent(&self, pane: PaneId) -> bool {
@@ -3091,6 +3397,17 @@ impl WindowState {
                     .hook_states
                     .get(&pane.id)
                     .filter(|hook| now.duration_since(hook.at) < Duration::from_secs(1800));
+                let has_agent_in_pane = root.is_some() || hook.is_some() || !detected.is_empty();
+                let preview_lines = if has_agent_in_pane {
+                    pane.terminal.tail_lines(60)
+                } else {
+                    Vec::new()
+                };
+                let git_branch = pane.git_status.as_ref().map(|status| status.branch.clone());
+                let git_diff = pane
+                    .git_status
+                    .as_ref()
+                    .map(|status| (status.additions, status.deletions));
 
                 if let Some(root) = root {
                     let kind = root
@@ -3107,24 +3424,33 @@ impl WindowState {
                         .iter()
                         .find(|agent| agent.kind == kind)
                         .or_else(|| detected.first());
-                    let (pid, started, cwd) = if let Some(agent) = detected_match {
-                        used_detected.insert(agent.pid);
-                        (
-                            Some(agent.pid),
-                            if agent.started > 0 {
-                                agent.started
-                            } else {
-                                self.agent_times.get(&row_id).copied().unwrap_or(0)
-                            },
-                            agent.cwd.clone().or_else(|| pane.cwd.clone()),
-                        )
-                    } else {
-                        (
-                            None,
-                            self.agent_times.get(&row_id).copied().unwrap_or(0),
-                            pane.cwd.clone(),
-                        )
-                    };
+                    let (pid, started, cwd, memory_bytes, cpu_tenths, child_processes, command) =
+                        if let Some(agent) = detected_match {
+                            used_detected.insert(agent.pid);
+                            (
+                                Some(agent.pid),
+                                if agent.started > 0 {
+                                    agent.started
+                                } else {
+                                    self.agent_times.get(&row_id).copied().unwrap_or(0)
+                                },
+                                agent.cwd.clone().or_else(|| pane.cwd.clone()),
+                                Some(agent.memory_bytes),
+                                Some(agent.cpu_tenths),
+                                agent.child_processes,
+                                agent.command.clone(),
+                            )
+                        } else {
+                            (
+                                None,
+                                self.agent_times.get(&row_id).copied().unwrap_or(0),
+                                pane.cwd.clone(),
+                                None,
+                                None,
+                                0,
+                                None,
+                            )
+                        };
 
                     let mut state = protocol_agent_state(
                         root.state,
@@ -3193,6 +3519,14 @@ impl WindowState {
                         source: AgentSource::Protocol,
                         subagents,
                         seen,
+                        memory_bytes,
+                        cpu_tenths,
+                        child_processes,
+                        command,
+                        git_branch: git_branch.clone(),
+                        git_diff,
+                        last_output: Some(pane.last_output),
+                        preview_lines: preview_lines.clone(),
                     });
                 }
 
@@ -3233,6 +3567,16 @@ impl WindowState {
                         source: AgentSource::Hook,
                         subagents: Vec::new(),
                         seen: hook.state.is_finished() && self.seen_agents.contains(&row_id),
+                        memory_bytes: detected_match.map(|agent| agent.memory_bytes),
+                        cpu_tenths: detected_match.map(|agent| agent.cpu_tenths),
+                        child_processes: detected_match
+                            .map(|agent| agent.child_processes)
+                            .unwrap_or(0),
+                        command: detected_match.and_then(|agent| agent.command.clone()),
+                        git_branch: git_branch.clone(),
+                        git_diff,
+                        last_output: Some(pane.last_output),
+                        preview_lines: preview_lines.clone(),
                     });
                 }
 
@@ -3256,6 +3600,7 @@ impl WindowState {
                         agent,
                         notification,
                         started,
+                        preview_lines.clone(),
                     );
                     row.seen = row.state.is_finished() && self.seen_agents.contains(&row.id);
                     rows.push(row);
@@ -3286,6 +3631,14 @@ impl WindowState {
                 source: AgentSource::External,
                 subagents: Vec::new(),
                 seen: false,
+                memory_bytes: Some(agent.memory_bytes),
+                cpu_tenths: Some(agent.cpu_tenths),
+                child_processes: agent.child_processes,
+                command: agent.command.clone(),
+                git_branch: None,
+                git_diff: None,
+                last_output: None,
+                preview_lines: Vec::new(),
             });
         }
 
@@ -3321,13 +3674,15 @@ impl WindowState {
         );
     }
 
-    fn poll_background(&mut self, config: &Config) {
+    fn poll_background(&mut self, config: &Config, agent_window_open: bool) {
         let now = Instant::now();
 
         // Background polling is only useful while the user can see the
-        // terminal. Sleeping here also stops git processes while the window
-        // is minimized or another application owns the focus.
-        if !self.window_focused || self.window.is_minimized().unwrap_or(false) {
+        // terminal or the Agent Mode window. Sleeping here also stops git
+        // processes while another application owns the focus.
+        if (!self.window_focused && !agent_window_open)
+            || self.window.is_minimized().unwrap_or(false)
+        {
             return;
         }
 
@@ -3762,6 +4117,8 @@ impl WindowState {
     }
 
     fn focus_direction(&mut self, direction: FocusDirection) {
+        self.close_search();
+        self.clear_link_hover();
         let Some(current) = self.workspace.focused_pane() else {
             return;
         };
@@ -4110,6 +4467,59 @@ impl WindowState {
         })
     }
 
+    fn apply_config(&mut self, old: &Config, config: &Config) {
+        if old.font_family != config.font_family {
+            log::warn!("font_family changes require a restart");
+        }
+        if old.render_mode != config.render_mode {
+            log::warn!("render.mode changes require a restart");
+        }
+        if old.shell != config.shell {
+            let extras = self.shells.profiles.clone();
+            let mut shells = ShellCatalog::detect(config.shell.as_deref());
+            shells.merge_profiles(extras);
+            self.shells = shells;
+        }
+        if old.agents.enabled != config.agents.enabled {
+            if config.agents.enabled {
+                if self.agent_watch_tx.is_none() {
+                    self.agent_watch_tx = agents::spawn_watcher(self.proxy.clone());
+                }
+            } else {
+                self.agent_watch_tx = None;
+                self.detected_agents.clear();
+                self.external_agents.clear();
+                self.agent_notifications.clear();
+                self.agent_snapshot = Arc::new(AgentSnapshot::default());
+                self.agents_dirty = true;
+            }
+        }
+
+        self.renderer.refresh_font_metrics(config);
+        self.frame_cache.clear();
+        self.frame_dominant.clear();
+        self.prompt_trims.clear();
+        self.editor_frame_cache = None;
+        self.diff_frame_cache = None;
+        self.clear_link_hover();
+        if let Some(search) = &mut self.search {
+            search.dirty = true;
+        }
+        let panes: Vec<PaneId> = self
+            .workspace
+            .tabs
+            .iter()
+            .flat_map(|tab| tab.panes.values().map(|pane| pane.id))
+            .collect();
+        for pane_id in &panes {
+            if let Some(pane) = self.workspace.pane_mut(*pane_id) {
+                pane.terminal.set_scrollback_limit(config.scrollback_lines);
+            }
+        }
+        self.dirty_panes.extend(panes);
+        self.relayout(config);
+    }
+
     fn invalidate_pane_frame(&mut self, pane_id: PaneId) {
         self.frame_cache.remove(&pane_id);
         self.frame_dominant.remove(&pane_id);
@@ -4123,7 +4533,11 @@ impl WindowState {
     }
 
     fn refresh_completion(&mut self, config: &Config) {
-        if !config.completions || self.focus != Focus::Terminal || self.branch_menu.is_some() {
+        if !config.completions
+            || self.focus != Focus::Terminal
+            || self.branch_menu.is_some()
+            || self.search.is_some()
+        {
             self.clear_completion();
             return;
         }
@@ -4509,6 +4923,15 @@ impl WindowState {
             return;
         }
 
+        if self.search.is_some() && self.search_shortcut_pressed(&event) {
+            self.close_search();
+            return;
+        }
+
+        if self.search.is_some() && self.handle_search_key(&event) {
+            return;
+        }
+
         if self.focus == Focus::Diff && self.diff_view.is_some() {
             if self.handle_diff_key(&event, config) {
                 return;
@@ -4667,6 +5090,190 @@ impl WindowState {
         }
     }
 
+    fn open_search(&mut self) {
+        if self.search.is_some() {
+            self.close_search();
+            return;
+        }
+        if self.focus != Focus::Terminal {
+            return;
+        }
+        let Some(pane) = self.workspace.focused_pane() else {
+            return;
+        };
+        self.clear_link_hover();
+        self.search = Some(SearchState {
+            pane,
+            query: String::new(),
+            matches: Vec::new(),
+            current: 0,
+            dirty: false,
+        });
+        self.window.request_redraw();
+    }
+
+    fn close_search(&mut self) {
+        if self.search.take().is_some() {
+            self.window.request_redraw();
+        }
+    }
+
+    fn search_bar_rect(&self) -> Option<Rect> {
+        let search = self.search.as_ref()?;
+        let layout = self.view.panes.iter().find(|pane| pane.id == search.pane)?;
+        let scale = self.renderer.scale_factor() as f32;
+        let bar_width = (420.0 * scale).min((layout.content.width - 16.0 * scale).max(1.0));
+        let bar_height = (32.0 * scale).max(22.0);
+        Some(Rect::new(
+            layout.content.right() - bar_width - 8.0 * scale,
+            layout.content.y + 8.0 * scale,
+            bar_width,
+            bar_height,
+        ))
+    }
+
+    fn search_bar_contains(&self, x: f32, y: f32) -> bool {
+        self.search_bar_rect().is_some_and(|bar| bar.contains(x, y))
+    }
+
+    fn refresh_search(&mut self) {
+        let Some((pane_id, query)) = self
+            .search
+            .as_ref()
+            .map(|search| (search.pane, search.query.clone()))
+        else {
+            return;
+        };
+        let matches = self
+            .workspace
+            .pane(pane_id)
+            .map(|pane| pane.terminal.search_matches(&query, 2000))
+            .unwrap_or_default();
+        if let Some(search) = &mut self.search {
+            search.dirty = false;
+            search.current = search.current.min(matches.len().saturating_sub(1));
+            search.matches = matches;
+        }
+        self.scroll_to_search_match();
+        self.window.request_redraw();
+    }
+
+    fn scroll_to_search_match(&mut self) {
+        let Some((pane_id, point)) = self.search.as_ref().and_then(|search| {
+            search
+                .matches
+                .get(search.current)
+                .map(|matched| (search.pane, *matched.start()))
+        }) else {
+            return;
+        };
+        if let Some(pane) = self.workspace.pane_mut(pane_id) {
+            pane.terminal.scroll_to_point(point);
+            self.dirty_panes.insert(pane_id);
+            self.invalidate_pane_frame(pane_id);
+        }
+    }
+
+    fn advance_search(&mut self, forward: bool) {
+        let Some(len) = self
+            .search
+            .as_ref()
+            .map(|search| search.matches.len())
+            .filter(|len| *len > 0)
+        else {
+            return;
+        };
+        if let Some(search) = &mut self.search {
+            search.current = if forward {
+                (search.current + 1) % len
+            } else {
+                (search.current + len - 1) % len
+            };
+        }
+        self.scroll_to_search_match();
+        self.window.request_redraw();
+    }
+
+    fn search_push(&mut self, text: &str) {
+        let Some(search) = &mut self.search else {
+            return;
+        };
+        if search.query.chars().count() >= 256 {
+            return;
+        }
+        let text: String = text
+            .chars()
+            .filter(|character| !character.is_control())
+            .collect();
+        if text.is_empty() {
+            return;
+        }
+        search.query.push_str(&text);
+        search.current = 0;
+        search.dirty = true;
+        self.refresh_search();
+    }
+
+    fn handle_search_key(&mut self, event: &winit::event::KeyEvent) -> bool {
+        if self.search.is_none() {
+            return false;
+        }
+        match &event.logical_key {
+            Key::Named(NamedKey::Escape) => {
+                self.close_search();
+                true
+            }
+            Key::Named(NamedKey::Backspace) => {
+                if let Some(search) = &mut self.search {
+                    search.query.pop();
+                    search.current = 0;
+                    search.dirty = true;
+                }
+                self.refresh_search();
+                true
+            }
+            Key::Named(NamedKey::Enter) => {
+                self.advance_search(!self.modifiers.shift_key());
+                true
+            }
+            Key::Named(NamedKey::ArrowUp) => {
+                self.advance_search(false);
+                true
+            }
+            Key::Named(NamedKey::ArrowDown) => {
+                self.advance_search(true);
+                true
+            }
+            _ => {
+                if let Some(text) = &event.text
+                    && !text.is_empty()
+                {
+                    self.search_push(text);
+                }
+                true
+            }
+        }
+    }
+
+    fn search_shortcut_pressed(&self, event: &winit::event::KeyEvent) -> bool {
+        let PhysicalKey::Code(code) = event.physical_key else {
+            return false;
+        };
+        if cfg!(target_os = "macos") {
+            self.modifiers.super_key()
+                && self.modifiers.shift_key()
+                && !self.modifiers.control_key()
+                && !self.modifiers.alt_key()
+                && code == KeyCode::KeyF
+        } else {
+            self.modifiers.control_key()
+                && self.modifiers.shift_key()
+                && !self.modifiers.alt_key()
+                && !self.modifiers.super_key()
+                && code == KeyCode::KeyF
+        }
+    }
+
     fn handle_shortcut(
         &mut self,
         event: &winit::event::KeyEvent,
@@ -4718,6 +5325,10 @@ impl WindowState {
             return true;
         }
 
+        if self.search_shortcut_pressed(event) {
+            self.open_search();
+            return true;
+        }
         // Linux/Windows pane focus: Ctrl+Alt+Arrow.
         if !macos
             && ctrl
@@ -4800,8 +5411,12 @@ impl WindowState {
                 }
                 true
             }
-            KeyCode::KeyE if !macos => {
+            KeyCode::ArrowDown if !macos && shift => {
                 self.split_focused(SplitDirection::Down, config);
+                true
+            }
+            KeyCode::KeyE if shift => {
+                self.toggle_sidebar_mode(config);
                 true
             }
             KeyCode::KeyB => {
@@ -4810,10 +5425,6 @@ impl WindowState {
             }
             KeyCode::KeyA if shift => {
                 let _ = self.proxy.send_event(UserEvent::OpenAgentMode);
-                true
-            }
-            KeyCode::KeyF if shift => {
-                self.toggle_sidebar_mode(config);
                 true
             }
             KeyCode::Backquote => {
@@ -4903,6 +5514,19 @@ impl WindowState {
     fn on_cursor_moved(&mut self, position: PhysicalPosition<f64>, config: &Config) {
         self.cursor_position = position;
 
+        if let Some(mut drag) = self.sidebar_drag {
+            let threshold = 4.0 * self.renderer.scale_factor() as f32;
+            if (position.y as f32 - drag.start_y).abs() > threshold {
+                drag.active = true;
+            }
+            if drag.active {
+                drag.target = self.sidebar_insertion_index(position.y as f32);
+                self.window.request_redraw();
+            }
+            self.sidebar_drag = Some(drag);
+            return;
+        }
+
         if let Some(drag) = self.drag {
             match drag {
                 DragState::Split(split_id) => {
@@ -4957,6 +5581,8 @@ impl WindowState {
             return;
         }
 
+        self.update_hovered_link(position);
+
         let mut hovered_tab = None;
         let mut hovered_pane = None;
         let mut hovered_file = None;
@@ -5004,6 +5630,17 @@ impl WindowState {
         let x = self.cursor_position.x as f32;
         let y = self.cursor_position.y as f32;
 
+        if state == ElementState::Released
+            && button == MouseButton::Left
+            && let Some(drag) = self.sidebar_drag.take()
+        {
+            if drag.active && self.workspace.move_tab(drag.tab, drag.target) {
+                self.save_session(config, false);
+                self.relayout(config);
+            }
+            return;
+        }
+
         if self.branch_menu.is_some() && self.handle_branch_menu_click(state, button, x, y, config)
         {
             return;
@@ -5034,7 +5671,20 @@ impl WindowState {
                         SidebarHit::ToggleWorkspace(tab) => {
                             self.toggle_workspace(tab, config);
                         }
-                        SidebarHit::Select(tab) => self.select_tab(tab, config),
+                        SidebarHit::Select(tab) => {
+                            self.sidebar_drag = Some(SidebarDrag {
+                                tab,
+                                start_y: y,
+                                active: false,
+                                target: self
+                                    .workspace
+                                    .tabs
+                                    .iter()
+                                    .position(|item| item.id == tab)
+                                    .unwrap_or(0),
+                            });
+                            self.select_tab(tab, config);
+                        }
                         SidebarHit::SelectPane(tab, pane) => {
                             self.select_pane(tab, pane, config);
                         }
@@ -5074,6 +5724,8 @@ impl WindowState {
         if let Some(panel) = self.view.editor
             && panel.panel.contains(x, y)
         {
+            self.close_search();
+            self.clear_link_hover();
             if state == ElementState::Pressed && button == MouseButton::Left {
                 if panel.close.contains(x, y) {
                     if self.diff_view.is_some() {
@@ -5092,9 +5744,41 @@ impl WindowState {
             return;
         }
 
+        if self.search.is_some() && state == ElementState::Pressed && button == MouseButton::Left {
+            if self.search_bar_contains(x, y) {
+                return;
+            }
+            self.close_search();
+        }
+
         let Some(pane_id) = self.pane_at(x, y) else {
             return;
         };
+
+        let link_modifier = if cfg!(target_os = "macos") {
+            self.modifiers.super_key() && !self.modifiers.control_key()
+        } else {
+            self.modifiers.control_key() && !self.modifiers.super_key()
+        };
+
+        if state == ElementState::Pressed
+            && button == MouseButton::Left
+            && link_modifier
+            && self.search.is_none()
+            && let Some((point, _)) = self.point_for_pane(pane_id, self.cursor_position)
+            && let Some((uri, _)) = self
+                .workspace
+                .pane(pane_id)
+                .and_then(|pane| pane.terminal.link_at(point))
+        {
+            self.focus = Focus::Terminal;
+            self.workspace.focus_pane(pane_id);
+            self.sync_explorer_to_focused();
+            self.update_window_title();
+            self.window.request_redraw();
+            open_url(&uri);
+            return;
+        }
 
         if state == ElementState::Pressed {
             self.focus = Focus::Terminal;
@@ -5171,6 +5855,7 @@ impl WindowState {
 
                 self.last_click = Some((now, point, pane_id));
                 self.selecting = Some(pane_id);
+                self.clear_link_hover();
                 self.dirty_panes.insert(pane_id);
                 self.invalidate_pane_frame(pane_id);
                 self.window.request_redraw();
@@ -5277,6 +5962,8 @@ impl WindowState {
             .map(|pane| pane.terminal.mode())
             .unwrap_or_default();
 
+        self.clear_link_hover();
+
         if mode.intersects(TermMode::MOUSE_MODE)
             && mode.contains(TermMode::SGR_MOUSE)
             && !self.modifiers.shift_key()
@@ -5381,6 +6068,55 @@ impl WindowState {
             .map(|pane| pane.id)
     }
 
+    fn sidebar_insertion_index(&self, y: f32) -> usize {
+        let mut target = 0;
+        for row in &self.view.sidebar.rows {
+            if let SidebarRow::Workspace(item) = row
+                && y > item.rect.y + item.rect.height * 0.5
+            {
+                target += 1;
+            }
+        }
+        target
+    }
+
+    fn update_hovered_link(&mut self, position: PhysicalPosition<f64>) {
+        let mut hovered = None;
+        let x = position.x as f32;
+        let y = position.y as f32;
+        if self.search.is_none()
+            && !self.search_bar_contains(x, y)
+            && let Some(pane_id) = self.pane_at(x, y)
+            && let Some((point, _)) = self.point_for_pane(pane_id, position)
+            && let Some(pane) = self.workspace.pane(pane_id)
+            && let Some((uri, range)) = pane.terminal.link_at(point)
+        {
+            hovered = Some(LinkHover {
+                pane: pane_id,
+                uri,
+                range,
+            });
+        }
+
+        if self.hovered_link != hovered {
+            let has_link = hovered.is_some();
+            self.hovered_link = hovered;
+            self.window.set_cursor(if has_link {
+                CursorIcon::Pointer
+            } else {
+                CursorIcon::Default
+            });
+            self.window.request_redraw();
+        }
+    }
+
+    fn clear_link_hover(&mut self) {
+        if self.hovered_link.take().is_some() {
+            self.window.set_cursor(CursorIcon::Default);
+            self.window.request_redraw();
+        }
+    }
+
     fn point_for_pane(
         &self,
         pane_id: PaneId,
@@ -5453,6 +6189,11 @@ impl WindowState {
         pane.terminal.feed(bytes);
         pane.content_revision = pane.content_revision.wrapping_add(1);
         pane.last_output = Instant::now();
+        if let Some(search) = &mut self.search
+            && search.pane == pane_id
+        {
+            search.dirty = true;
+        }
 
         let revision = pane.terminal.program_status_revision();
         let status_changed = revision != pane.program_status_revision;
@@ -5482,6 +6223,8 @@ impl WindowState {
         if status_changed || !notifications.is_empty() {
             self.agents_dirty = true;
             log::debug!("pane {} program status revision {}", pane_id.0, revision);
+        } else if agent_present {
+            self.agent_preview_dirty = true;
         }
         for notification in notifications {
             if !agent_present {
@@ -5600,6 +6343,17 @@ impl WindowState {
         let metrics = self.renderer.cell_metrics();
         let ui_font_size = self.renderer.physical(config.ui_font_size);
         let header_font_size = (ui_font_size * 0.95).max(10.0);
+
+        if self
+            .search
+            .as_ref()
+            .is_some_and(|search| !self.view.panes.iter().any(|pane| pane.id == search.pane))
+        {
+            self.search = None;
+        }
+        if self.search.as_ref().is_some_and(|search| search.dirty) {
+            self.refresh_search();
+        }
 
         self.refresh_completion(config);
 
@@ -5756,6 +6510,30 @@ impl WindowState {
             header_font_size,
         );
 
+        if let Some(drag) = &self.sidebar_drag
+            && drag.active
+        {
+            let mut y = self.view.sidebar.list.y;
+            let mut index = 0;
+            for row in &self.view.sidebar.rows {
+                if let SidebarRow::Workspace(item) = row {
+                    if index == drag.target {
+                        y = item.rect.y;
+                        break;
+                    }
+                    y = item.rect.bottom();
+                    index += 1;
+                }
+            }
+            quads.push(Quad::new(
+                self.view.sidebar.list.x,
+                y.clamp(self.view.sidebar.list.y, self.view.sidebar.list.bottom()) - 1.0,
+                self.view.sidebar.list.width,
+                2.0,
+                to_linear(theme.accent, 1.0),
+            ));
+        }
+
         for divider in &self.view.dividers {
             quads.push(Quad::new(
                 divider.line.x,
@@ -5813,6 +6591,85 @@ impl WindowState {
                         to_linear(background.color, 1.0),
                     ));
                 }
+            }
+        }
+
+        if let Some(search) = &self.search
+            && let Some(pane) = self.workspace.pane(search.pane)
+            && let Some(layout) = self.view.panes.iter().find(|pane| pane.id == search.pane)
+        {
+            let offset = pane.terminal.display_offset() as i32;
+            for (index, matched) in search.matches.iter().enumerate() {
+                let current = index == search.current;
+                let color = if current {
+                    theme.accent
+                } else {
+                    theme.selection
+                };
+                let alpha = if current { 0.55 } else { 0.35 };
+                let start = matched.start();
+                let end = matched.end();
+                for line in start.line.0..=end.line.0 {
+                    let row = line + offset;
+                    if row < 0 || row >= pane.grid.lines as i32 {
+                        continue;
+                    }
+                    let start_column = if line == start.line.0 {
+                        start.column.0
+                    } else {
+                        0
+                    };
+                    let end_column = if line == end.line.0 {
+                        end.column.0
+                    } else {
+                        pane.grid.cols.saturating_sub(1)
+                    };
+                    if start_column > end_column {
+                        continue;
+                    }
+                    quads.push(Quad::new(
+                        layout.content.x + start_column as f32 * metrics.width,
+                        layout.content.y + row as f32 * metrics.height,
+                        (end_column - start_column + 1) as f32 * metrics.width,
+                        metrics.height,
+                        to_linear(color, alpha),
+                    ));
+                }
+            }
+        }
+
+        if let Some(link) = &self.hovered_link
+            && let Some(pane) = self.workspace.pane(link.pane)
+            && let Some(layout) = self.view.panes.iter().find(|pane| pane.id == link.pane)
+        {
+            let offset = pane.terminal.display_offset() as i32;
+            let start = link.range.start();
+            let end = link.range.end();
+            for line in start.line.0..=end.line.0 {
+                let row = line + offset;
+                if row < 0 || row >= pane.grid.lines as i32 {
+                    continue;
+                }
+                let start_column = if line == start.line.0 {
+                    start.column.0
+                } else {
+                    0
+                };
+                let end_column = if line == end.line.0 {
+                    end.column.0
+                } else {
+                    pane.grid.cols.saturating_sub(1)
+                };
+                if start_column > end_column {
+                    continue;
+                }
+                quads.push(Quad::new(
+                    layout.content.x + start_column as f32 * metrics.width,
+                    layout.content.y + (row as f32 + 1.0) * metrics.height - scale,
+                    (end_column - start_column + 1) as f32 * metrics.width,
+                    scale.max(1.0),
+                    to_linear(theme.accent, 1.0),
+                ));
             }
         }
 
@@ -6141,6 +6998,50 @@ impl WindowState {
                 dirty: self.editor_dirty,
                 dirty_rows: None,
                 ghost: None,
+            });
+        }
+
+        if let Some(search) = &self.search
+            && let Some(bar) = self.search_bar_rect()
+        {
+            quads.push(Quad::rounded(
+                bar.x,
+                bar.y,
+                bar.width,
+                bar.height,
+                6.0 * scale,
+                to_linear(theme.sidebar_background, 0.98),
+            ));
+            quads.push(Quad::new(
+                bar.x,
+                bar.y,
+                bar.width,
+                (1.0 * scale).max(1.0),
+                to_linear(theme.accent, 0.9),
+            ));
+            let count = if search.matches.is_empty() {
+                "0/0".to_owned()
+            } else {
+                format!("{}/{}", search.current + 1, search.matches.len())
+            };
+            let text = if search.query.is_empty() {
+                "Buscar en el scrollback…".to_owned()
+            } else {
+                format!("{}▌  {count}", search.query)
+            };
+            let font = (ui_font_size * 0.9).max(10.0);
+            labels.push(Label {
+                text,
+                x: bar.x + 10.0 * scale,
+                y: bar.y + (bar.height - font * 1.25) * 0.5,
+                width: (bar.width - 20.0 * scale).max(1.0),
+                font_size: font,
+                color: if search.query.is_empty() {
+                    theme.sidebar_text_dim
+                } else {
+                    theme.foreground
+                },
+                bold: false,
             });
         }
 
@@ -6710,6 +7611,7 @@ fn process_agent_row(
     agent: &DetectedAgent,
     notification: Option<&PaneNotification>,
     started: u64,
+    preview_lines: Vec<String>,
 ) -> AgentRow {
     AgentRow {
         id: AgentId::Terminal {
@@ -6730,6 +7632,17 @@ fn process_agent_row(
         source: AgentSource::Process,
         subagents: Vec::new(),
         seen: false,
+        memory_bytes: Some(agent.memory_bytes),
+        cpu_tenths: Some(agent.cpu_tenths),
+        child_processes: agent.child_processes,
+        command: agent.command.clone(),
+        git_branch: pane.git_status.as_ref().map(|status| status.branch.clone()),
+        git_diff: pane
+            .git_status
+            .as_ref()
+            .map(|status| (status.additions, status.deletions)),
+        last_output: Some(pane.last_output),
+        preview_lines,
     }
 }
 
@@ -6820,6 +7733,55 @@ fn epoch_seconds() -> u64 {
         .duration_since(std::time::UNIX_EPOCH)
         .map(|duration| duration.as_secs())
         .unwrap_or(0)
+}
+
+fn open_url(uri: &str) -> bool {
+    if !(uri.starts_with("http://") || uri.starts_with("https://") || uri.starts_with("mailto:")) {
+        return false;
+    }
+
+    #[cfg(windows)]
+    {
+        let mut command = crate::process::command("rundll32.exe");
+        command.arg("url.dll,FileProtocolHandler").arg(uri);
+        spawn_url(command, uri)
+    }
+
+    #[cfg(target_os = "macos")]
+    {
+        let mut command = crate::process::command("open");
+        command.arg(uri);
+        spawn_url(command, uri)
+    }
+
+    #[cfg(all(unix, not(target_os = "macos")))]
+    {
+        let mut command = crate::process::command("xdg-open");
+        command.arg(uri);
+        spawn_url(command, uri)
+    }
+
+    #[cfg(not(any(windows, unix)))]
+    {
+        false
+    }
+}
+
+#[cfg(any(windows, unix))]
+fn spawn_url(mut command: std::process::Command, uri: &str) -> bool {
+    match command.spawn() {
+        Ok(_) => true,
+        Err(error) => {
+            log::warn!("could not open {uri}: {error}");
+            false
+        }
+    }
+}
+
+fn config_modified_time() -> Option<SystemTime> {
+    config_path()
+        .and_then(|path| std::fs::metadata(path).ok())
+        .and_then(|metadata| metadata.modified().ok())
 }
 
 fn default_directory() -> PathBuf {

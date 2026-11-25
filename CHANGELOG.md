@@ -8,6 +8,22 @@ usa [Versionado Semántico](https://semver.org/lang/es/).
 
 ### Added
 
+- Búsqueda en el scrollback del pane enfocado con `Cmd+Shift+F` (macOS) o
+  `Ctrl+Shift+F` (Linux/Windows): texto literal con *smart case*, resaltado de
+  todas las coincidencias, contador, navegación con `Enter`/`Shift+Enter` y
+  salto automático al resultado. Límite de 2000 coincidencias para no penalizar
+  la interfaz.
+- Enlaces clicables: se detectan hipervínculos `OSC 8` y URLs planas
+  (`http://`, `https://`, `www.`, `mailto:`), se subrayan al pasar el ratón y se
+  abren con `Ctrl+Click` / `Cmd+Click` en el navegador del sistema. Los esquemas
+  no permitidos (`file://`, etc.) se ignoran.
+- Reordenación de sesiones arrastrando su fila en la sidebar, con línea de
+  inserción, pane enfocado preservado y orden persistido en la sesión guardada.
+- Recarga en caliente de `config.toml`: al guardar el fichero se aplican sin
+  reiniciar el tema, tipografías, márgenes, scrollback, shell por defecto,
+  agentes y opciones de comportamiento. `font_family` y `render.mode` siguen
+  requiriendo reinicio. Si el fichero está a medio escribir, se conserva la
+  configuración anterior.
 - Restauración de sesión al reabrir F-Terminal: pestañas, splits, perfiles,
   directorios, geometría de la ventana y scrollback con atributos de texto. El
   guardado se hace en segundo plano, la carga del historial en paralelo y la
@@ -22,6 +38,14 @@ usa [Versionado Semántico](https://semver.org/lang/es/).
   **Actualizar**, y terminar el proceso seleccionado con `X`/`Supr` o
   **Matar PID** (confirmación en dos pasos; `SIGTERM` y después `SIGKILL` si es
   necesario).
+- Agent Mode se convierte en un **Centro de Agentes**: KPIs de activos,
+  atención, CPU/RAM y diff Git; buscador por nombre, rama, ruta, PID o comando;
+  filtros de estado y origen; orden por prioridad, CPU, RAM, tiempo o nombre;
+  inspector con resumen, consola desplazable (hasta 60 líneas visibles) y
+  subagentes; mensajes
+  rápidos con `I`, aprobación con `Y`, botones `Enter`/`Ctrl+C`, copiar ruta o
+  PID, marcar visto y lanzador de Claude/Codex/OpenCode/Junie en una pestaña
+  nueva.
 - Zoom del terminal con `Cmd/Ctrl+=`, `Cmd/Ctrl+-` y `Cmd/Ctrl+0`; el valor se
   guarda en `font_size` y se aplica sin reiniciar.
 - `Shift+Enter` envía `LF` para insertar saltos de línea en agentes como
@@ -62,6 +86,9 @@ usa [Versionado Semántico](https://semver.org/lang/es/).
 
 ### Changed
 
+- `Ctrl+Shift+F` / `Cmd+Shift+F` abre la búsqueda en el scrollback; la sidebar
+  cambia entre Sesiones y Archivos con `Ctrl+Shift+E` / `Cmd+Shift+E`. En
+  Linux/Windows el split inferior pasa de `Ctrl+Shift+E` a `Ctrl+Shift+Down`.
 - Se eliminó la firma Authenticode del instalador de Windows: las releases se
   publican sin firmar y ya no hace falta configurar ningún certificado ni
   secreto de firma.

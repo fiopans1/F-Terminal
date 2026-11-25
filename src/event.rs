@@ -70,6 +70,21 @@ pub enum UserEvent {
         pid: u32,
         result: Result<String, String>,
     },
+    /// Send raw bytes (quick prompt, approval, or Ctrl+C) to an agent pane.
+    SendAgentInput {
+        pane: PaneId,
+        bytes: Vec<u8>,
+        label: String,
+    },
+    /// Launch a new terminal tab running an agent CLI in `cwd` (or focused cwd).
+    LaunchAgent {
+        kind: crate::agents::AgentKind,
+        cwd: Option<PathBuf>,
+    },
+    /// Mark a finished/error agent as seen from Agent Mode.
+    MarkAgentSeen { id: crate::agents::AgentId },
+    /// Mark every finished/error agent as seen from Agent Mode.
+    MarkAllAgentsSeen,
     /// Change the terminal font size at runtime.
     SetFontSize(f32),
     /// Syntax highlighting result from the background worker.
