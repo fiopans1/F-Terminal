@@ -192,6 +192,12 @@ impl LayoutNode {
     }
 }
 
+/// Session fields needed when a pane is spawned after a restore.
+pub struct PaneRestore<'a> {
+    pub session_key: u64,
+    pub scrollback: Option<&'a Path>,
+}
+
 /// One PTY-backed terminal inside a tab.
 pub struct Pane {
     pub id: PaneId,
@@ -224,14 +230,13 @@ impl Pane {
         proxy: EventLoopProxy<UserEvent>,
         profile: &TerminalProfile,
         cwd: PathBuf,
-        session_key: u64,
-        scrollback: Option<&Path>,
+        restore: PaneRestore<'_>,
         scrollback_lines: usize,
     ) -> Result<Self> {
         let mut terminal =
             Terminal::new(grid, EventProxy::new(id, proxy.clone()), scrollback_lines);
         let mut restored = false;
-        if let Some(scrollback) = scrollback
+        if let Some(scrollback) = restore.scrollback
             && let Some(bytes) = crate::session::read_scrollback(scrollback)
         {
             terminal.restore_scrollback(&bytes);
@@ -242,7 +247,7 @@ impl Pane {
 
         Ok(Self {
             id,
-            session_key,
+            session_key: restore.session_key,
             terminal,
             session,
             grid,

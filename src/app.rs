@@ -1610,8 +1610,10 @@ impl WindowState {
                     self.proxy.clone(),
                     &profile,
                     spawn.cwd,
-                    spawn.session_key,
-                    spawn.scrollback.as_deref(),
+                    crate::workspace::PaneRestore {
+                        session_key: spawn.session_key,
+                        scrollback: spawn.scrollback.as_deref(),
+                    },
                     config.scrollback_lines,
                 )?;
                 pane.git_status = cached_status;
@@ -3900,14 +3902,13 @@ impl WindowState {
                             .as_ref()
                             .map(|cwd| cwd.to_string_lossy().into_owned()),
                     });
-                } else if let Some(spawn) = self.pending_spawns.get(pane_id) {
+                } else {
+                    let spawn = self.pending_spawns.get(pane_id)?;
                     panes.push(SavedPane {
                         key: spawn.session_key,
                         profile_id: spawn.profile_id.clone(),
                         cwd: Some(spawn.cwd.to_string_lossy().into_owned()),
                     });
-                } else {
-                    return None;
                 }
             }
 
