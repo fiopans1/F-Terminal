@@ -860,7 +860,7 @@ struct WindowState {
     next_session_key: u64,
     last_session_save: Instant,
     last_scrollback_save: Instant,
-    scrollback_sweep: bool,
+    scrollback_queue: Vec<PaneId>,
     last_saved_session: Option<SessionState>,
     saved_scrollback: HashMap<PaneId, u64>,
 }
@@ -1292,7 +1292,7 @@ impl WindowState {
             next_session_key,
             last_session_save: now,
             last_scrollback_save: now,
-            scrollback_sweep: false,
+            scrollback_queue: Vec::new(),
             last_saved_session: None,
             saved_scrollback: HashMap::new(),
         };
@@ -1710,7 +1710,9 @@ impl WindowState {
                         })?
                     }
                 };
-                pane.git_status = cached_status;
+                if pane.cwd.as_deref() == Some(spawn.cwd.as_path()) {
+                    pane.git_status = cached_status;
+                }
                 self.workspace.insert_pane(pane);
                 spawned_panes.push(*pane_id);
             }
@@ -3890,36 +3892,22 @@ impl WindowState {
         if now.duration_since(self.last_session_save) >= Duration::from_secs(2) {
             self.save_session(config, false);
         }
-        if !self.scrollback_sweep
+        if self.scrollback_queue.is_empty()
             && now.duration_since(self.last_scrollback_save) >= Duration::from_secs(30)
         {
-            self.scrollback_sweep = true;
+            self.scrollback_queue = self.collect_scrollback_candidates();
+            if self.scrollback_queue.is_empty() {
+                self.last_scrollback_save = now;
+            }
         }
-        if self.scrollback_sweep && self.save_scrollback_step(config) {
-            self.scrollback_sweep = false;
+        if !self.scrollback_queue.is_empty() && self.save_scrollback_step(config) {
             self.last_scrollback_save = Instant::now();
         }
     }
 
-    /// Export at most one changed pane per tick so a full scrollback sweep
-    /// never clones every grid on the same frame.
-    fn save_scrollback_step(&mut self, config: &Config) -> bool {
-        if !config.restore_scrollback {
-            return true;
-        }
-        let Some(state) = self.session_state() else {
-            return true;
-        };
-        let mut keys = Vec::new();
-        for tab in &state.tabs {
-            keys.extend(tab.panes.iter().map(|pane| pane.key));
-        }
-
-        self.saved_scrollback
-            .retain(|pane, _| self.workspace.pane(*pane).is_some());
-
-        let mut selected = None;
-        'tabs: for tab in &self.workspace.tabs {
+    fn collect_scrollback_candidates(&self) -> Vec<PaneId> {
+        let mut candidates = Vec::new();
+        for tab in &self.workspace.tabs {
             for pane in tab.panes.values() {
                 if pane.terminal.in_alt_screen() {
                     continue;
@@ -3927,23 +3915,49 @@ impl WindowState {
                 if self.saved_scrollback.get(&pane.id) == Some(&pane.content_revision) {
                     continue;
                 }
-                selected = Some((
-                    pane.id,
-                    ScrollbackSource {
-                        key: pane.session_key,
-                        grid: pane.terminal.clone_grid(),
-                        size: pane.grid,
-                        theme: config.theme,
-                    },
-                    pane.content_revision,
-                ));
-                break 'tabs;
+                candidates.push(pane.id);
             }
         }
+        candidates
+    }
 
-        let Some((pane_id, source, revision)) = selected else {
+    /// Export at most one queued pane per tick so a full scrollback sweep never
+    /// clones every grid on the same frame. The queue is fixed when the sweep
+    /// starts, so continuous output cannot keep the sweep alive forever.
+    fn save_scrollback_step(&mut self, config: &Config) -> bool {
+        if !config.restore_scrollback {
+            self.scrollback_queue.clear();
+            return true;
+        }
+        if self.scrollback_queue.is_empty() {
+            return true;
+        }
+        let pane_id = self.scrollback_queue.remove(0);
+        let Some(state) = self.session_state() else {
+            self.scrollback_queue.clear();
             return true;
         };
+        let mut keys = Vec::new();
+        for tab in &state.tabs {
+            keys.extend(tab.panes.iter().map(|pane| pane.key));
+        }
+        self.saved_scrollback
+            .retain(|pane, _| self.workspace.pane(*pane).is_some());
+
+        let Some(pane) = self.workspace.pane(pane_id) else {
+            return self.scrollback_queue.is_empty();
+        };
+        if pane.terminal.in_alt_screen() {
+            return self.scrollback_queue.is_empty();
+        }
+
+        let source = ScrollbackSource {
+            key: pane.session_key,
+            grid: pane.terminal.clone_grid(),
+            size: pane.grid,
+            theme: config.theme,
+        };
+        let revision = pane.content_revision;
         if let Some(writer) = &self.session_writer {
             writer.request(session::SaveJob {
                 state: state.clone(),
@@ -3954,7 +3968,7 @@ impl WindowState {
         self.last_saved_session = Some(state);
         self.last_session_save = Instant::now();
         self.saved_scrollback.insert(pane_id, revision);
-        false
+        self.scrollback_queue.is_empty()
     }
 
     fn save_session(&mut self, config: &Config, with_scrollback: bool) {
