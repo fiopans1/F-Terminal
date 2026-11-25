@@ -67,7 +67,7 @@ jobs:
           APPLE_TEAM_ID: ${{ secrets.APPLE_TEAM_ID }}
           APPLE_APP_PASSWORD: ${{ secrets.APPLE_APP_PASSWORD }}
 
-      - uses: actions/upload-artifact@v4
+      - uses: actions/upload-artifact@v7
         with:
           name: macos-installers
           path: |
@@ -105,7 +105,7 @@ jobs:
         shell: powershell
         run: ./scripts/package-windows.ps1
 
-      - uses: actions/upload-artifact@v4
+      - uses: actions/upload-artifact@v7
         with:
           name: windows-installer
           path: dist/windows/*.exe
@@ -141,7 +141,7 @@ jobs:
           chmod +x scripts/package.sh scripts/package-linux.sh scripts/package-macos.sh
           ./scripts/package-linux.sh
 
-      - uses: actions/upload-artifact@v4
+      - uses: actions/upload-artifact@v7
         with:
           name: linux-packages
           path: |
