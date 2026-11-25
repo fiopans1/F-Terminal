@@ -4016,6 +4016,7 @@ impl WindowState {
                 | KeyCode::KeyQ
                 | KeyCode::BracketLeft
                 | KeyCode::BracketRight
+                | KeyCode::KeyP
                 | KeyCode::Digit1
                 | KeyCode::Digit2
                 | KeyCode::Digit3
@@ -5485,6 +5486,16 @@ impl WindowState {
             return true;
         }
 
+        // Settings: Cmd+Shift+P on macOS and Ctrl+Shift+P on Linux/Windows.
+        if code == KeyCode::KeyP
+            && shift
+            && !alt
+            && ((macos && super_key && !ctrl) || (!macos && ctrl && !super_key))
+        {
+            self.open_settings(config);
+            return true;
+        }
+
         let app_mod = if macos {
             super_key && !ctrl
         } else {
@@ -5515,7 +5526,7 @@ impl WindowState {
                 true
             }
             KeyCode::KeyS if shift => {
-                self.open_settings(config);
+                self.split_focused(SplitDirection::Down, config);
                 true
             }
             KeyCode::KeyC => {
@@ -5554,10 +5565,6 @@ impl WindowState {
                 } else {
                     self.split_focused(SplitDirection::Right, config);
                 }
-                true
-            }
-            KeyCode::ArrowDown if !macos && shift => {
-                self.split_focused(SplitDirection::Down, config);
                 true
             }
             KeyCode::KeyE if shift => {
@@ -8928,15 +8935,63 @@ fn collect_prompt_trims(frame: &Frame, enabled: bool) -> Vec<PromptTrim> {
     if !enabled {
         return Vec::new();
     }
-    frame
-        .rows
-        .iter()
-        .enumerate()
-        .filter_map(|(row, line)| {
-            complete::line::prompt_user_prefix_len(&line.text, frame.cols)
-                .map(|columns| PromptTrim { row, columns })
-        })
-        .collect()
+    let mut trims = Vec::new();
+    let mut row = 0;
+    while row < frame.rows.len() {
+        let text = &frame.rows[row].text;
+        if let Some(columns) = complete::line::prompt_user_prefix_len(text, frame.cols) {
+            trims.push(PromptTrim { row, columns });
+            row += 1;
+            continue;
+        }
+
+        // A narrow pane wraps the prompt: the `user@host` prefix, its trailing
+        // space and even the prompt marker can spill onto following rows. Join
+        // a few rows so the prefix can still be hidden while keeping the cwd
+        // and the marker, which is what the user actually wants to see.
+        let wrapped = complete::line::user_host_prefix_len(text).is_some()
+            && text
+                .chars()
+                .last()
+                .is_some_and(|character| character != ' ');
+        if !wrapped {
+            row += 1;
+            continue;
+        }
+
+        let mut joined = text.clone();
+        let mut rows_used = 1;
+        let mut prefix = None;
+        while rows_used < 4 && row + rows_used < frame.rows.len() {
+            joined.push_str(&frame.rows[row + rows_used].text);
+            rows_used += 1;
+            if let Some(columns) = complete::line::prompt_user_prefix_len(&joined, usize::MAX) {
+                prefix = Some(columns);
+                break;
+            }
+        }
+
+        let Some(mut remaining) = prefix else {
+            row += 1;
+            continue;
+        };
+        for offset in 0..rows_used {
+            let row_len = frame.rows[row + offset].text.chars().count();
+            let columns = remaining.min(row_len);
+            remaining = remaining.saturating_sub(columns);
+            if columns > 0 {
+                trims.push(PromptTrim {
+                    row: row + offset,
+                    columns,
+                });
+            }
+            if remaining == 0 {
+                break;
+            }
+        }
+        row += rows_used;
+    }
+    trims
 }
 
 fn trim_prompt_row(frame: &mut Frame, row_index: usize, columns: usize) {
@@ -8946,7 +9001,22 @@ fn trim_prompt_row(frame: &mut Frame, row_index: usize, columns: usize) {
         return;
     };
     let char_count = row.text.chars().count();
-    if columns == 0 || columns >= char_count {
+    if columns == 0 || char_count == 0 {
+        return;
+    }
+
+    if columns >= char_count {
+        // The whole row belongs to the hidden prefix. Keep an empty, padded
+        // row so the rest of the grid stays aligned.
+        row.text.clear();
+        row.text.extend(std::iter::repeat_n(' ', cols));
+        row.runs.clear();
+        row.backgrounds.clear();
+        if cursor_row == Some(row_index)
+            && let Some(cursor) = &mut frame.cursor
+        {
+            cursor.col = 0;
+        }
         return;
     }
 
@@ -9683,6 +9753,40 @@ mod tests {
         assert_eq!(trims[0].row, 0);
         assert_eq!(trims[1].row, 2);
         assert!(collect_prompt_trims(&frame, false).is_empty());
+    }
+
+    #[test]
+    fn hides_a_wrapped_prompt_in_a_narrow_pane() {
+        let cols = 20;
+        let prompt = "fiopans1@MacBook-Pro-de-Diego-3 ~/repo % ";
+        let mut rows = Vec::new();
+        for chunk in prompt.chars().collect::<Vec<_>>().chunks(cols) {
+            let mut text: String = chunk.iter().collect();
+            while text.chars().count() < cols {
+                text.push(' ');
+            }
+            rows.push(Row {
+                text,
+                ..Row::default()
+            });
+        }
+        let mut frame = Frame {
+            rows,
+            cols,
+            cursor: None,
+            background: Theme::tokyo_night().background,
+        };
+
+        let trims = collect_prompt_trims(&frame, true);
+        assert_eq!(trims.len(), 2);
+        assert_eq!((trims[0].row, trims[0].columns), (0, 20));
+        assert_eq!((trims[1].row, trims[1].columns), (1, 12));
+
+        for trim in &trims {
+            trim_prompt_row(&mut frame, trim.row, trim.columns);
+        }
+        assert_eq!(frame.rows[0].text, " ".repeat(cols));
+        assert!(frame.rows[1].text.starts_with("~/repo %"));
     }
 
     #[test]

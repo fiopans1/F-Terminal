@@ -366,7 +366,7 @@ primer arranque con una plantilla comentada y permisos `600` en Unix.
 
 La variable `F_TERMINAL_CONFIG` permite usar otra ruta.
 
-`Cmd+Shift+S` / `Ctrl+Shift+S` abre el `config.toml` en el editor integrado. Los
+`Cmd+Shift+P` / `Ctrl+Shift+P` abre el `config.toml` en el editor integrado. Los
 cambios se aplican en caliente en cuanto se guarda el fichero: tema, tamaños de
 letra, márgenes, scrollback, perfil de shell por defecto, agentes y el resto de
 opciones de comportamiento. Los cambios estructurales —`font_family` y
@@ -490,7 +490,8 @@ aviso en el log.
 Con `show_user_in_prompt = false`, F-Terminal oculta el prefijo `user@host`
 del prompt visible, incluidas las líneas ya impresas en pantalla, y de los
 títulos de pane/ventana (por ejemplo `fiopans1@MacBook-Pro ~/repo %` pasa a
-`~/repo %`). Funciona en macOS, Linux y Windows, conserva los colores del resto
+`~/repo %`). Funciona en macOS, Linux y Windows, también cuando el pane es
+estrecho y el prompt se parte en varias filas, conserva los colores del resto
 del prompt y no modifica tu `PS1`/`PROMPT` ni el historial del shell.
 
 ### Scrollback
@@ -681,7 +682,7 @@ Acciones:
 Dentro de cada sesión:
 
 - `Cmd+D` / `Ctrl+Shift+D`: split a la derecha.
-- `Cmd+Shift+D` / `Ctrl+Shift+Down`: split abajo.
+- `Cmd+Shift+S` / `Ctrl+Shift+S`: split abajo.
 - Los nuevos panes aparecen como hijos del árbol y expanden la sesión.
 - Los divisores se arrastran con el ratón.
 - El pane enfocado muestra un borde de acento.
@@ -1174,7 +1175,7 @@ poll_interval_ms = 2000
 | Nueva terminal (perfil por defecto) | `Cmd+T` |
 | Elegir perfil de shell | `Cmd+Shift+N` |
 | Cerrar pane / terminal | `Cmd+W` / `Cmd+Shift+W` |
-| Split derecha / abajo | `Cmd+D` / `Cmd+Shift+D` |
+| Split derecha / abajo | `Cmd+D` / `Cmd+Shift+S` |
 | Cambiar de terminal | `Cmd+Shift+[` / `]`, `Cmd+1..9`, `Ctrl+Tab` |
 | Mover foco entre panes | `Cmd+Alt+flechas`, `Cmd+\`` |
 | Mostrar/ocultar sidebar | `Cmd+B` |
@@ -1184,7 +1185,7 @@ poll_interval_ms = 2000
 | Abrir Code Review | `Cmd+Shift+R` |
 | Abrir gestor Git | `Cmd+Shift+M` |
 | Abrir Agentes | `Cmd+Shift+A` |
-| Abrir ajustes (`config.toml`) | `Cmd+Shift+S` |
+| Abrir ajustes (`config.toml`) | `Cmd+Shift+P` |
 | Abrir explorador del sistema | `Cmd+Shift+O` |
 | Guardar en el editor | `Cmd+S` |
 | Cerrar editor | `Esc` o `Cmd+W` |
@@ -1199,7 +1200,7 @@ poll_interval_ms = 2000
 | Nueva terminal (perfil por defecto) | `Ctrl+Shift+T` |
 | Elegir perfil de shell | `Ctrl+Shift+N` |
 | Cerrar pane | `Ctrl+Shift+W` |
-| Split derecha / abajo | `Ctrl+Shift+D` / `Ctrl+Shift+Down` |
+| Split derecha / abajo | `Ctrl+Shift+D` / `Ctrl+Shift+S` |
 | Cambiar de terminal | `Ctrl+Tab`, `Ctrl+Shift+Tab`, `Ctrl+Shift+[ / ]` |
 | Mover foco entre panes | `Ctrl+Alt+flechas`, `Ctrl+Shift+\`` |
 | Mostrar/ocultar sidebar | `Ctrl+Shift+B` |
@@ -1209,7 +1210,7 @@ poll_interval_ms = 2000
 | Abrir Code Review | `Ctrl+Shift+R` |
 | Abrir gestor Git | `Ctrl+Shift+M` |
 | Abrir Agentes | `Ctrl+Shift+A` |
-| Abrir ajustes (`config.toml`) | `Ctrl+Shift+S` |
+| Abrir ajustes (`config.toml`) | `Ctrl+Shift+P` |
 | Abrir explorador del sistema | `Ctrl+Shift+O` |
 | Guardar en el editor | `Ctrl+S` |
 | Cerrar editor | `Esc` o `Ctrl+W` |

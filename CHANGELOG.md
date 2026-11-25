@@ -61,8 +61,9 @@ usa [Versionado Semántico](https://semver.org/lang/es/).
   mantiene la navegación manual hasta que cambie el cwd del pane.
 - Nueva sección `[agents]` en `config.toml` (`enabled`, `show_external`,
   `poll_interval_ms`).
-- `Cmd+Shift+S` / `Ctrl+Shift+S` abre `config.toml` en el editor integrado; el
-  elemento de menú «Abrir configuración…» hace lo mismo.
+- `Cmd+Shift+S` / `Ctrl+Shift+S` divide el pane activo hacia abajo; `Cmd+Shift+P`
+  / `Ctrl+Shift+P` abre `config.toml` en el editor integrado y el elemento de
+  menú «Abrir configuración…» hace lo mismo.
 - Temas: Foundry, Catppuccin Mocha, Dracula, Nord, Gruvbox Dark, One Dark,
   Solarized Dark, GitHub Dark y Kanagawa, además de Tokyo Night.
 - `padding_left` añade un margen izquierdo configurable al texto del terminal
@@ -92,8 +93,8 @@ usa [Versionado Semántico](https://semver.org/lang/es/).
 - El terminal y la UI usan shaping avanzado con fallback para emojis, símbolos
   y otros caracteres que no están en la fuente principal.
 - `Ctrl+Shift+F` / `Cmd+Shift+F` abre la búsqueda en el scrollback; la sidebar
-  cambia entre Sesiones y Archivos con `Ctrl+Shift+E` / `Cmd+Shift+E`. En
-  Linux/Windows el split inferior pasa de `Ctrl+Shift+E` a `Ctrl+Shift+Down`.
+  cambia entre Sesiones y Archivos con `Ctrl+Shift+E` / `Cmd+Shift+E`. El split
+  inferior usa `Cmd+Shift+S` / `Ctrl+Shift+S` en macOS y Linux/Windows.
 - Se eliminó la firma Authenticode del instalador de Windows: las releases se
   publican sin firmar y ya no hace falta configurar ningún certificado ni
   secreto de firma.
@@ -112,6 +113,9 @@ usa [Versionado Semántico](https://semver.org/lang/es/).
 - Al restaurar la sesión, el scrollback ya no guarda las filas vacías de debajo
   del cursor ni la línea viva del prompt: el prompt reaparece donde estaba en
   lugar de acumular líneas en blanco y saltar al fondo en cada reinicio.
+- `show_user_in_prompt = false` sigue ocultando `user@host` en panes estrechos:
+  cuando el prompt se parte en varias filas, el prefijo se recorta en todas
+  ellas en vez de reaparecer al abrir más terminales.
 - El cursor del editor se coloca ahora al hacer clic y el frame cacheado se
   invalida, por lo que el cursor se mueve de inmediato.
 - La respuesta del editor al teclear ya no se bloquea con el resaltado de
