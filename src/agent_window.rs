@@ -500,13 +500,14 @@ impl AgentWindow {
             ctrl
         };
         if app_mod
+            && !alt
             && matches!(&event.logical_key, Key::Character(ch) if ch.eq_ignore_ascii_case("w"))
         {
             self.close_requested = true;
             return;
         }
 
-        if command && matches!(event.physical_key, PhysicalKey::Code(KeyCode::KeyF)) {
+        if command && !alt && matches!(event.physical_key, PhysicalKey::Code(KeyCode::KeyF)) {
             self.input_focus = InputFocus::Search;
             self.window.request_redraw();
             return;
@@ -611,7 +612,7 @@ impl AgentWindow {
 
     fn on_text_input_key(&mut self, event: &KeyEvent, command: bool, alt: bool) {
         let paste = match event.physical_key {
-            PhysicalKey::Code(KeyCode::KeyV) if command => true,
+            PhysicalKey::Code(KeyCode::KeyV) if command && !alt => true,
             PhysicalKey::Code(KeyCode::Insert) if self.modifiers.shift_key() => true,
             _ => false,
         };
