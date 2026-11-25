@@ -665,8 +665,10 @@ Los procesos que estaban corriendo no se recuperan: se lanzan shells nuevos en
 el directorio guardado. El historial de comandos sigue viviendo en el shell.
 
 El guardado es automático y no bloquea la UI: los metadatos se escriben como
-mucho cada 2 segundos y el scrollback cada 30 segundos, además de un guardado
-final al cerrar. La serialización y la escritura se hacen en un hilo aparte.
+mucho cada 2 segundos y el scrollback se exporta en un barrido repartido entre
+frames (un pane por tick) cada 30 segundos, además de un guardado final al
+cerrar. La serialización y la escritura se hacen en un hilo aparte. Al abrir una
+pestaña, el historial de sus panes se lee en paralelo.
 Los datos viven junto a la configuración:
 
 | Plataforma | Ruta |

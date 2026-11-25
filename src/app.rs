@@ -8068,6 +8068,32 @@ mod tests {
     }
 
     #[test]
+    fn reads_scrollbacks_in_parallel() {
+        let dir = std::env::temp_dir().join(format!(
+            "f-terminal-parallel-scrollback-{}",
+            std::process::id()
+        ));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let first = dir.join("first.ansi");
+        let second = dir.join("second.ansi");
+        std::fs::write(&first, b"first history").unwrap();
+        std::fs::write(&second, b"second history").unwrap();
+
+        let scrollbacks = read_scrollbacks(vec![(PaneId(1), first), (PaneId(2), second)]);
+        assert_eq!(
+            scrollbacks.get(&PaneId(1)).map(|bytes| bytes.as_slice()),
+            Some(b"first history".as_slice())
+        );
+        assert_eq!(
+            scrollbacks.get(&PaneId(2)).map(|bytes| bytes.as_slice()),
+            Some(b"second history".as_slice())
+        );
+
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
     fn restores_tabs_panes_and_session_keys() {
         let shells = ShellCatalog {
             profiles: vec![TerminalProfile {
