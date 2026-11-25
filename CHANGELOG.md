@@ -57,21 +57,11 @@ usa [Versionado Semántico](https://semver.org/lang/es/).
 
 ### Changed
 
-- Las releases estables de Windows requieren firma Authenticode: se firma el
-  ejecutable, el instalador y el desinstalador de Inno Setup, se verifica la
-  firma con `signtool` y el workflow falla si faltan los secretos del
-  certificado. Los tags prerelease (con `-`) pueden seguir siendo builds sin
-  firmar.
-<<<<<<< HEAD
-- Integración de firma con SignPath Foundation preparada y desactivada hasta
-  configurar sus secretos y variables. Incluye política de firma
-  (`CODE_SIGNING.md`) y artifact configuration de ejemplo.
+- Se eliminó la firma Authenticode del instalador de Windows: las releases se
+  publican sin firmar y ya no hace falta configurar ningún certificado ni
+  secreto de firma.
 - Foundry es ahora el tema por defecto: grafito frío con acento de latón, una
   identidad propia para F-Terminal; la plantilla documenta todas las paletas.
-=======
-- GitHub Dark es ahora el tema por defecto; la plantilla documenta todas las
-  paletas disponibles.
->>>>>>> parent of b297c28 (chore: prepare SignPath signing and WSL mise trust)
 - El gestor Git usa `Cmd+Shift+M` / `Ctrl+Shift+M`; `Ctrl+Shift+G` queda libre
   porque Windows lo intercepta para la grabación de la Xbox Game Bar.
 - Las burbujas de rama y de `+N/-N` del footer son más grandes, con borde,
@@ -82,6 +72,8 @@ usa [Versionado Semántico](https://semver.org/lang/es/).
 
 ### Fixed
 
+- El instalador de Windows vuelve a generarse en los tags de release; el job ya
+  no aborta cuando no hay un certificado de firma configurado.
 - Los títulos de ventana que solo contienen una ruta (ConPTY/cmd.exe en
   Windows) se ignoran; la sesión vuelve a mostrar **Nueva sesión** en vez del
   directorio actual.

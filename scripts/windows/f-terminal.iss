@@ -25,8 +25,6 @@ AllowNoIcons=yes
 LicenseFile=@REPO_ROOT@\LICENSE
 OutputDir=@OUTPUT_DIR@
 OutputBaseFilename=F-Terminal-Setup-@APP_VERSION@-x64
-; Filled only when an Authenticode certificate is configured.
-@SIGNTOOL_DIRECTIVE@
 SetupIconFile=@REPO_ROOT@\assets\windows\f-terminal.ico
 UninstallDisplayIcon={app}\f-terminal.ico
 Compression=lzma2/ultra64

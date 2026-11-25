@@ -232,8 +232,7 @@ Requisitos de build:
 
 - macOS: Xcode Command Line Tools, Rust y los targets
   `aarch64-apple-darwin` y `x86_64-apple-darwin`.
-- Windows: Rust MSVC, Visual Studio Build Tools e Inno Setup 6. Para publicar
-  releases estables hace falta un certificado Authenticode OV/EV.
+- Windows: Rust MSVC, Visual Studio Build Tools e Inno Setup 6.
 - Linux: Rust, `dpkg-deb`, `rpmbuild` y `file`.
 
 El script de macOS genera un binario universal `arm64 + x86_64`. Si no hay
@@ -247,54 +246,9 @@ APPLE_ID="..." APPLE_TEAM_ID="..." APPLE_APP_PASSWORD="..." \
 ```
 
 El instalador de Windows se ejecuta **siempre para todos los usuarios**, con
-UAC y destino en `C:\Program Files\F-Terminal`.
-
-#### Firma Authenticode en Windows
-
-Para que Windows muestre un editor verificado hay que firmar con un
-certificado de firma de código **OV/EV emitido por una CA** (o con Azure
-Artifact Signing). Un certificado autofirmado no elimina SmartScreen.
-
-En local:
-
-```powershell
-$env:WINDOWS_CERT_FILE = "C:\ruta\certificado.pfx"
-$env:WINDOWS_CERT_PASSWORD = "contraseña"
-powershell -ExecutionPolicy Bypass -File scripts/package-windows.ps1
-```
-
-En GitHub Actions, configura estos secretos del repositorio:
-
-- `WINDOWS_CERT_BASE64`: el `.pfx` codificado en base64.
-- `WINDOWS_CERT_PASSWORD`: la contraseña del `.pfx`.
-
-```bash
-# macOS/Linux
-openssl base64 -A -in certificado.pfx -out certificado.pfx.b64
-```
-
-```powershell
-# Windows PowerShell
-[Convert]::ToBase64String([IO.File]::ReadAllBytes("certificado.pfx")) |
-    Set-Clipboard
-```
-
-Opcionalmente, `WINDOWS_TIMESTAMP_URL` permite cambiar el servidor de
-timestamp (por defecto `http://timestamp.digicert.com`). Este pipeline usa un
-PFX; para Azure Artifact Signing o un certificado en token/HSM hay que
-sustituir el paso de firma por la acción o el comando correspondiente.
-
-El script firma el ejecutable y deja que Inno Setup firme el instalador, sus
-copias temporales y el desinstalador. Después verifica el ejecutable y el
-instalador con `signtool verify /pa /v`. Los tags estables fallan si
-no hay certificado configurado; los tags prerelease (los que contienen `-`)
-pueden seguir generándose sin firma.
-
-La firma no garantiza que SmartScreen deje de avisar en la primera descarga:
-Microsoft valora también la reputación del editor y del hash del archivo. Esa
-reputación se construye con el tiempo y se hereda entre releases si se firma
-siempre con la misma identidad. La única forma de evitar el aviso de forma
-inmediata es distribuir a través de Microsoft Store.
+UAC y destino en `C:\Program Files\F-Terminal`. Se publica sin firma
+Authenticode, así que SmartScreen puede mostrar un aviso de editor desconocido.
+Para evitarlo hace falta un certificado OV/EV emitido por una CA de confianza.
 
 ### Instalación para usuarios
 
@@ -312,10 +266,9 @@ sudo apt install ./dist/linux/f-terminal_0.1.0-1_amd64.deb
 sudo dnf install ./dist/linux/f-terminal-0.1.0-1.x86_64.rpm
 ```
 
-Los tags prerelease (con `-` en el nombre) pueden publicarse sin firma y
-mostrar los avisos habituales de Gatekeeper en macOS o SmartScreen en Windows.
-Los tags estables de Windows exigen firma Authenticode. Los `.deb`/`.rpm` usan las librerías base
-del sistema; no se incluye AppImage en esta iteración.
+Los instaladores de Windows se publican sin firma, así que SmartScreen puede
+mostrar sus avisos habituales. Los `.deb`/`.rpm` usan las librerías base del
+sistema; no se incluye AppImage en esta iteración.
 
 ---
 
