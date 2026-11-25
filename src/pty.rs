@@ -130,15 +130,6 @@ impl Session {
                 if cwd.is_dir() {
                     command.cwd(cwd);
                 }
-                // mise refuses to load an untrusted project config and prints
-                // a scary error before the prompt. Trust only the pane's
-                // initial directory for this WSL session. Users can opt out
-                // with F_TERMINAL_WSL_TRUST_MISE=0.
-                let trust_mise =
-                    std::env::var_os("F_TERMINAL_WSL_TRUST_MISE").is_none_or(|value| value != "0");
-                if trust_mise {
-                    command.env("MISE_TRUSTED_CONFIG_PATHS", cwd);
-                }
             }
         }
 

@@ -284,37 +284,6 @@ timestamp (por defecto `http://timestamp.digicert.com`). Este pipeline usa un
 PFX; para Azure Artifact Signing o un certificado en token/HSM hay que
 sustituir el paso de firma por la acción o el comando correspondiente.
 
-#### SignPath Foundation (preparado, inactivo)
-
-El workflow también puede firmar con
-[SignPath Foundation](https://signpath.org/), pensado para proyectos open
-source. Hay que solicitar la admisión en
-[signpath.org/apply](https://signpath.org/apply). Está preparado pero no se
-activa hasta configurar estos valores:
-
-- Secreto `SIGNPATH_API_TOKEN`.
-- Variable `SIGNPATH_ORGANIZATION_ID`.
-- Variable `SIGNPATH_PROJECT_SLUG`.
-- Variable `SIGNPATH_SIGNING_POLICY_SLUG`.
-
-Además:
-
-- Instala la [GitHub App de SignPath](https://github.com/apps/signpath).
-- Crea una artifact configuration con
-  [`scripts/signpath/artifact-configuration.xml`](scripts/signpath/artifact-configuration.xml)
-  y márcala como predeterminada del proyecto.
-- La release necesita aprobación manual en SignPath; el workflow espera hasta
-  30 minutos.
-
-Cuando `SIGNPATH_API_TOKEN` existe, el workflow compila la app sin firmar, la
-firma con SignPath, compila el instalador con esa app firmada y firma el
-instalador con una segunda petición. Si no existe, usa el PFX. Los tags
-estables fallan si no hay ni SignPath ni PFX.
-
-[**Code signing policy**](CODE_SIGNING.md): roles, reglas de build, atribución
-del certificado y privacidad. En este flujo el editor que muestra Windows es
-**SignPath Foundation** y el desinstalador de Inno no queda firmado.
-
 El script firma el ejecutable y deja que Inno Setup firme el instalador, sus
 copias temporales y el desinstalador. Después verifica el ejecutable y el
 instalador con `signtool verify /pa /v`. Los tags estables fallan si
@@ -400,11 +369,6 @@ Notas de Windows:
   habituales de Git for Windows, Scoop y Chocolatey antes de rendirse.
 - WSL no puede leer el cwd de su shell Linux desde Windows; los perfiles WSL
   siguen usando la última ruta traducida que F-Terminal conoce.
-- Para evitar el error de confianza de `mise` al abrir un proyecto WSL,
-  F-Terminal pasa el directorio inicial del pane como
-  `MISE_TRUSTED_CONFIG_PATHS` (solo ese directorio y sus subdirectorios). Se
-  puede desactivar con `F_TERMINAL_WSL_TRUST_MISE=0`. Si el `mise.toml` está en
-  un directorio padre, ejecuta `mise trust` en WSL.
 - Los perfiles WSL y Git Bash heredan `TERM=xterm-256color` y
   `COLORTERM=truecolor`.
 

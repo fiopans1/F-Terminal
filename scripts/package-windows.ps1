@@ -1,8 +1,5 @@
 param(
     [switch]$SkipBuild,
-    [switch]$SkipSigning,
-    [switch]$StageOnly,
-    [string]$UseBinary = "",
     [string]$Target = "x86_64-pc-windows-msvc"
 )
 
@@ -34,7 +31,7 @@ if (-not (Get-Command cargo -ErrorAction SilentlyContinue)) {
     throw "cargo was not found on PATH."
 }
 
-if (-not $SkipBuild -and -not $UseBinary) {
+if (-not $SkipBuild) {
     $rustup = Get-Command rustup -ErrorAction SilentlyContinue
     if ($rustup) {
         $installedTargets = & rustup target list --installed 2>$null
@@ -55,11 +52,7 @@ if (-not $SkipBuild -and -not $UseBinary) {
     }
 }
 
-if ($UseBinary) {
-    $Binary = (Resolve-Path $UseBinary -ErrorAction Stop).Path
-} else {
-    $Binary = Join-Path $RepoRoot "target\$Target\release\f-terminal.exe"
-}
+$Binary = Join-Path $RepoRoot "target\$Target\release\f-terminal.exe"
 if (-not (Test-Path $Binary)) {
     throw "Missing release binary: $Binary (run without -SkipBuild)."
 }
@@ -80,7 +73,6 @@ if (Test-Path $Checksums) {
 $StagedExe = Join-Path $BuildDir "f-terminal.exe"
 Copy-Item $Binary $StagedExe -Force
 
-$CertificatePath = $null
 if ($env:WINDOWS_CERT_BASE64) {
     $CertificatePath = Join-Path $BuildDir "certificate.pfx"
     [System.IO.File]::WriteAllBytes(
@@ -90,7 +82,7 @@ if ($env:WINDOWS_CERT_BASE64) {
     $env:WINDOWS_CERT_FILE = $CertificatePath
 }
 
-if ($env:REQUIRE_WINDOWS_SIGNING -eq "1" -and (-not $env:WINDOWS_CERT_FILE -or $SkipSigning)) {
+if ($env:REQUIRE_WINDOWS_SIGNING -eq "1" -and -not $env:WINDOWS_CERT_FILE) {
     throw "Windows code signing is required for release tags. Configure WINDOWS_CERT_BASE64 and WINDOWS_CERT_PASSWORD in the repository secrets."
 }
 if ($env:WINDOWS_CERT_FILE -and -not (Test-Path $env:WINDOWS_CERT_FILE)) {
@@ -192,29 +184,12 @@ function Verify-Signature([string]$Path) {
     }
 }
 
-if (-not $SkipSigning) {
-    Sign-File $StagedExe
-    Verify-Signature $StagedExe
-}
-
-if ($StageOnly) {
-    $StageDir = Join-Path $Dist "signpath\app"
-    if (Test-Path $StageDir) {
-        Remove-Item -Recurse -Force $StageDir
-    }
-    New-Item -ItemType Directory -Force -Path $StageDir | Out-Null
-    $StagePath = Join-Path $StageDir "f-terminal.exe"
-    Copy-Item $StagedExe $StagePath -Force
-    if ($CertificatePath -and (Test-Path $CertificatePath)) {
-        Remove-Item -Force $CertificatePath
-    }
-    Write-Host "[package] staged app: $StagePath"
-    return
-}
+Sign-File $StagedExe
+Verify-Signature $StagedExe
 
 $SignToolDirective = ""
 $IsccSignArgs = @()
-if (-not $SkipSigning -and $env:WINDOWS_CERT_FILE) {
+if ($env:WINDOWS_CERT_FILE) {
     $signtool = Get-SignTool
     if (-not $signtool) {
         throw "WINDOWS_CERT_FILE is set but signtool.exe was not found."
@@ -280,9 +255,7 @@ if (-not (Test-Path $Setup)) {
 
 # Inno Setup signs Setup, its temporary self-copies and the uninstaller while
 # compiling (SignTool directive above). Only verify the final artifact here.
-if (-not $SkipSigning) {
-    Verify-Signature $Setup
-}
+Verify-Signature $Setup
 
 if ($env:WINDOWS_CERT_BASE64 -and (Test-Path $CertificatePath)) {
     Remove-Item -Force $CertificatePath

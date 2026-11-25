@@ -7,7 +7,6 @@ on:
 
 permissions:
   contents: read
-  actions: read
 
 concurrency:
   group: installers-${{ github.ref }}
@@ -102,141 +101,30 @@ jobs:
             choco install innosetup --yes --no-progress
           }
 
-      - name: Select Windows signing mode
-        id: signing
+      - name: Check Windows signing secret
+        if: ${{ !contains(github.ref_name, '-') }}
         shell: pwsh
         env:
-          SIGNPATH_API_TOKEN: ${{ secrets.SIGNPATH_API_TOKEN }}
-          SIGNPATH_ORGANIZATION_ID: ${{ vars.SIGNPATH_ORGANIZATION_ID }}
-          SIGNPATH_PROJECT_SLUG: ${{ vars.SIGNPATH_PROJECT_SLUG }}
-          SIGNPATH_SIGNING_POLICY_SLUG: ${{ vars.SIGNPATH_SIGNING_POLICY_SLUG }}
           WINDOWS_CERT_BASE64: ${{ secrets.WINDOWS_CERT_BASE64 }}
-          REQUIRE_SIGNING: ${{ contains(github.ref_name, '-') && '0' || '1' }}
         run: |
-          $mode = if ($env:SIGNPATH_API_TOKEN) {
-            "signpath"
-          } elseif ($env:WINDOWS_CERT_BASE64) {
-            "pfx"
-          } else {
-            "none"
+          if (-not $env:WINDOWS_CERT_BASE64) {
+            throw "Stable Windows installers must be signed. Configure WINDOWS_CERT_BASE64 and WINDOWS_CERT_PASSWORD in the repository secrets."
           }
-          if ($mode -eq "signpath" -and (
-              -not $env:SIGNPATH_ORGANIZATION_ID -or
-              -not $env:SIGNPATH_PROJECT_SLUG -or
-              -not $env:SIGNPATH_SIGNING_POLICY_SLUG
-            )) {
-            throw "SignPath is configured but SIGNPATH_ORGANIZATION_ID, SIGNPATH_PROJECT_SLUG or SIGNPATH_SIGNING_POLICY_SLUG is missing."
-          }
-          if ($env:REQUIRE_SIGNING -eq "1" -and $mode -eq "none") {
-            throw "Stable Windows installers must be signed. Configure SignPath or WINDOWS_CERT_BASE64."
-          }
-          "mode=$mode" >> $env:GITHUB_OUTPUT
-          Write-Host "Windows signing mode: $mode"
 
-      - name: Build unsigned app for SignPath
-        if: steps.signing.outputs.mode == 'signpath'
-        shell: powershell
-        run: ./scripts/package-windows.ps1 -StageOnly -SkipSigning
-
-      - name: Upload unsigned app
-        id: upload-app
-        if: steps.signing.outputs.mode == 'signpath'
-        uses: actions/upload-artifact@v4
-        with:
-          name: windows-app-unsigned
-          path: dist/windows/signpath/app/f-terminal.exe
-          if-no-files-found: error
-          retention-days: 1
-          overwrite: true
-
-      - name: Sign app with SignPath
-        if: steps.signing.outputs.mode == 'signpath'
-        uses: signpath/github-action-submit-signing-request@v3
-        with:
-          api-token: ${{ secrets.SIGNPATH_API_TOKEN }}
-          organization-id: ${{ vars.SIGNPATH_ORGANIZATION_ID }}
-          project-slug: ${{ vars.SIGNPATH_PROJECT_SLUG }}
-          signing-policy-slug: ${{ vars.SIGNPATH_SIGNING_POLICY_SLUG }}
-          github-artifact-id: ${{ steps.upload-app.outputs.artifact-id }}
-          wait-for-completion: true
-          wait-for-completion-timeout-in-seconds: 1800
-          output-artifact-directory: dist/windows/signpath/signed-app
-
-      - name: Package installer with signed app
-        if: steps.signing.outputs.mode == 'signpath'
-        shell: powershell
-        run: |
-          $signed = Get-ChildItem -Path "dist/windows/signpath/signed-app" -Recurse -Filter "f-terminal.exe" -File |
-            Select-Object -First 1
-          if (-not $signed) {
-            throw "SignPath did not return a signed f-terminal.exe."
-          }
-          ./scripts/package-windows.ps1 -SkipBuild -SkipSigning -UseBinary $signed.FullName
-
-      - name: Upload unsigned installer
-        id: upload-installer
-        if: steps.signing.outputs.mode == 'signpath'
-        uses: actions/upload-artifact@v4
-        with:
-          name: windows-installer-unsigned
-          path: dist/windows/F-Terminal-Setup-*.exe
-          if-no-files-found: error
-          retention-days: 1
-          overwrite: true
-
-      - name: Sign installer with SignPath
-        if: steps.signing.outputs.mode == 'signpath'
-        uses: signpath/github-action-submit-signing-request@v3
-        with:
-          api-token: ${{ secrets.SIGNPATH_API_TOKEN }}
-          organization-id: ${{ vars.SIGNPATH_ORGANIZATION_ID }}
-          project-slug: ${{ vars.SIGNPATH_PROJECT_SLUG }}
-          signing-policy-slug: ${{ vars.SIGNPATH_SIGNING_POLICY_SLUG }}
-          github-artifact-id: ${{ steps.upload-installer.outputs.artifact-id }}
-          wait-for-completion: true
-          wait-for-completion-timeout-in-seconds: 1800
-          output-artifact-directory: dist/windows/signpath/signed-installer
-
-      - name: Finalize SignPath artifacts
-        if: steps.signing.outputs.mode == 'signpath'
-        shell: pwsh
-        run: |
-          $app = Get-ChildItem -Path "dist/windows/signpath/signed-app" -Recurse -Filter "f-terminal.exe" -File |
-            Select-Object -First 1
-          if (-not $app) {
-            throw "Signed app not found."
-          }
-          $setup = Get-ChildItem -Path "dist/windows/signpath/signed-installer" -Recurse -Filter "F-Terminal-Setup-*.exe" -File |
-            Select-Object -First 1
-          if (-not $setup) {
-            throw "Signed installer not found."
-          }
-          foreach ($file in @($app.FullName, $setup.FullName)) {
-            $signature = Get-AuthenticodeSignature -FilePath $file
-            Write-Host "$file -> $($signature.Status) / $($signature.SignerCertificate.Subject)"
-            if ($signature.Status -ne "Valid") {
-              throw "Invalid Authenticode signature: $file"
-            }
-          }
-          Copy-Item $setup.FullName (Join-Path "dist/windows" $setup.Name) -Force
-
-      - name: Build installer with PFX or unsigned
-        if: steps.signing.outputs.mode != 'signpath'
+      - name: Build installer
         shell: powershell
         run: ./scripts/package-windows.ps1
         env:
           WINDOWS_CERT_BASE64: ${{ secrets.WINDOWS_CERT_BASE64 }}
           WINDOWS_CERT_PASSWORD: ${{ secrets.WINDOWS_CERT_PASSWORD }}
           WINDOWS_TIMESTAMP_URL: ${{ vars.WINDOWS_TIMESTAMP_URL }}
-          REQUIRE_WINDOWS_SIGNING: ${{ steps.signing.outputs.mode == 'pfx' && '1' || '0' }}
+          REQUIRE_WINDOWS_SIGNING: ${{ contains(github.ref_name, '-') && '0' || '1' }}
 
-      - name: Upload Windows installer
-        uses: actions/upload-artifact@v4
+      - uses: actions/upload-artifact@v4
         with:
           name: windows-installer
           path: dist/windows/*.exe
           if-no-files-found: error
-          overwrite: true
 
   linux:
     name: Linux packages
@@ -289,7 +177,6 @@ jobs:
     timeout-minutes: 15
     permissions:
       contents: write
-      actions: read
     steps:
       - name: Warn about failed platforms
         shell: bash
@@ -317,26 +204,10 @@ jobs:
             gh release delete "$GITHUB_REF_NAME" --yes
           fi
 
-      - name: Download macOS artifacts
-        if: needs.macos.result == 'success'
-        uses: actions/download-artifact@v4
+      - uses: actions/download-artifact@v4
         with:
-          name: macos-installers
           path: dist
-
-      - name: Download Windows artifacts
-        if: needs.windows.result == 'success'
-        uses: actions/download-artifact@v4
-        with:
-          name: windows-installer
-          path: dist
-
-      - name: Download Linux artifacts
-        if: needs.linux.result == 'success'
-        uses: actions/download-artifact@v4
-        with:
-          name: linux-packages
-          path: dist
+          merge-multiple: true
 
       - name: Generate checksums
         shell: bash
