@@ -1,5 +1,5 @@
-use std::collections::HashMap;
-use std::path::PathBuf;
+use std::collections::{HashMap, HashSet};
+use std::path::{Path, PathBuf};
 use std::time::Instant;
 
 use anyhow::{Context, Result};
@@ -38,6 +38,43 @@ pub struct SplitNode {
 pub enum LayoutNode {
     Leaf(PaneId),
     Split(Box<SplitNode>),
+}
+
+/// Runtime-independent layout used to rebuild a saved tab. Leaves are indices
+/// into the pane list instead of `PaneId`s, which only live for one process.
+#[derive(Clone, Debug)]
+pub enum LayoutSpec {
+    Leaf(usize),
+    Split {
+        direction: SplitDirection,
+        ratio: f32,
+        first: Box<LayoutSpec>,
+        second: Box<LayoutSpec>,
+    },
+}
+
+fn build_layout(spec: &LayoutSpec, panes: &[PaneId], next_id: &mut u64) -> Option<LayoutNode> {
+    match spec {
+        LayoutSpec::Leaf(index) => panes.get(*index).copied().map(LayoutNode::Leaf),
+        LayoutSpec::Split {
+            direction,
+            ratio,
+            first,
+            second,
+        } => {
+            let first = build_layout(first, panes, next_id)?;
+            let second = build_layout(second, panes, next_id)?;
+            let id = *next_id;
+            *next_id += 1;
+            Some(LayoutNode::Split(Box::new(SplitNode {
+                id,
+                direction: *direction,
+                ratio: ratio.clamp(0.1, 0.9),
+                first: Box::new(first),
+                second: Box::new(second),
+            })))
+        }
+    }
 }
 
 impl LayoutNode {
@@ -158,6 +195,8 @@ impl LayoutNode {
 /// One PTY-backed terminal inside a tab.
 pub struct Pane {
     pub id: PaneId,
+    /// Stable key used by the session snapshot and its scrollback file.
+    pub session_key: u64,
     pub terminal: Terminal,
     pub session: Session,
     pub grid: GridSize,
@@ -165,6 +204,8 @@ pub struct Pane {
     pub cwd: Option<PathBuf>,
     pub git_status: Option<GitStatus>,
     pub profile_id: String,
+    /// Monotonic counter used to avoid re-exporting unchanged grids.
+    pub content_revision: u64,
     /// Completion is only considered after the user has edited the line.
     pub suggestion_armed: bool,
     /// Last time the PTY produced output, used by the agent fallback state.
@@ -183,14 +224,24 @@ impl Pane {
         proxy: EventLoopProxy<UserEvent>,
         profile: &TerminalProfile,
         cwd: PathBuf,
+        session_key: u64,
+        scrollback: Option<&Path>,
         scrollback_lines: usize,
     ) -> Result<Self> {
-        let terminal = Terminal::new(grid, EventProxy::new(id, proxy.clone()), scrollback_lines);
+        let mut terminal = Terminal::new(grid, EventProxy::new(id, proxy.clone()), scrollback_lines);
+        let mut restored = false;
+        if let Some(scrollback) = scrollback
+            && let Some(bytes) = crate::session::read_scrollback(scrollback)
+        {
+            terminal.restore_scrollback(&bytes);
+            restored = true;
+        }
         let session = Session::spawn(id, grid.lines, grid.cols, proxy, profile, &cwd)
             .with_context(|| format!("failed to spawn shell for pane {}", id.0))?;
 
         Ok(Self {
             id,
+            session_key,
             terminal,
             session,
             grid,
@@ -198,6 +249,7 @@ impl Pane {
             cwd: Some(cwd),
             git_status: None,
             profile_id: profile.id.clone(),
+            content_revision: u64::from(restored),
             suggestion_armed: false,
             last_output: Instant::now(),
             program_status_revision: 0,
@@ -212,6 +264,7 @@ impl Pane {
         self.terminal.resize(grid);
         self.session.resize(grid.lines, grid.cols);
         self.grid = grid;
+        self.content_revision = self.content_revision.wrapping_add(1);
         true
     }
 
@@ -304,6 +357,58 @@ impl Workspace {
         } else {
             false
         }
+    }
+
+    /// Rebuild a tab from a saved layout. Panes are created later by the
+    /// layout pass, so `panes` only needs to be filled in order of the leaf
+    /// indices in `layout`.
+    pub fn restore_terminal(
+        &mut self,
+        layout: &LayoutSpec,
+        pane_count: usize,
+        focused: usize,
+        title: Option<String>,
+    ) -> Option<(TabId, Vec<PaneId>)> {
+        if pane_count == 0 || focused >= pane_count {
+            return None;
+        }
+
+        let panes: Vec<PaneId> = (0..pane_count)
+            .map(|_| PaneId(self.alloc_id()))
+            .collect();
+        let mut next_split_id = self.next_id;
+        let layout = build_layout(layout, &panes, &mut next_split_id)?;
+        self.next_id = next_split_id;
+
+        let mut leaves = Vec::new();
+        layout.leaves(&mut leaves);
+        if leaves.len() != pane_count {
+            return None;
+        }
+        let unique: HashSet<PaneId> = leaves.iter().copied().collect();
+        if unique.len() != pane_count {
+            return None;
+        }
+
+        let tab_id = TabId(self.alloc_id());
+        let title = title
+            .filter(|title| !title.trim().is_empty())
+            .unwrap_or_else(|| "Nueva sesión".to_owned());
+        self.tabs.push(Tab {
+            id: tab_id,
+            title: title.clone(),
+            default_title: title,
+            layout,
+            focused: panes[focused],
+            panes: HashMap::new(),
+        });
+        self.active = self.tabs.len() - 1;
+
+        Some((tab_id, panes))
+    }
+
+    pub fn active_index(&self) -> usize {
+        self.active
     }
 
     pub fn pane(&self, id: PaneId) -> Option<&Pane> {

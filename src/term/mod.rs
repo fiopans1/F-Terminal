@@ -3,10 +3,10 @@ pub mod frame;
 pub mod program_status;
 
 use alacritty_terminal::event::{Event, EventListener};
-use alacritty_terminal::grid::{Dimensions, Scroll};
+use alacritty_terminal::grid::{Dimensions, Grid, Scroll};
 use alacritty_terminal::index::{Point, Side};
 use alacritty_terminal::selection::{Selection, SelectionType};
-use alacritty_terminal::term::cell::Flags;
+use alacritty_terminal::term::cell::{Cell, Flags};
 use alacritty_terminal::term::{Config as TermConfig, Term, TermDamage, TermMode};
 use winit::event_loop::EventLoopProxy;
 
@@ -116,6 +116,23 @@ impl Terminal {
     pub fn feed(&mut self, bytes: &[u8]) {
         self.program_status.feed(bytes);
         self.parser.advance(&mut self.term, bytes);
+    }
+
+    /// Replay sanitized scrollback before the shell starts. This deliberately
+    /// skips the program-status scanner: saved history is plain text and SGR,
+    /// never OSC notifications or other protocol messages.
+    pub fn restore_scrollback(&mut self, bytes: &[u8]) {
+        self.parser.advance(&mut self.term, bytes);
+    }
+
+    /// Clone the complete grid (scrollback plus visible rows) so a background
+    /// worker can turn it into ANSI without holding the UI thread.
+    pub fn clone_grid(&self) -> Grid<Cell> {
+        self.term.grid().clone()
+    }
+
+    pub fn in_alt_screen(&self) -> bool {
+        self.term.mode().contains(TermMode::ALT_SCREEN)
     }
 
     pub fn program_status_revision(&self) -> u64 {

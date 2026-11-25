@@ -411,6 +411,12 @@ completion_min_chars = 2
 # "isolated" crea recursos propios en cada ventana.
 mode = "shared"
 
+[session]
+# Restaura pestañas, splits, directorios y geometría al abrir.
+restore = true
+# Restaura también el scrollback de cada pane.
+restore_scrollback = true
+
 [agents]
 # Descubre agentes y responde a OSC 7501.
 enabled = true
@@ -643,6 +649,43 @@ Dentro de cada sesión:
 - El pane enfocado muestra un borde de acento.
 - `Cmd+Alt+flechas` / `Ctrl+Alt+flechas`: mover el foco.
 - `Cmd+\`` / `Ctrl+Shift+\``: ciclar panes.
+
+### Restauración de sesión
+
+Al cerrar F-Terminal se guarda automáticamente el estado de la ventana principal
+y se recupera en el siguiente arranque:
+
+- Pestañas abiertas, su orden y las pestañas colapsadas.
+- Splits con su dirección y proporción, y el pane enfocado.
+- Perfil de shell y directorio de trabajo de cada pane.
+- Tamaño, posición y estado maximizado de la ventana.
+- Scrollback de cada terminal (texto y colores, sin secuencias OSC).
+
+Los procesos que estaban corriendo no se recuperan: se lanzan shells nuevos en
+el directorio guardado. El historial de comandos sigue viviendo en el shell.
+
+El guardado es automático y no bloquea la UI: los metadatos se escriben como
+mucho cada 2 segundos y el scrollback cada 30 segundos, además de un guardado
+final al cerrar. La serialización y la escritura se hacen en un hilo aparte.
+Los datos viven junto a la configuración:
+
+| Plataforma | Ruta |
+|---|---|
+| macOS / Linux | `~/.config/f-terminal/session.json` |
+| Windows | `%APPDATA%\f-terminal\session.json` |
+
+El scrollback se guarda en `session-scrollback/*.ansi` y puede contener
+información sensible que haya aparecido en la terminal.
+
+Para desactivarlo, en `config.toml`:
+
+```toml
+[session]
+restore = false
+```
+
+Si quieres restaurar pestañas y directorios pero no el contenido anterior,
+mantén `restore = true` y pon `restore_scrollback = false`.
 
 ---
 

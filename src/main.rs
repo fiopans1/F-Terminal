@@ -22,6 +22,7 @@ mod pty;
 mod render;
 mod review;
 mod review_window;
+mod session;
 mod shell;
 mod sidebar;
 mod term;

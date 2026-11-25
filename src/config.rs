@@ -59,6 +59,10 @@ pub struct Config {
     pub completion_min_chars: usize,
     /// Shared or isolated renderer resources.
     pub render_mode: RenderMode,
+    /// Restore tabs, splits, working directories and window geometry.
+    pub restore_session: bool,
+    /// Restore terminal scrollback along with the session layout.
+    pub restore_scrollback: bool,
     /// Optional GitHub/GitLab tokens from the config file.
     pub forge_tokens: ForgeTokens,
     /// Agent discovery and Agent Mode settings.
@@ -111,6 +115,8 @@ impl Default for Config {
             completion_git: true,
             completion_min_chars: 2,
             render_mode: RenderMode::Shared,
+            restore_session: true,
+            restore_scrollback: true,
             forge_tokens: ForgeTokens::default(),
             agents: AgentsConfig::default(),
         }
@@ -173,6 +179,8 @@ struct FileConfig {
     #[serde(default)]
     render: FileRender,
     #[serde(default)]
+    session: FileSession,
+    #[serde(default)]
     forge: FileForge,
     #[serde(default)]
     agents: FileAgents,
@@ -213,6 +221,12 @@ struct FileShell {
 #[derive(Deserialize, Default)]
 struct FileRender {
     mode: Option<String>,
+}
+
+#[derive(Deserialize, Default)]
+struct FileSession {
+    restore: Option<bool>,
+    restore_scrollback: Option<bool>,
 }
 
 #[derive(Deserialize, Default)]
@@ -335,6 +349,15 @@ impl FileConfig {
                 }
             };
         }
+
+        config.restore_session = self
+            .session
+            .restore
+            .unwrap_or(defaults.restore_session);
+        config.restore_scrollback = self
+            .session
+            .restore_scrollback
+            .unwrap_or(defaults.restore_scrollback);
 
         config.forge_tokens = ForgeTokens {
             github: clean_token(self.forge.github.token),
@@ -532,6 +555,12 @@ completion_min_chars = 2
 # "isolated" gives every window its own renderer.
 mode = "shared"
 
+[session]
+# Restore tabs, splits, working directories and window geometry on launch.
+restore = true
+# Replay the previous scrollback in each pane.
+restore_scrollback = true
+
 [agents]
 # Discover coding agents in panes and answer OSC 7501 status queries.
 enabled = true
@@ -572,6 +601,8 @@ mod tests {
         assert!(config.agents.enabled);
         assert!(config.agents.show_external);
         assert_eq!(config.agents.poll_interval_ms, 2_000);
+        assert!(config.restore_session);
+        assert!(config.restore_scrollback);
     }
 
     #[test]
@@ -594,6 +625,10 @@ completion_min_chars = 5
 
 [render]
 mode = "isolated"
+
+[session]
+restore = false
+restore_scrollback = false
 
 [agents]
 enabled = false
@@ -622,6 +657,8 @@ token = "glpat_test"
         assert!(!config.completions);
         assert_eq!(config.completion_min_chars, 5);
         assert_eq!(config.render_mode, RenderMode::Isolated);
+        assert!(!config.restore_session);
+        assert!(!config.restore_scrollback);
         assert!(!config.agents.enabled);
         assert!(!config.agents.show_external);
         assert_eq!(config.agents.poll_interval_ms, 500);

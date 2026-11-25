@@ -42,6 +42,10 @@ use crate::render::scene::{GhostText, Label, PaneLayer, Scene};
 use crate::render::{CellMetrics, Renderer, SharedRenderResources, grid_size_for};
 use crate::review::{self, ReviewDetail, ReviewKind, ReviewSummary};
 use crate::review_window::ReviewWindow;
+use crate::session::{
+    self, SavedDirection, SavedLayout, SavedPane, SavedTab, SavedWindow, ScrollbackSource,
+    SessionState, SessionWriter,
+};
 use crate::shell::{ShellCatalog, TerminalProfile};
 use crate::sidebar::{
     self, LayoutSpec, Sidebar, SidebarHit, SidebarLayout, SidebarMode, SidebarRow, TabSummary,
@@ -316,6 +320,7 @@ impl ApplicationHandler<UserEvent> for App {
             };
 
             if matches!(event, WindowEvent::CloseRequested) {
+                state.save_session(&self.config, true);
                 event_loop.exit();
                 return;
             }
@@ -703,6 +708,7 @@ impl ApplicationHandler<UserEvent> for App {
         if let Some(state) = &mut self.window {
             state.poll_background(&self.config);
             state.poll_agent_watcher(&self.config, agent_open);
+            state.autosave_session(&self.config);
             if state.agents_dirty {
                 state.rebuild_agent_snapshot();
                 state.window.request_redraw();
@@ -843,6 +849,12 @@ struct WindowState {
     completion_open: bool,
     completion_selected: usize,
     popup_occlusion: Option<(PaneId, usize, usize, usize, usize)>,
+    session_writer: Option<SessionWriter>,
+    next_session_key: u64,
+    last_session_save: Instant,
+    last_scrollback_save: Instant,
+    last_saved_session: Option<SessionState>,
+    saved_scrollback: HashMap<PaneId, u64>,
 }
 
 #[derive(Clone, Debug)]
@@ -928,6 +940,161 @@ struct DiffView {
 struct PendingSpawn {
     cwd: PathBuf,
     profile_id: String,
+    session_key: u64,
+    scrollback: Option<PathBuf>,
+}
+
+struct RestoredWorkspace {
+    pending: HashMap<PaneId, PendingSpawn>,
+    next_key: u64,
+    collapsed: HashSet<TabId>,
+}
+
+fn restore_workspace(
+    workspace: &mut Workspace,
+    shells: &ShellCatalog,
+    session: Option<&SessionState>,
+    default_dir: &Path,
+    restore_scrollback: bool,
+) -> RestoredWorkspace {
+    let mut pending = HashMap::new();
+    let mut next_key = 1u64;
+    let mut collapsed = HashSet::new();
+
+    if let Some(session) = session {
+        for tab in &session.tabs {
+            if tab.panes.is_empty() {
+                continue;
+            }
+            let layout = convert_saved_layout(&tab.layout);
+            let Some((_tab_id, pane_ids)) = workspace.restore_terminal(
+                &layout,
+                tab.panes.len(),
+                tab.focused,
+                tab.title.clone(),
+            ) else {
+                continue;
+            };
+
+            for (pane_id, saved) in pane_ids.iter().zip(&tab.panes) {
+                let profile_id = if shells.get(&saved.profile_id).is_some() {
+                    saved.profile_id.clone()
+                } else {
+                    shells.default_id.clone()
+                };
+                let cwd = saved
+                    .cwd
+                    .as_deref()
+                    .map(PathBuf::from)
+                    .filter(|path| restore_cwd(path))
+                    .unwrap_or_else(|| default_dir.to_path_buf());
+                let scrollback = restore_scrollback
+                    .then(|| session::scrollback_path(saved.key))
+                    .flatten()
+                    .filter(|path| path.is_file());
+                pending.insert(
+                    *pane_id,
+                    PendingSpawn {
+                        cwd,
+                        profile_id,
+                        session_key: saved.key,
+                        scrollback,
+                    },
+                );
+                next_key = next_key.max(saved.key.saturating_add(1));
+            }
+        }
+
+        for index in &session.collapsed_tabs {
+            if let Some(tab) = workspace.tabs.get(*index) {
+                collapsed.insert(tab.id);
+            }
+        }
+        if !workspace.tabs.is_empty() {
+            workspace.select_index(session.active_tab.min(workspace.tabs.len() - 1));
+        }
+    }
+
+    if workspace.tabs.is_empty() {
+        let (_tab_id, pane_id) = workspace.create_terminal();
+        pending.insert(
+            pane_id,
+            PendingSpawn {
+                cwd: default_dir.to_path_buf(),
+                profile_id: shells.default_id.clone(),
+                session_key: next_key,
+                scrollback: None,
+            },
+        );
+        next_key += 1;
+    }
+
+    RestoredWorkspace {
+        pending,
+        next_key,
+        collapsed,
+    }
+}
+
+fn convert_saved_layout(layout: &SavedLayout) -> crate::workspace::LayoutSpec {
+    use crate::workspace::LayoutSpec;
+
+    match layout {
+        SavedLayout::Leaf { index } => LayoutSpec::Leaf(*index),
+        SavedLayout::Split {
+            direction,
+            ratio,
+            first,
+            second,
+        } => LayoutSpec::Split {
+            direction: match direction {
+                SavedDirection::Right => SplitDirection::Right,
+                SavedDirection::Down => SplitDirection::Down,
+            },
+            ratio: *ratio,
+            first: Box::new(convert_saved_layout(first)),
+            second: Box::new(convert_saved_layout(second)),
+        },
+    }
+}
+
+fn saved_layout(
+    layout: &crate::workspace::LayoutNode,
+    indices: &HashMap<PaneId, usize>,
+) -> Option<SavedLayout> {
+    use crate::workspace::LayoutNode;
+
+    match layout {
+        LayoutNode::Leaf(pane) => Some(SavedLayout::Leaf {
+            index: *indices.get(pane)?,
+        }),
+        LayoutNode::Split(split) => Some(SavedLayout::Split {
+            direction: match split.direction {
+                SplitDirection::Right => SavedDirection::Right,
+                SplitDirection::Down => SavedDirection::Down,
+            },
+            ratio: split.ratio,
+            first: Box::new(saved_layout(&split.first, indices)?),
+            second: Box::new(saved_layout(&split.second, indices)?),
+        }),
+    }
+}
+
+fn restore_cwd(path: &Path) -> bool {
+    let text = path.to_string_lossy();
+    text.starts_with(r"\\wsl$\")
+        || text.starts_with(r"\\wsl.localhost\")
+        || path.is_dir()
+}
+
+fn position_is_visible(event_loop: &ActiveEventLoop, x: i32, y: i32) -> bool {
+    event_loop.available_monitors().any(|monitor| {
+        let position = monitor.position();
+        let size = monitor.size();
+        let right = position.x.saturating_add(size.width as i32);
+        let bottom = position.y.saturating_add(size.height as i32);
+        x >= position.x && x < right && y >= position.y && y < bottom
+    })
 }
 
 impl WindowState {
@@ -945,29 +1112,37 @@ impl WindowState {
         proxy: EventLoopProxy<UserEvent>,
     ) -> anyhow::Result<Self> {
         let startup = Instant::now();
-        let attributes = Window::default_attributes()
+        let saved_session = config.restore_session.then(session::load).flatten();
+        let saved_window = saved_session.as_ref().and_then(|session| session.window.as_ref());
+
+        let mut attributes = Window::default_attributes()
             .with_title("F-Terminal")
             .with_inner_size(LogicalSize::new(1100.0, 700.0))
             .with_min_inner_size(LogicalSize::new(520.0, 260.0))
             .with_theme(Some(WindowTheme::Dark))
             .with_visible(false);
+        if let Some(saved) = saved_window {
+            if saved.width >= 520.0 && saved.height >= 260.0 {
+                attributes = attributes
+                    .with_inner_size(LogicalSize::new(saved.width, saved.height));
+            }
+            if let (Some(x), Some(y)) = (saved.x, saved.y)
+                && position_is_visible(event_loop, x, y)
+            {
+                attributes = attributes.with_position(PhysicalPosition::new(x, y));
+            }
+        }
         let window = Arc::new(event_loop.create_window(attributes)?);
         window.set_ime_allowed(true);
+        if saved_window.is_some_and(|saved| saved.maximized) {
+            window.set_maximized(true);
+        }
 
         let renderer = pollster::block_on(Renderer::new(window.clone(), event_loop, config, None))?;
         log::info!("renderer ready in {:?}", startup.elapsed());
 
-        let mut workspace = Workspace::new();
-        workspace.create_terminal();
         let working_directory = default_directory();
         log::info!("working directory: {}", working_directory.display());
-        let highlight_tx = highlight::spawn_worker(proxy.clone());
-        let agent_watch_tx = if config.agents.enabled {
-            agents::spawn_watcher(proxy.clone())
-        } else {
-            None
-        };
-        let completion = complete::Engine::new(false);
         let shells = ShellCatalog::detect(config.shell.as_deref());
         log::info!(
             "detected {} shell profile(s), default: {}",
@@ -984,6 +1159,37 @@ impl WindowState {
                 .join(", ")
         );
 
+        let mut workspace = Workspace::new();
+        let restored = restore_workspace(
+            &mut workspace,
+            &shells,
+            saved_session.as_ref(),
+            &working_directory,
+            config.restore_scrollback,
+        );
+        let pending_spawns = restored.pending;
+        let next_session_key = restored.next_key;
+        let collapsed_tabs = restored.collapsed;
+        let explorer_root = workspace
+            .focused_pane()
+            .and_then(|id| workspace.pane(id))
+            .and_then(|pane| pane.cwd.clone())
+            .unwrap_or_else(|| working_directory.clone());
+
+        let highlight_tx = highlight::spawn_worker(proxy.clone());
+        let agent_watch_tx = if config.agents.enabled {
+            agents::spawn_watcher(proxy.clone())
+        } else {
+            None
+        };
+        let completion = complete::Engine::new(false);
+        let session_writer = if config.restore_session {
+            SessionWriter::new()
+        } else {
+            None
+        };
+
+        let now = Instant::now();
         let mut state = Self {
             window,
             renderer,
@@ -1015,7 +1221,7 @@ impl WindowState {
             hook_log: agents::HookLog::new(),
             hook_states: HashMap::new(),
             agents_dirty: true,
-            explorer: FileExplorer::empty(working_directory),
+            explorer: FileExplorer::empty(explorer_root),
             explorer_scan_id: 0,
             explorer_pinned: false,
             explorer_pane: None,
@@ -1042,7 +1248,7 @@ impl WindowState {
             diff_view: None,
             diff_generation: 0,
             editor_ratio: 0.42,
-            pending_spawns: HashMap::new(),
+            pending_spawns,
             shells,
             focus: Focus::Terminal,
             completion,
@@ -1050,7 +1256,14 @@ impl WindowState {
             completion_open: false,
             completion_selected: 0,
             popup_occlusion: None,
+            session_writer,
+            next_session_key,
+            last_session_save: now,
+            last_scrollback_save: now,
+            last_saved_session: None,
+            saved_scrollback: HashMap::new(),
         };
+        state.sidebar.collapsed_tabs = collapsed_tabs;
 
         state.sync_layout(config)?;
         state.update_window_title();
@@ -1365,13 +1578,18 @@ impl WindowState {
                     self.dirty_panes.insert(*pane_id);
                 }
             } else {
-                let spawn = self
-                    .pending_spawns
-                    .remove(pane_id)
-                    .unwrap_or_else(|| PendingSpawn {
-                        cwd: default_directory(),
-                        profile_id: self.shells.default_id.clone(),
-                    });
+                let spawn = match self.pending_spawns.remove(pane_id) {
+                    Some(spawn) => spawn,
+                    None => {
+                        let session_key = self.alloc_session_key();
+                        PendingSpawn {
+                            cwd: default_directory(),
+                            profile_id: self.shells.default_id.clone(),
+                            session_key,
+                            scrollback: None,
+                        }
+                    }
+                };
                 let profile = self
                     .shells
                     .get(&spawn.profile_id)
@@ -1392,6 +1610,8 @@ impl WindowState {
                     self.proxy.clone(),
                     &profile,
                     spawn.cwd,
+                    spawn.session_key,
+                    spawn.scrollback.as_deref(),
                     config.scrollback_lines,
                 )?;
                 pane.git_status = cached_status;
@@ -1508,6 +1728,12 @@ impl WindowState {
     // Actions
     // ------------------------------------------------------------------
 
+    fn alloc_session_key(&mut self) -> u64 {
+        let key = self.next_session_key;
+        self.next_session_key = self.next_session_key.wrapping_add(1).max(1);
+        key
+    }
+
     fn new_terminal(&mut self, config: &Config) {
         let profile_id = self.shells.default_id.clone();
         self.new_terminal_with(&profile_id, config);
@@ -1522,6 +1748,8 @@ impl WindowState {
             PendingSpawn {
                 cwd,
                 profile_id: profile_id.to_owned(),
+                session_key: self.alloc_session_key(),
+                scrollback: None,
             },
         );
         self.sidebar.profile_menu = false;
@@ -1557,8 +1785,15 @@ impl WindowState {
         if let Some(tab) = self.workspace.active_tab_id() {
             self.sidebar.collapsed_tabs.remove(&tab);
         }
-        self.pending_spawns
-            .insert(new_pane, PendingSpawn { cwd, profile_id });
+        self.pending_spawns.insert(
+            new_pane,
+            PendingSpawn {
+                cwd,
+                profile_id,
+                session_key: self.alloc_session_key(),
+                scrollback: None,
+            },
+        );
         self.focus = Focus::Terminal;
 
         if let Err(error) = self.sync_layout(config) {
@@ -1581,9 +1816,13 @@ impl WindowState {
     fn close_pane(&mut self, pane: PaneId, event_loop: &ActiveEventLoop, config: &Config) {
         match self.workspace.close_pane(pane) {
             CloseOutcome::NotFound => {}
-            CloseOutcome::WorkspaceEmpty => event_loop.exit(),
+            CloseOutcome::WorkspaceEmpty => {
+                self.save_session(config, true);
+                event_loop.exit();
+            }
             CloseOutcome::PaneClosed | CloseOutcome::TabClosed => {
                 self.pending_spawns.remove(&pane);
+                self.saved_scrollback.remove(&pane);
                 self.scroll_accumulators.remove(&pane);
                 self.git_in_flight.remove(&pane);
                 self.selecting = None;
@@ -1597,7 +1836,10 @@ impl WindowState {
     fn close_tab(&mut self, tab: TabId, event_loop: &ActiveEventLoop, config: &Config) {
         match self.workspace.close_tab(tab) {
             CloseOutcome::NotFound => {}
-            CloseOutcome::WorkspaceEmpty => event_loop.exit(),
+            CloseOutcome::WorkspaceEmpty => {
+                self.save_session(config, true);
+                event_loop.exit();
+            }
             CloseOutcome::TabClosed | CloseOutcome::PaneClosed => {
                 self.selecting = None;
                 self.sidebar.hovered = None;
@@ -3538,6 +3780,159 @@ impl WindowState {
         }
     }
 
+    fn autosave_session(&mut self, config: &Config) {
+        if !config.restore_session || self.session_writer.is_none() {
+            return;
+        }
+        let now = Instant::now();
+        if now.duration_since(self.last_session_save) >= Duration::from_secs(2) {
+            self.save_session(config, false);
+        }
+        if now.duration_since(self.last_scrollback_save) >= Duration::from_secs(30) {
+            self.save_session(config, true);
+        }
+    }
+
+    fn save_session(&mut self, config: &Config, with_scrollback: bool) {
+        if !config.restore_session {
+            return;
+        }
+        let Some(state) = self.session_state() else {
+            return;
+        };
+        let mut keys = Vec::new();
+        for tab in &state.tabs {
+            keys.extend(tab.panes.iter().map(|pane| pane.key));
+        }
+
+        let mut scrollbacks = Vec::new();
+        let mut revisions = Vec::new();
+        if with_scrollback && config.restore_scrollback {
+            self.saved_scrollback
+                .retain(|pane, _| self.workspace.pane(*pane).is_some());
+            for tab in &self.workspace.tabs {
+                for pane in tab.panes.values() {
+                    if pane.terminal.in_alt_screen() {
+                        continue;
+                    }
+                    if self.saved_scrollback.get(&pane.id) == Some(&pane.content_revision) {
+                        continue;
+                    }
+                    scrollbacks.push(ScrollbackSource {
+                        key: pane.session_key,
+                        grid: pane.terminal.clone_grid(),
+                        size: pane.grid,
+                        theme: config.theme,
+                    });
+                    revisions.push((pane.id, pane.content_revision));
+                }
+            }
+        }
+
+        let now = Instant::now();
+        let changed = self.last_saved_session.as_ref() != Some(&state);
+        if !changed && scrollbacks.is_empty() {
+            self.last_session_save = now;
+            if with_scrollback {
+                self.last_scrollback_save = now;
+            }
+            return;
+        }
+
+        if let Some(writer) = &self.session_writer {
+            writer.request(session::SaveJob {
+                state: state.clone(),
+                keys,
+                scrollbacks,
+            });
+        }
+
+        self.last_saved_session = Some(state);
+        self.last_session_save = now;
+        if with_scrollback {
+            self.last_scrollback_save = now;
+            for (pane, revision) in revisions {
+                self.saved_scrollback.insert(pane, revision);
+            }
+        }
+    }
+
+    fn session_state(&self) -> Option<SessionState> {
+        let size = self.window.inner_size();
+        let scale = self.window.scale_factor();
+        let logical = size.to_logical::<f32>(scale);
+        let position = self.window.outer_position().ok();
+        let (x, y) = match position {
+            Some(position) => (Some(position.x), Some(position.y)),
+            None => (None, None),
+        };
+        let window = SavedWindow {
+            width: logical.width,
+            height: logical.height,
+            x,
+            y,
+            maximized: self.window.is_maximized(),
+        };
+
+        let mut tabs = Vec::with_capacity(self.workspace.tabs.len());
+        for tab in &self.workspace.tabs {
+            let leaves = tab.leaves();
+            let mut indices = HashMap::with_capacity(leaves.len());
+            for (index, pane) in leaves.iter().enumerate() {
+                indices.insert(*pane, index);
+            }
+            let layout = saved_layout(&tab.layout, &indices)?;
+            let focused = leaves
+                .iter()
+                .position(|pane| *pane == tab.focused)
+                .unwrap_or(0);
+
+            let mut panes = Vec::with_capacity(leaves.len());
+            for pane_id in &leaves {
+                if let Some(pane) = tab.panes.get(pane_id) {
+                    panes.push(SavedPane {
+                        key: pane.session_key,
+                        profile_id: pane.profile_id.clone(),
+                        cwd: pane
+                            .cwd
+                            .as_ref()
+                            .map(|cwd| cwd.to_string_lossy().into_owned()),
+                    });
+                } else if let Some(spawn) = self.pending_spawns.get(pane_id) {
+                    panes.push(SavedPane {
+                        key: spawn.session_key,
+                        profile_id: spawn.profile_id.clone(),
+                        cwd: Some(spawn.cwd.to_string_lossy().into_owned()),
+                    });
+                } else {
+                    return None;
+                }
+            }
+
+            tabs.push(SavedTab {
+                title: Some(tab.title.clone()),
+                focused,
+                layout,
+                panes,
+            });
+        }
+
+        let collapsed_tabs = self
+            .sidebar
+            .collapsed_tabs
+            .iter()
+            .filter_map(|id| self.workspace.tabs.iter().position(|tab| tab.id == *id))
+            .collect();
+
+        Some(SessionState {
+            version: session::SESSION_VERSION,
+            window: Some(window),
+            active_tab: self.workspace.active_index(),
+            tabs,
+            collapsed_tabs,
+        })
+    }
+
     fn invalidate_pane_frame(&mut self, pane_id: PaneId) {
         self.frame_cache.remove(&pane_id);
         self.frame_dominant.remove(&pane_id);
@@ -4310,6 +4705,7 @@ impl WindowState {
                 true
             }
             KeyCode::KeyQ if macos => {
+                self.save_session(config, true);
                 event_loop.exit();
                 true
             }
@@ -4878,6 +5274,7 @@ impl WindowState {
             return false;
         };
         pane.terminal.feed(bytes);
+        pane.content_revision = pane.content_revision.wrapping_add(1);
         pane.last_output = Instant::now();
 
         let revision = pane.terminal.program_status_revision();

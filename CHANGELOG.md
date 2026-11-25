@@ -8,6 +8,9 @@ usa [Versionado Semántico](https://semver.org/lang/es/).
 
 ### Added
 
+- Restauración de sesión al reabrir F-Terminal: pestañas, splits, perfiles,
+  directorios, geometría de la ventana y scrollback. El guardado se hace en
+  segundo plano y puede desactivarse con `[session] restore = false`.
 - Autocompletado inline y popup: historial, comandos del `PATH`, subcomandos de
   Git, rutas y ramas/tags, con cachés acotadas y sin procesos por pulsación.
 - Agent Mode: ventana independiente con agentes detectados dentro y fuera de
