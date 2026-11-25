@@ -672,7 +672,7 @@ Acciones:
 
 - `+` crea una nueva sesión con el shell por defecto.
 - `▾` abre el selector de perfiles; solo aparece en Sesiones.
-- El botón **F/T** de la cabecera alterna Archivos/Sesiones; globalmente usa
+- El botón **E/T** de la cabecera alterna Archivos/Sesiones; globalmente usa
   `Ctrl+Shift+E` / `Cmd+Shift+E`.
 - `«` colapsa la sidebar; el rail `»` la recupera.
 - Rueda del ratón para hacer scroll si hay muchas sesiones o panes.

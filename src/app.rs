@@ -7173,7 +7173,7 @@ impl WindowState {
         ));
         let mode_size = ui_font_size * 0.95;
         let mode_label = match layout.mode {
-            SidebarMode::Terminals => "F",
+            SidebarMode::Terminals => "E",
             SidebarMode::Files => "T",
         };
         labels.push(Label {
