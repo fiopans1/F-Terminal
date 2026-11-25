@@ -1180,7 +1180,7 @@ poll_interval_ms = 2000
 | Abrir gestor Git | `Cmd+Shift+M` |
 | Abrir Agentes | `Cmd+Shift+A` |
 | Abrir ajustes (`config.toml`) | `Cmd+Shift+S` |
-| Abrir explorador | `Cmd+Shift+O` |
+| Abrir explorador del sistema | `Cmd+Shift+O` |
 | Guardar en el editor | `Cmd+S` |
 | Cerrar editor | `Esc` o `Cmd+W` |
 | Copiar / pegar | `Cmd+C` / `Cmd+V` |
@@ -1205,7 +1205,7 @@ poll_interval_ms = 2000
 | Abrir gestor Git | `Ctrl+Shift+M` |
 | Abrir Agentes | `Ctrl+Shift+A` |
 | Abrir ajustes (`config.toml`) | `Ctrl+Shift+S` |
-| Abrir explorador | `Ctrl+Shift+O` |
+| Abrir explorador del sistema | `Ctrl+Shift+O` |
 | Guardar en el editor | `Ctrl+S` |
 | Cerrar editor | `Esc` o `Ctrl+W` |
 | Copiar / pegar | `Ctrl+Shift+C` / `Ctrl+Shift+V`, `Ctrl+Insert` / `Shift+Insert` |

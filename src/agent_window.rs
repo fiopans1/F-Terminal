@@ -641,12 +641,17 @@ impl AgentWindow {
             (InputFocus::Search, Key::Named(NamedKey::ArrowUp)) => self.move_selection(-1),
             (InputFocus::Search, Key::Named(NamedKey::ArrowDown)) => self.move_selection(1),
             (InputFocus::Search, Key::Named(NamedKey::Space)) => {
-                self.search.push(' ');
-                self.after_filter_change();
+                if self.search.chars().count() < 256 {
+                    self.search.push(' ');
+                    self.after_filter_change();
+                }
             }
             (InputFocus::Search, Key::Character(ch)) if !command && !alt => {
                 let text = ch.as_str();
-                if !text.is_empty() && text.chars().all(|c| !c.is_control()) {
+                if !text.is_empty()
+                    && text.chars().all(|c| !c.is_control())
+                    && self.search.chars().count() < 256
+                {
                     self.search.push_str(text);
                     self.after_filter_change();
                 }
@@ -658,11 +663,16 @@ impl AgentWindow {
                 self.send_prompt();
             }
             (InputFocus::Prompt, Key::Named(NamedKey::Space)) => {
-                self.prompt.push(' ');
+                if self.prompt.chars().count() < 4096 {
+                    self.prompt.push(' ');
+                }
             }
             (InputFocus::Prompt, Key::Character(ch)) if !command && !alt => {
                 let text = ch.as_str();
-                if !text.is_empty() && text.chars().all(|c| !c.is_control()) {
+                if !text.is_empty()
+                    && text.chars().all(|c| !c.is_control())
+                    && self.prompt.chars().count() < 4096
+                {
                     self.prompt.push_str(text);
                 }
             }
