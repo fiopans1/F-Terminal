@@ -1009,10 +1009,15 @@ struct WindowState {
     highlight_sent_generation: u64,
     highlight_revision_seen: u64,
     highlight_due: Option<Instant>,
+    highlight_in_flight: bool,
+    highlight_in_flight_since: Option<Instant>,
+    highlight_in_flight_generation: u64,
     dirty_panes: HashSet<PaneId>,
     frame_cache: HashMap<PaneId, Arc<Frame>>,
     frame_dominant: HashMap<PaneId, Rgb>,
     editor_frame_cache: Option<Arc<Frame>>,
+    /// Rows that need reshaping for the editor. `None` means all rows.
+    editor_dirty_rows: Option<Vec<usize>>,
     diff_frame_cache: Option<Arc<Frame>>,
     quad_scratch: Vec<Quad>,
     label_scratch: Vec<Label>,
@@ -1449,10 +1454,14 @@ impl WindowState {
             highlight_sent_generation: 0,
             highlight_revision_seen: 0,
             highlight_due: None,
+            highlight_in_flight: false,
+            highlight_in_flight_since: None,
+            highlight_in_flight_generation: 0,
             dirty_panes: HashSet::new(),
             frame_cache: HashMap::new(),
             frame_dominant: HashMap::new(),
             editor_frame_cache: None,
+            editor_dirty_rows: None,
             diff_frame_cache: None,
             quad_scratch: Vec::new(),
             label_scratch: Vec::new(),
@@ -1630,11 +1639,12 @@ impl WindowState {
                     self.search_push(&text);
                     self.window.request_redraw();
                 } else if self.focus == Focus::Editor && self.editor.is_some() {
+                    let before = self.editor_state();
                     if let Some(editor) = &mut self.editor {
                         editor.insert_str(&text);
                     }
-                    self.editor_dirty = true;
                     self.ensure_editor_visible();
+                    self.after_editor_change(before);
                     self.window.request_redraw();
                 } else if self.focus == Focus::Terminal
                     && let Some(pane) = self.focused_pane_mut()
@@ -1786,6 +1796,7 @@ impl WindowState {
                 editor.ensure_visible(rows, cols);
             }
             self.editor_dirty = true;
+            self.editor_dirty_rows = None;
 
             editor_layout = Some(EditorLayout {
                 panel,
@@ -2043,7 +2054,6 @@ impl WindowState {
     fn new_terminal_with(&mut self, profile_id: &str, config: &Config) {
         self.close_search();
         self.clear_link_hover();
-        self.refresh_cwds(config);
         let cwd = self.focused_cwd();
         let (tab_id, pane_id) = self.workspace.create_terminal();
         let session_key = self.alloc_session_key();
@@ -2079,7 +2089,6 @@ impl WindowState {
     fn split_focused(&mut self, direction: SplitDirection, config: &Config) {
         self.close_search();
         self.clear_link_hover();
-        self.refresh_cwds(config);
         let cwd = self.focused_cwd();
         let profile_id = self
             .workspace
@@ -2657,7 +2666,7 @@ impl WindowState {
             scroll_col: 0,
         });
         self.focus = Focus::Diff;
-        self.editor_dirty = true;
+        self.mark_editor_changed(true, None);
         if self.editor.is_none() {
             self.editor_ratio = 0.5;
         }
@@ -2746,7 +2755,7 @@ impl WindowState {
                 diff.error = Some(error);
             }
         }
-        self.editor_dirty = true;
+        self.mark_editor_changed(true, None);
         self.window.request_redraw();
     }
 
@@ -2757,7 +2766,7 @@ impl WindowState {
             } else {
                 Focus::Terminal
             };
-            self.editor_dirty = true;
+            self.mark_editor_changed(true, None);
             self.relayout(config);
         }
     }
@@ -2788,7 +2797,7 @@ impl WindowState {
             let target = (diff.scroll_col as f32 - columns).round();
             diff.scroll_col = target.clamp(0.0, max_col as f32) as usize;
         }
-        self.editor_dirty = true;
+        self.mark_editor_changed(true, None);
         self.window.request_redraw();
     }
 
@@ -2805,7 +2814,7 @@ impl WindowState {
             diff.loading = true;
             diff.error = None;
         }
-        self.editor_dirty = true;
+        self.mark_editor_changed(true, None);
         self.request_working_diff(pane, cwd, generation);
         self.window.request_redraw();
     }
@@ -3047,8 +3056,11 @@ impl WindowState {
                 log::info!("editing {}", path.display());
                 self.highlight_revision_seen = editor.revision;
                 self.highlight_generation = self.highlight_generation.wrapping_add(1);
-                self.highlight_due = Some(Instant::now());
-                self.editor_dirty = true;
+                self.highlight_due = Some(Instant::now() + Duration::from_millis(400));
+                self.highlight_in_flight = false;
+                self.highlight_in_flight_since = None;
+                self.highlight_in_flight_generation = 0;
+                self.mark_editor_changed(true, None);
                 self.diff_view = None;
                 self.editor = Some(editor);
                 self.focus = Focus::Editor;
@@ -3245,7 +3257,6 @@ impl WindowState {
         config: &Config,
     ) -> Option<PaneId> {
         let command = kind.command_name()?.to_owned();
-        self.refresh_cwds(config);
         let cwd = cwd
             .filter(|path| path.is_dir())
             .unwrap_or_else(|| self.focused_cwd());
@@ -3701,7 +3712,22 @@ impl WindowState {
         {
             self.highlight_revision_seen = editor.revision;
             self.highlight_generation = self.highlight_generation.wrapping_add(1);
-            self.highlight_due = Some(now + Duration::from_millis(120));
+            self.highlight_due = Some(now + Duration::from_millis(400));
+        }
+
+        if self.highlight_in_flight {
+            if self
+                .highlight_in_flight_since
+                .is_some_and(|at| now.duration_since(at) > Duration::from_secs(5))
+            {
+                log::warn!("syntax highlighter did not answer in time; retrying");
+                self.highlight_in_flight = false;
+                self.highlight_in_flight_since = None;
+                self.highlight_in_flight_generation = 0;
+                self.highlight_due = Some(now);
+            } else {
+                return;
+            }
         }
 
         let Some(due) = self.highlight_due else {
@@ -3721,19 +3747,32 @@ impl WindowState {
         }
 
         let bytes: usize = editor.lines.iter().map(|line| line.len() + 1).sum();
-        if bytes > HIGHLIGHT_LIMIT {
+        let too_large = bytes > HIGHLIGHT_LIMIT
+            || editor.lines.len() > HIGHLIGHT_MAX_LINES
+            || editor
+                .lines
+                .iter()
+                .any(|line| line.len() > HIGHLIGHT_MAX_LINE_BYTES);
+        if too_large {
             self.highlight_due = None;
             self.highlight_sent_generation = self.highlight_generation;
+            self.highlight_in_flight = false;
+            self.highlight_in_flight_since = None;
+            self.highlight_in_flight_generation = 0;
             if let Some(editor) = &mut self.editor {
                 editor.highlight.clear();
                 editor.highlight_dirty = false;
             }
-            self.editor_dirty = true;
+            self.mark_editor_changed(true, None);
             return;
         }
 
-        let Some(sender) = &self.highlight_tx else {
+        let Some(sender) = self.highlight_tx.clone() else {
             self.highlight_due = None;
+            self.highlight_sent_generation = self.highlight_generation;
+            self.highlight_in_flight = false;
+            self.highlight_in_flight_since = None;
+            self.highlight_in_flight_generation = 0;
             if let Some(editor) = &mut self.editor {
                 editor.highlight_dirty = false;
             }
@@ -3750,6 +3789,23 @@ impl WindowState {
         if sender.send(request).is_ok() {
             self.highlight_sent_generation = self.highlight_generation;
             self.highlight_due = None;
+            self.highlight_in_flight = true;
+            self.highlight_in_flight_since = Some(now);
+            self.highlight_in_flight_generation = self.highlight_generation;
+        } else {
+            log::warn!("syntax highlighter stopped; disabling syntax colors");
+            self.highlight_tx = None;
+            self.highlight_sent_generation = self.highlight_generation;
+            self.highlight_due = None;
+            self.highlight_in_flight = false;
+            self.highlight_in_flight_since = None;
+            self.highlight_in_flight_generation = 0;
+            if let Some(editor) = &mut self.editor {
+                editor.highlight.clear();
+                editor.highlight_dirty = false;
+            }
+            self.editor_dirty = true;
+            self.editor_dirty_rows = None;
         }
     }
 
@@ -3771,16 +3827,28 @@ impl WindowState {
     }
 
     fn on_highlight(&mut self, generation: u64, revision: u64, spans: Vec<Vec<StyledSpan>>) {
+        if generation == self.highlight_in_flight_generation {
+            self.highlight_in_flight = false;
+            self.highlight_in_flight_since = None;
+            self.highlight_in_flight_generation = 0;
+        }
         let Some(editor) = &mut self.editor else {
             return;
         };
         if generation != self.highlight_generation || revision != editor.revision {
+            // The user kept typing while this snapshot was being highlighted.
+            // Preserve the pending debounce instead of restarting immediately.
+            let now = Instant::now();
+            if self.highlight_due.is_none_or(|due| due <= now) {
+                self.highlight_due = Some(now);
+            }
             return;
         }
 
         editor.highlight = spans;
         editor.highlight_dirty = false;
         self.editor_dirty = true;
+        self.editor_dirty_rows = None;
         log::debug!(
             "applied syntax highlighting for {} lines",
             editor.highlight.len()
@@ -3792,6 +3860,9 @@ impl WindowState {
         if self.editor.take().is_some() {
             self.highlight_generation = self.highlight_generation.wrapping_add(1);
             self.highlight_due = None;
+            self.highlight_in_flight = false;
+            self.highlight_in_flight_since = None;
+            self.highlight_in_flight_generation = 0;
             self.editor_dirty = false;
             self.focus = Focus::Terminal;
             self.relayout(config);
@@ -3817,6 +3888,70 @@ impl WindowState {
         let cols = (layout.text.width / metrics.width).floor().max(1.0) as usize;
         if let Some(editor) = &mut self.editor {
             editor.ensure_visible(rows, cols);
+        }
+    }
+
+    fn editor_state(&self) -> Option<(u64, usize, usize, usize, usize, usize)> {
+        self.editor.as_ref().map(|editor| {
+            (
+                editor.revision,
+                editor.lines.len(),
+                editor.scroll_row,
+                editor.scroll_col,
+                editor.cursor_row,
+                editor.cursor_col,
+            )
+        })
+    }
+
+    fn mark_editor_changed(&mut self, full: bool, row: Option<usize>) {
+        if !self.editor_dirty {
+            self.editor_dirty = true;
+            self.editor_dirty_rows = Some(Vec::new());
+        }
+        if full {
+            self.editor_dirty_rows = None;
+        } else if let Some(row) = row
+            && let Some(rows) = &mut self.editor_dirty_rows
+            && !rows.contains(&row)
+        {
+            rows.push(row);
+        }
+    }
+
+    /// Decide how much of the editor needs reshaping after a key, click or
+    /// paste. Shape only the edited row when possible; scrolling or line
+    /// insertions still require a full refresh.
+    fn after_editor_change(&mut self, before: Option<(u64, usize, usize, usize, usize, usize)>) {
+        let Some(editor) = &self.editor else {
+            return;
+        };
+        let Some((revision, lines, scroll_row, scroll_col, cursor_row, cursor_col)) = before else {
+            self.mark_editor_changed(true, None);
+            return;
+        };
+
+        let changed = editor.revision != revision
+            || editor.lines.len() != lines
+            || editor.scroll_row != scroll_row
+            || editor.scroll_col != scroll_col
+            || editor.cursor_row != cursor_row
+            || editor.cursor_col != cursor_col;
+        if !changed {
+            return;
+        }
+
+        if editor.scroll_row != scroll_row
+            || editor.scroll_col != scroll_col
+            || editor.lines.len() != lines
+        {
+            self.mark_editor_changed(true, None);
+        } else if editor.revision != revision {
+            let row = editor.cursor_row.saturating_sub(editor.scroll_row);
+            self.mark_editor_changed(false, Some(row));
+        } else {
+            // Only the cursor moved; the text buffers are still valid.
+            self.mark_editor_changed(false, None);
         }
     }
 
@@ -4025,11 +4160,14 @@ impl WindowState {
             .clipboard()
             .and_then(|clipboard| clipboard.get_text().ok());
         if let Some(text) = text
-            && let Some(editor) = &mut self.editor
+            && self.editor.is_some()
         {
-            editor.insert_str(&text);
-            self.editor_dirty = true;
+            let before = self.editor_state();
+            if let Some(editor) = &mut self.editor {
+                editor.insert_str(&text);
+            }
             self.ensure_editor_visible();
+            self.after_editor_change(before);
             self.window.request_redraw();
         }
     }
@@ -4038,21 +4176,27 @@ impl WindowState {
         let Some(layout) = self.view.editor else {
             return;
         };
-        if !layout.text.contains(position.x as f32, position.y as f32) {
+        let Some(editor) = &self.editor else {
             return;
-        }
-
+        };
         let metrics = self.renderer.cell_metrics();
-        let column = ((position.x as f32 - layout.text.x) / metrics.width).floor() as usize;
-        let row = ((position.y as f32 - layout.text.y) / metrics.height).floor() as usize;
+        let Some((row, col)) = editor_cursor_for_point(
+            layout.text,
+            metrics,
+            editor.scroll_row,
+            editor.scroll_col,
+            position,
+        ) else {
+            return;
+        };
 
+        let before = self.editor_state();
         if let Some(editor) = &mut self.editor {
-            let row = editor.scroll_row + row;
-            let col = editor.scroll_col + column;
             editor.set_cursor(row, col);
-            self.ensure_editor_visible();
-            self.window.request_redraw();
         }
+        self.ensure_editor_visible();
+        self.after_editor_change(before);
+        self.window.request_redraw();
     }
 
     fn clear_focused(&mut self) {
@@ -4501,6 +4645,7 @@ impl WindowState {
         self.prompt_trims.clear();
         self.editor_frame_cache = None;
         self.diff_frame_cache = None;
+        self.mark_editor_changed(true, None);
         self.clear_link_hover();
         if let Some(search) = &mut self.search {
             search.dirty = true;
@@ -4941,8 +5086,9 @@ impl WindowState {
         }
 
         if self.focus == Focus::Editor && self.editor.is_some() {
+            let before = self.editor_state();
             if self.handle_editor_key(&event, config) {
-                self.editor_dirty = true;
+                self.after_editor_change(before);
                 return;
             }
             // Whitelisted global shortcuts (new tab, split, sidebar, quit...).
@@ -5926,7 +6072,7 @@ impl WindowState {
                     (editor.scroll_row as i32 - rows.round() as i32).clamp(0, max_scroll) as usize;
             }
             self.window.request_redraw();
-            self.editor_dirty = true;
+            self.mark_editor_changed(true, None);
             return;
         }
 
@@ -6186,9 +6332,19 @@ impl WindowState {
         let Some(pane) = self.workspace.pane_mut(pane_id) else {
             return false;
         };
+        let first_output = !pane.has_output;
+        let startup_latency = pane.last_output.elapsed();
         pane.terminal.feed(bytes);
         pane.content_revision = pane.content_revision.wrapping_add(1);
+        pane.has_output = true;
         pane.last_output = Instant::now();
+        if first_output {
+            log::debug!(
+                "pane {} produced its first output after {:?}",
+                pane_id.0,
+                startup_latency
+            );
+        }
         if let Some(search) = &mut self.search
             && search.pane == pane_id
         {
@@ -6575,6 +6731,33 @@ impl WindowState {
                 outer.height,
                 to_linear(*dominant, 1.0),
             ));
+        }
+
+        // A fresh PTY can take a few hundred milliseconds to print its first
+        // prompt on Windows. Show what is happening instead of a blank pane.
+        for pane_layout in &self.view.panes {
+            let Some(pane) = self.workspace.pane(pane_layout.id) else {
+                continue;
+            };
+            if pane.has_output {
+                continue;
+            }
+            let profile = self
+                .shells
+                .get(&pane.profile_id)
+                .map(|profile| profile.name.as_str())
+                .unwrap_or("shell");
+            let text = format!("Iniciando {profile}…");
+            let font = (ui_font_size * 0.95).max(11.0);
+            labels.push(Label {
+                text,
+                x: pane_layout.content.x + 16.0 * scale,
+                y: pane_layout.content.y + (pane_layout.content.height - font * 1.35) * 0.5,
+                width: (pane_layout.content.width - 32.0 * scale).max(1.0),
+                font_size: font,
+                color: theme.sidebar_text_dim,
+                bold: false,
+            });
         }
 
         for (_, content, frame, _, _) in &frames {
@@ -6996,7 +7179,11 @@ impl WindowState {
                 content: *content,
                 frame: frame.as_ref(),
                 dirty: self.editor_dirty,
-                dirty_rows: None,
+                dirty_rows: if diff_frame.is_some() {
+                    None
+                } else {
+                    self.editor_dirty_rows.clone()
+                },
                 ghost: None,
             });
         }
@@ -8649,7 +8836,9 @@ fn push_cursor_quads(
     }
 }
 
-const HIGHLIGHT_LIMIT: usize = 512 * 1024;
+const HIGHLIGHT_LIMIT: usize = 64 * 1024;
+const HIGHLIGHT_MAX_LINES: usize = 1_000;
+const HIGHLIGHT_MAX_LINE_BYTES: usize = 2_048;
 
 struct PopupLayout {
     rect: Rect,
@@ -8842,6 +9031,22 @@ fn clear_row(row: &mut Row, cols: usize, theme: &Theme) {
         range: 0..cols,
         color: theme.background,
     }];
+}
+
+fn editor_cursor_for_point(
+    text: Rect,
+    metrics: CellMetrics,
+    scroll_row: usize,
+    scroll_col: usize,
+    position: PhysicalPosition<f64>,
+) -> Option<(usize, usize)> {
+    let (x, y) = (position.x as f32, position.y as f32);
+    if !text.contains(x, y) {
+        return None;
+    }
+    let column = ((x - text.x) / metrics.width).floor().max(0.0) as usize;
+    let row = ((y - text.y) / metrics.height).floor().max(0.0) as usize;
+    Some((scroll_row + row, scroll_col + column))
 }
 
 fn build_editor_frame(editor: &Editor, text: Rect, metrics: CellMetrics, theme: &Theme) -> Frame {
@@ -9645,5 +9850,26 @@ mod tests {
             Some(PathBuf::from("/home/user")),
         );
         assert_eq!(directory, PathBuf::from("/work/project"));
+    }
+
+    #[test]
+    fn editor_click_maps_to_scrolled_cells() {
+        let metrics = CellMetrics {
+            width: 8.0,
+            height: 16.0,
+        };
+        let text = Rect::new(10.0, 20.0, 80.0, 64.0);
+        assert_eq!(
+            editor_cursor_for_point(text, metrics, 0, 0, PhysicalPosition::new(18.0, 36.0)),
+            Some((1, 1))
+        );
+        assert_eq!(
+            editor_cursor_for_point(text, metrics, 5, 2, PhysicalPosition::new(18.0, 36.0)),
+            Some((6, 3))
+        );
+        assert_eq!(
+            editor_cursor_for_point(text, metrics, 0, 0, PhysicalPosition::new(5.0, 10.0)),
+            None
+        );
     }
 }

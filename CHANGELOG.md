@@ -103,6 +103,13 @@ usa [Versionado Semántico](https://semver.org/lang/es/).
 
 ### Fixed
 
+- El cursor del editor se coloca ahora al hacer clic y el frame cacheado se
+  invalida, por lo que el cursor se mueve de inmediato.
+- La respuesta del editor al teclear ya no se bloquea con el resaltado de
+  sintaxis: se agrupa un único trabajo en vuelo, hay más debounce, solo se
+  reescala la fila editada y el resaltado se omite en archivos grandes.
+- Al abrir una terminal nueva se muestra **Iniciando …** mientras el shell
+  arranca, en lugar de un panel en blanco.
 - Al abrir un perfil WSL desde el selector en el home de Windows, el `mise` de
   Linux ya no intenta cargar el config global de Windows y la terminal arranca
   sin el error de configuración no trusted.

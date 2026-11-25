@@ -556,6 +556,7 @@ Cada pane tiene:
 - Scrollback independiente.
 - Su cwd, que se sigue mediante `sysinfo` cada 750 ms.
 - Su estado de selección, cursor y modos VT.
+- Un aviso **Iniciando <perfil>…** hasta que el shell produce su primera salida.
 
 Soporte VT incluido:
 
@@ -746,17 +747,21 @@ mantén `restore = true` y pon `restore_scrollback = false`.
 - Divisor arrastrable para redimensionar.
 - `Cmd+S` / `Ctrl+S` guarda.
 - `Esc` o `Cmd+W` cierra. El punto de acento indica cambios sin guardar.
-- Resaltado TextMate con `syntect` en un hilo aparte, con debounce de 120 ms.
+- Clic con el ratón coloca el cursor en la fila y columna pulsadas.
+- Resaltado TextMate con `syntect` en un hilo aparte, con debounce de 400 ms y un
+  único trabajo en vuelo para no encolar ficheros completos mientras escribes.
 - `.jsx`, `.mjs`, `.cjs`, `.ts` y `.tsx` usan la gramática de JavaScript como
   fallback; `.jsonc` y `.json5` usan la de JSON. TOML todavía no tiene gramática
   en el paquete por defecto y se muestra sin colores.
-- Los buffers de texto se cachean por pane y solo se re-shapean cuando cambian.
+- Los buffers de texto se cachean por pane; al escribir solo se reescala la fila
+  editada y los movimientos de cursor no reescalan texto.
 
 Limitaciones actuales del editor:
 
 - Sin undo/redo ni selección de texto.
 - Sin file watching ni autoguardado.
-- Sin resaltado en vivo para archivos grandes (>512 KB).
+- Sin resaltado en vivo para archivos grandes: más de 64 KB, más de 1.000
+  líneas o líneas de más de 2 KB.
 - Solo UTF-8 y archivos de hasta 2 MB.
 - Los tabs se expanden a 4 espacios al cargar.
 - Cerrar el editor descarta cambios no guardados.
@@ -1498,7 +1503,9 @@ Limitaciones conocidas:
 
 - Sin pantalla de ajustes; `font_family` y `render.mode` requieren reiniciar la
   app, el resto de `config.toml` se recarga en caliente.
-- Editor sin undo/redo, selección, file watching ni autoguardado.
+- Editor sin undo/redo, selección, file watching ni autoguardado. El resaltado
+  de sintaxis se desactiva en archivos grandes (más de 64 KB, 1.000 líneas o
+  líneas de más de 2 KB) para mantener la respuesta al teclear.
 - Code Review: soporte de GitHub y GitLab; sin comentarios inline, submit de
   reviews ni resaltado de sintaxis dentro del diff.
 - Self-hosted GitHub/GitLab se detecta en hosts `github.*` / `gitlab.*`; hosts

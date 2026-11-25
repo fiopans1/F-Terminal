@@ -213,6 +213,8 @@ pub struct Pane {
     pub profile_id: String,
     /// Monotonic counter used to avoid re-exporting unchanged grids.
     pub content_revision: u64,
+    /// Whether the PTY has produced output yet (used for the startup screen).
+    pub has_output: bool,
     /// Completion is only considered after the user has edited the line.
     pub suggestion_armed: bool,
     /// Last time the PTY produced output, used by the agent fallback state.
@@ -255,6 +257,7 @@ impl Pane {
             git_status: None,
             profile_id: profile.id.clone(),
             content_revision: u64::from(restored),
+            has_output: restored,
             suggestion_armed: false,
             last_output: Instant::now(),
             program_status_revision: 0,

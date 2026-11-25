@@ -2,6 +2,7 @@ use std::ops::Range;
 use std::path::{Path, PathBuf};
 use std::sync::mpsc::{self, Sender};
 use std::thread;
+use std::time::Instant;
 
 use syntect::easy::HighlightLines;
 use syntect::highlighting::{Theme as SyntaxTheme, ThemeSet};
@@ -42,7 +43,13 @@ pub fn spawn_worker(proxy: EventLoopProxy<UserEvent>) -> Option<Sender<Highlight
                 }
 
                 let highlighter = highlighter.get_or_insert_with(Highlighter::new);
+                let started = Instant::now();
                 let spans = highlighter.highlight(&request.path, &request.lines);
+                log::debug!(
+                    "highlighted {} lines in {:?}",
+                    request.lines.len(),
+                    started.elapsed()
+                );
 
                 if proxy
                     .send_event(UserEvent::Highlight {

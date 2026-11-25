@@ -1,5 +1,6 @@
 use std::io::{Read, Write};
 use std::path::Path;
+use std::time::Instant;
 
 use anyhow::{Context, Result};
 use portable_pty::{Child, CommandBuilder, MasterPty, PtySize, native_pty_system};
@@ -143,10 +144,17 @@ impl Session {
             command.env(key, value);
         }
 
+        let spawn_started = Instant::now();
         let child = pair
             .slave
             .spawn_command(command)
             .context("failed to spawn the shell")?;
+        log::debug!(
+            "spawned {} for pane {} in {:?}",
+            profile.name,
+            pane.0,
+            spawn_started.elapsed()
+        );
 
         // The slave side must be closed in the parent or reads would never see
         // EOF when the child exits.
