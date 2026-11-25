@@ -1082,9 +1082,7 @@ fn saved_layout(
 
 fn restore_cwd(path: &Path) -> bool {
     let text = path.to_string_lossy();
-    text.starts_with(r"\\wsl$\")
-        || text.starts_with(r"\\wsl.localhost\")
-        || path.is_dir()
+    text.starts_with(r"\\wsl$\") || text.starts_with(r"\\wsl.localhost\") || path.is_dir()
 }
 
 fn position_is_visible(event_loop: &ActiveEventLoop, x: i32, y: i32) -> bool {
@@ -1113,7 +1111,9 @@ impl WindowState {
     ) -> anyhow::Result<Self> {
         let startup = Instant::now();
         let saved_session = config.restore_session.then(session::load).flatten();
-        let saved_window = saved_session.as_ref().and_then(|session| session.window.as_ref());
+        let saved_window = saved_session
+            .as_ref()
+            .and_then(|session| session.window.as_ref());
 
         let mut attributes = Window::default_attributes()
             .with_title("F-Terminal")
@@ -1123,8 +1123,8 @@ impl WindowState {
             .with_visible(false);
         if let Some(saved) = saved_window {
             if saved.width >= 520.0 && saved.height >= 260.0 {
-                attributes = attributes
-                    .with_inner_size(LogicalSize::new(saved.width, saved.height));
+                attributes =
+                    attributes.with_inner_size(LogicalSize::new(saved.width, saved.height));
             }
             if let (Some(x), Some(y)) = (saved.x, saved.y)
                 && position_is_visible(event_loop, x, y)
@@ -1743,12 +1743,13 @@ impl WindowState {
         self.refresh_cwds(config);
         let cwd = self.focused_cwd();
         let (tab_id, pane_id) = self.workspace.create_terminal();
+        let session_key = self.alloc_session_key();
         self.pending_spawns.insert(
             pane_id,
             PendingSpawn {
                 cwd,
                 profile_id: profile_id.to_owned(),
-                session_key: self.alloc_session_key(),
+                session_key,
                 scrollback: None,
             },
         );
@@ -1785,12 +1786,13 @@ impl WindowState {
         if let Some(tab) = self.workspace.active_tab_id() {
             self.sidebar.collapsed_tabs.remove(&tab);
         }
+        let session_key = self.alloc_session_key();
         self.pending_spawns.insert(
             new_pane,
             PendingSpawn {
                 cwd,
                 profile_id,
-                session_key: self.alloc_session_key(),
+                session_key,
                 scrollback: None,
             },
         );

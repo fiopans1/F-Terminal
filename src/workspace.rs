@@ -228,7 +228,8 @@ impl Pane {
         scrollback: Option<&Path>,
         scrollback_lines: usize,
     ) -> Result<Self> {
-        let mut terminal = Terminal::new(grid, EventProxy::new(id, proxy.clone()), scrollback_lines);
+        let mut terminal =
+            Terminal::new(grid, EventProxy::new(id, proxy.clone()), scrollback_lines);
         let mut restored = false;
         if let Some(scrollback) = scrollback
             && let Some(bytes) = crate::session::read_scrollback(scrollback)
@@ -373,9 +374,7 @@ impl Workspace {
             return None;
         }
 
-        let panes: Vec<PaneId> = (0..pane_count)
-            .map(|_| PaneId(self.alloc_id()))
-            .collect();
+        let panes: Vec<PaneId> = (0..pane_count).map(|_| PaneId(self.alloc_id())).collect();
         let mut next_split_id = self.next_id;
         let layout = build_layout(layout, &panes, &mut next_split_id)?;
         self.next_id = next_split_id;

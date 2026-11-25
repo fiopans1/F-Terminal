@@ -97,7 +97,9 @@ pub struct SavedPane {
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 #[serde(tag = "kind", rename_all = "snake_case")]
 pub enum SavedLayout {
-    Leaf { index: usize },
+    Leaf {
+        index: usize,
+    },
     Split {
         direction: SavedDirection,
         ratio: f32,
@@ -507,12 +509,9 @@ mod tests {
     use alacritty_terminal::term::{Config as TermConfig, Term};
 
     fn grid_for(text: &str) -> (Grid<Cell>, GridSize) {
-        let size = GridSize {
-            cols: 40,
-            lines: 4,
-        };
+        let size = GridSize { cols: 40, lines: 4 };
         let mut term = Term::new(TermConfig::default(), &size, VoidListener);
-        let mut parser = vte::ansi::Processor::new();
+        let mut parser: vte::ansi::Processor = vte::ansi::Processor::new();
         parser.advance(&mut term, text.as_bytes());
         (term.grid().clone(), size)
     }
@@ -520,6 +519,7 @@ mod tests {
     #[test]
     fn serializes_and_deserializes_a_split_layout() {
         let state = SessionState {
+            version: SESSION_VERSION,
             window: Some(SavedWindow {
                 width: 1200.0,
                 height: 800.0,

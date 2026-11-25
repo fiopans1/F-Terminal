@@ -350,10 +350,7 @@ impl FileConfig {
             };
         }
 
-        config.restore_session = self
-            .session
-            .restore
-            .unwrap_or(defaults.restore_session);
+        config.restore_session = self.session.restore.unwrap_or(defaults.restore_session);
         config.restore_scrollback = self
             .session
             .restore_scrollback
