@@ -42,10 +42,9 @@ usa [Versionado Semántico](https://semver.org/lang/es/).
   atención, CPU/RAM y diff Git; buscador por nombre, rama, ruta, PID o comando;
   filtros de estado y origen; orden por prioridad, CPU, RAM, tiempo o nombre;
   inspector con resumen, consola desplazable (hasta 60 líneas visibles) y
-  subagentes; mensajes
-  rápidos con `I`, aprobación con `Y`, botones `Enter`/`Ctrl+C`, copiar ruta o
-  PID, marcar visto y lanzador de Claude/Codex/OpenCode/Junie en una pestaña
-  nueva.
+  subagentes; mensajes rápidos con `I`, aprobación con `Y`, botones
+  `Enter`/`Ctrl+C`, copiar ruta o PID, marcar visto y lanzador de
+  Claude/Codex/OpenCode/Junie en una pestaña nueva.
 - Zoom del terminal con `Cmd/Ctrl+=`, `Cmd/Ctrl+-` y `Cmd/Ctrl+0`; el valor se
   guarda en `font_size` y se aplica sin reiniciar.
 - `Shift+Enter` envía `LF` para insertar saltos de línea en agentes como
