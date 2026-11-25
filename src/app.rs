@@ -7911,6 +7911,94 @@ mod tests {
     }
 
     #[test]
+    fn restores_tabs_panes_and_session_keys() {
+        let shells = ShellCatalog {
+            profiles: vec![TerminalProfile {
+                id: "test".into(),
+                name: "Test".into(),
+                short: "T".into(),
+                program: PathBuf::from("sh"),
+                args: Vec::new(),
+                env: Vec::new(),
+                cwd_mode: crate::shell::CwdMode::Native,
+            }],
+            default_id: "test".into(),
+        };
+        let cwd = std::env::temp_dir().to_string_lossy().into_owned();
+        let session = SessionState {
+            version: session::SESSION_VERSION,
+            window: None,
+            active_tab: 1,
+            tabs: vec![
+                SavedTab {
+                    title: Some("first".into()),
+                    focused: 1,
+                    layout: SavedLayout::Split {
+                        direction: SavedDirection::Right,
+                        ratio: 0.5,
+                        first: Box::new(SavedLayout::Leaf { index: 0 }),
+                        second: Box::new(SavedLayout::Leaf { index: 1 }),
+                    },
+                    panes: vec![
+                        SavedPane {
+                            key: 1,
+                            profile_id: "test".into(),
+                            cwd: Some(cwd.clone()),
+                        },
+                        SavedPane {
+                            key: 2,
+                            profile_id: "missing".into(),
+                            cwd: Some(cwd.clone()),
+                        },
+                    ],
+                },
+                SavedTab {
+                    title: Some("second".into()),
+                    focused: 0,
+                    layout: SavedLayout::Leaf { index: 0 },
+                    panes: vec![SavedPane {
+                        key: 3,
+                        profile_id: "test".into(),
+                        cwd: Some(cwd),
+                    }],
+                },
+            ],
+            collapsed_tabs: vec![0],
+        };
+
+        let mut workspace = Workspace::new();
+        let restored = restore_workspace(
+            &mut workspace,
+            &shells,
+            Some(&session),
+            Path::new("."),
+            false,
+        );
+
+        assert_eq!(workspace.tabs.len(), 2);
+        assert_eq!(workspace.active_index(), 1);
+        assert_eq!(restored.next_key, 4);
+        assert_eq!(restored.pending.len(), 3);
+        let mut keys: Vec<u64> = restored
+            .pending
+            .values()
+            .map(|spawn| spawn.session_key)
+            .collect();
+        keys.sort_unstable();
+        assert_eq!(keys, vec![1, 2, 3]);
+        assert_eq!(
+            restored
+                .pending
+                .values()
+                .find(|spawn| spawn.session_key == 2)
+                .map(|spawn| spawn.profile_id.as_str()),
+            Some("test")
+        );
+        assert!(restored.collapsed.contains(&workspace.tabs[0].id));
+        assert_eq!(workspace.tabs[0].leaves().len(), 2);
+    }
+
+    #[test]
     fn path_titles_fall_back_to_the_default_label() {
         for title in [
             r"C:\Users\me",
