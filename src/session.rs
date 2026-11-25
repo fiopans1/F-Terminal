@@ -27,7 +27,7 @@ use crate::term::color::Theme;
 
 pub const SESSION_VERSION: u32 = 1;
 const MAX_SESSION_BYTES: u64 = 16 * 1024 * 1024;
-pub const MAX_SCROLLBACK_BYTES: u64 = 64 * 1024 * 1024;
+pub const MAX_SCROLLBACK_BYTES: u64 = 16 * 1024 * 1024;
 
 /// Everything needed to recreate the main window.
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
@@ -372,7 +372,8 @@ pub fn read_scrollback(path: &Path) -> Option<Vec<u8>> {
 /// starts. Only text, colors and line breaks are emitted; OSC notifications,
 /// titles and clipboard requests never reach the new terminal.
 pub fn ansi_from_grid(grid: &Grid<Cell>, size: GridSize, theme: Theme) -> Option<String> {
-    if size.cols == 0 || size.lines == 0 {
+    let columns = size.cols.min(grid.columns());
+    if columns == 0 {
         return None;
     }
 
@@ -383,7 +384,7 @@ pub fn ansi_from_grid(grid: &Grid<Cell>, size: GridSize, theme: Theme) -> Option
     for line in top..=bottom {
         let row = &grid[Line(line)];
         let mut last = 0;
-        for column in 0..size.cols {
+        for column in 0..columns {
             if !is_default_blank(&row[Column(column)]) {
                 last = column + 1;
             }

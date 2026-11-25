@@ -1270,6 +1270,8 @@ impl WindowState {
             state.workspace = Workspace::new();
             state.pending_spawns.clear();
             state.saved_scrollback.clear();
+            state.sidebar.collapsed_tabs.clear();
+            state.explorer = FileExplorer::empty(working_directory.clone());
             let (_tab_id, pane_id) = state.workspace.create_terminal();
             let session_key = state.alloc_session_key();
             state.pending_spawns.insert(
@@ -1785,6 +1787,7 @@ impl WindowState {
             self.workspace.close_tab(tab_id);
             let _ = self.sync_layout(config);
         }
+        self.save_session(config, false);
 
         self.update_window_title();
         self.window.request_redraw();
@@ -1823,6 +1826,7 @@ impl WindowState {
             self.workspace.close_pane(new_pane);
             let _ = self.sync_layout(config);
         }
+        self.save_session(config, false);
 
         self.update_window_title();
         self.window.request_redraw();
@@ -1850,6 +1854,7 @@ impl WindowState {
                 self.sidebar.hovered = None;
                 self.agents_dirty = true;
                 self.relayout(config);
+                self.save_session(config, false);
             }
         }
     }
@@ -1866,6 +1871,7 @@ impl WindowState {
                 self.sidebar.hovered = None;
                 self.agents_dirty = true;
                 self.relayout(config);
+                self.save_session(config, false);
             }
         }
     }
