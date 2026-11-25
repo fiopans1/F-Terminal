@@ -1172,8 +1172,8 @@ impl WindowState {
         let collapsed_tabs = restored.collapsed;
         let explorer_root = workspace
             .focused_pane()
-            .and_then(|id| workspace.pane(id))
-            .and_then(|pane| pane.cwd.clone())
+            .and_then(|id| pending_spawns.get(&id))
+            .map(|spawn| spawn.cwd.clone())
             .unwrap_or_else(|| working_directory.clone());
 
         let highlight_tx = highlight::spawn_worker(proxy.clone());
@@ -1265,7 +1265,24 @@ impl WindowState {
         };
         state.sidebar.collapsed_tabs = collapsed_tabs;
 
-        state.sync_layout(config)?;
+        if let Err(error) = state.sync_layout(config) {
+            log::warn!("could not restore the previous session: {error:#}; starting fresh");
+            state.workspace = Workspace::new();
+            state.pending_spawns.clear();
+            state.saved_scrollback.clear();
+            let (_tab_id, pane_id) = state.workspace.create_terminal();
+            let session_key = state.alloc_session_key();
+            state.pending_spawns.insert(
+                pane_id,
+                PendingSpawn {
+                    cwd: working_directory,
+                    profile_id: state.shells.default_id.clone(),
+                    session_key,
+                    scrollback: None,
+                },
+            );
+            state.sync_layout(config)?;
+        }
         state.update_window_title();
 
         // Paint once while the window is still hidden so Windows never shows

@@ -627,8 +627,51 @@ mod tests {
     }
 
     #[test]
-    fn splitting_a_leaf_replaces_it() {
-        let mut tree = LayoutNode::Leaf(PaneId(1));
+    fn restores_a_saved_split_layout() {
+        let mut workspace = Workspace::new();
+        let layout = LayoutSpec::Split {
+            direction: SplitDirection::Right,
+            ratio: 0.4,
+            first: Box::new(LayoutSpec::Leaf(0)),
+            second: Box::new(LayoutSpec::Split {
+                direction: SplitDirection::Down,
+                ratio: 0.6,
+                first: Box::new(LayoutSpec::Leaf(1)),
+                second: Box::new(LayoutSpec::Leaf(2)),
+            }),
+        };
+
+        let (tab_id, panes) = workspace
+            .restore_terminal(&layout, 3, 1, Some("saved".to_owned()))
+            .unwrap();
+        assert_eq!(workspace.tabs.len(), 1);
+        assert_eq!(workspace.active_tab_id(), Some(tab_id));
+
+        let tab = workspace.active_tab().unwrap();
+        assert_eq!(tab.title, "saved");
+        assert_eq!(tab.focused, panes[1]);
+        assert_eq!(tab.leaves().len(), 3);
+        assert!(tab.leaves().contains(&panes[2]));
+    }
+
+    #[test]
+    fn rejects_a_layout_with_repeated_leaves() {
+        let mut workspace = Workspace::new();
+        let layout = LayoutSpec::Split {
+            direction: SplitDirection::Right,
+            ratio: 0.5,
+            first: Box::new(LayoutSpec::Leaf(0)),
+            second: Box::new(LayoutSpec::Leaf(0)),
+        };
+        assert!(
+            workspace
+                .restore_terminal(&layout, 2, 0, None)
+                .is_none()
+        );
+    }
+
+    #[test]
+    fn splitting_a_leaf_replaces_it() {        let mut tree = LayoutNode::Leaf(PaneId(1));
         assert!(tree.split(PaneId(1), PaneId(2), SplitDirection::Down, 7));
         assert_eq!(tree.leaf_count(), 2);
         assert!(tree.contains(PaneId(1)));
@@ -656,8 +699,7 @@ mod tests {
     }
 
     #[test]
-    fn tab_lifecycle_tracks_the_active_tab() {
-        let mut workspace = Workspace::new();
+    fn tab_lifecycle_tracks_the_active_tab() {        let mut workspace = Workspace::new();
 
         let (first_tab, first_pane) = workspace.create_terminal();
         let (second_tab, _second_pane) = workspace.create_terminal();

@@ -517,6 +517,55 @@ mod tests {
     }
 
     #[test]
+    fn writes_session_metadata_and_scrollback() {
+        let dir = std::env::temp_dir().join(format!(
+            "f-terminal-session-test-{}",
+            std::process::id()
+        ));
+        let _ = fs::remove_dir_all(&dir);
+        fs::create_dir_all(&dir).unwrap();
+
+        let (grid, size) = grid_for("hello\r\n");
+        let state = SessionState {
+            version: SESSION_VERSION,
+            window: None,
+            active_tab: 0,
+            tabs: vec![SavedTab {
+                title: Some("saved".into()),
+                focused: 0,
+                layout: SavedLayout::Leaf { index: 0 },
+                panes: vec![SavedPane {
+                    key: 7,
+                    profile_id: "windows:pwsh".into(),
+                    cwd: Some(r"C:\github\api".into()),
+                }],
+            }],
+            collapsed_tabs: Vec::new(),
+        };
+        let job = SaveJob {
+            state: state.clone(),
+            keys: vec![7],
+            scrollbacks: vec![ScrollbackSource {
+                key: 7,
+                grid,
+                size,
+                theme: Theme::foundry(),
+            }],
+        };
+
+        write_job(&dir, job).unwrap();
+        let text = fs::read_to_string(dir.join("session.json")).unwrap();
+        let parsed: SessionState = serde_json::from_str(&text).unwrap();
+        assert_eq!(parsed, state);
+
+        let scrollback =
+            fs::read(dir.join("session-scrollback/0000000000000007.ansi")).unwrap();
+        assert!(String::from_utf8_lossy(&scrollback).contains("hello"));
+
+        fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
     fn serializes_and_deserializes_a_split_layout() {
         let state = SessionState {
             version: SESSION_VERSION,
