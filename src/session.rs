@@ -396,6 +396,7 @@ pub fn ansi_from_grid(grid: &Grid<Cell>, size: GridSize, theme: Theme) -> Option
 
         let mut current_fg = None;
         let mut current_bg = None;
+        let mut current_flags = Flags::empty();
         for column in 0..last {
             let cell = &row[Column(column)];
             if cell.flags.contains(Flags::WIDE_CHAR_SPACER) {
@@ -411,10 +412,11 @@ pub fn ansi_from_grid(grid: &Grid<Cell>, size: GridSize, theme: Theme) -> Option
             } else {
                 (cell.fg, cell.bg)
             };
-            if current_fg != Some(fg) || current_bg != Some(bg) {
-                write_sgr(&mut output, fg, bg, theme);
+            if current_fg != Some(fg) || current_bg != Some(bg) || current_flags != cell.flags {
+                write_sgr(&mut output, fg, bg, cell.flags, theme);
                 current_fg = Some(fg);
                 current_bg = Some(bg);
+                current_flags = cell.flags;
             }
 
             if cell.flags.contains(Flags::HIDDEN) {
@@ -442,8 +444,23 @@ fn is_default_blank(cell: &Cell) -> bool {
         && cell.bg == Color::Named(NamedColor::Background)
 }
 
-fn write_sgr(output: &mut String, fg: Color, bg: Color, theme: Theme) {
+fn write_sgr(output: &mut String, fg: Color, bg: Color, flags: Flags, theme: Theme) {
     output.push_str("\x1b[0m");
+    if flags.contains(Flags::BOLD) {
+        output.push_str("\x1b[1m");
+    }
+    if flags.contains(Flags::DIM) {
+        output.push_str("\x1b[2m");
+    }
+    if flags.contains(Flags::ITALIC) {
+        output.push_str("\x1b[3m");
+    }
+    if flags.intersects(Flags::ALL_UNDERLINES) {
+        output.push_str("\x1b[4m");
+    }
+    if flags.contains(Flags::STRIKEOUT) {
+        output.push_str("\x1b[9m");
+    }
     if fg != Color::Named(NamedColor::Foreground) {
         push_color(output, fg, false, theme);
     }
@@ -613,6 +630,15 @@ mod tests {
         assert!(ansi.contains("red"));
         assert!(ansi.contains("38;2;"));
         assert!(ansi.ends_with("\r\n"));
+    }
+
+    #[test]
+    fn scrollback_keeps_text_attributes() {
+        let (grid, size) = grid_for("\x1b[1;3;4mstyled\x1b[0m\r\n");
+        let ansi = ansi_from_grid(&grid, size, Theme::foundry()).unwrap();
+        assert!(ansi.contains("\x1b[1m"));
+        assert!(ansi.contains("\x1b[3m"));
+        assert!(ansi.contains("\x1b[4m"));
     }
 
     #[test]

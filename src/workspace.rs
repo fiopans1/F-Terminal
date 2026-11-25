@@ -1,5 +1,5 @@
 use std::collections::{HashMap, HashSet};
-use std::path::{Path, PathBuf};
+use std::path::PathBuf;
 use std::time::Instant;
 
 use anyhow::{Context, Result};
@@ -193,9 +193,10 @@ impl LayoutNode {
 }
 
 /// Session fields needed when a pane is spawned after a restore.
+#[derive(Clone, Copy)]
 pub struct PaneRestore<'a> {
     pub session_key: u64,
-    pub scrollback: Option<&'a Path>,
+    pub scrollback: Option<&'a [u8]>,
 }
 
 /// One PTY-backed terminal inside a tab.
@@ -236,10 +237,8 @@ impl Pane {
         let mut terminal =
             Terminal::new(grid, EventProxy::new(id, proxy.clone()), scrollback_lines);
         let mut restored = false;
-        if let Some(scrollback) = restore.scrollback
-            && let Some(bytes) = crate::session::read_scrollback(scrollback)
-        {
-            terminal.restore_scrollback(&bytes);
+        if let Some(bytes) = restore.scrollback {
+            terminal.restore_scrollback(bytes);
             restored = true;
         }
         let session = Session::spawn(id, grid.lines, grid.cols, proxy, profile, &cwd)
