@@ -311,7 +311,10 @@ Notas de Windows:
 - Git Bash se lanza con `bin\bash.exe` para que use el ConPTY de F-Terminal.
 - WSL recibe `--cd <ruta>` para traducir el cwd de Windows. Las rutas
   `\\wsl$\...` y `\\wsl.localhost\...` se convierten a su ruta Linux.
-- `WSLENV` propaga `TERM`, `COLORTERM` y `TERM_PROGRAM` a la distribución.
+- `WSLENV` propaga `TERM`, `COLORTERM`, `TERM_PROGRAM` y
+  `MISE_IGNORED_CONFIG_PATHS` a la distribución. Esto último evita que el
+  `mise` de Linux cargue el config global de Windows cuando el pane arranca bajo
+  `C:\Users\...` y falle porque no está trusted.
 - En Windows, F-Terminal pide la ruta al propio shell mediante `OSC 9;9`:
   PowerShell 7 y Windows PowerShell envuelven su función `prompt`, `cmd.exe`
   usa `$E]9;9;$P` en `PROMPT`, y Git Bash/MSYS2/Cygwin añaden un

@@ -72,6 +72,9 @@ usa [Versionado Semántico](https://semver.org/lang/es/).
 
 ### Fixed
 
+- Al abrir un perfil WSL desde el selector en el home de Windows, el `mise` de
+  Linux ya no intenta cargar el config global de Windows y la terminal arranca
+  sin el error de configuración no trusted.
 - El instalador de Windows vuelve a generarse en los tags de release; el job ya
   no aborta cuando no hay un certificado de firma configurado.
 - Los títulos de ventana que solo contienen una ruta (ConPTY/cmd.exe en

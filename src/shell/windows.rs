@@ -273,11 +273,31 @@ fn decode_wsl_output(bytes: &[u8]) -> String {
     }
 }
 
+/// Windows mise configuration that WSL must not load.
+///
+/// WSL panes inherit the focused Windows directory. When it lives under
+/// `C:\Users\<user>`, mise walks up the parent chain and finds the Windows
+/// global config, which is untrusted inside WSL and aborts the shell startup.
+/// Expose the path through `MISE_IGNORED_CONFIG_PATHS` so WSL keeps using its
+/// own `~/.config/mise/config.toml`.
+fn mise_config_path() -> Option<PathBuf> {
+    let home = env::var_os("USERPROFILE").map(PathBuf::from)?;
+    let config = home.join(r".config\mise\config.toml");
+    config.is_file().then_some(config)
+}
+
 fn wsl_env() -> Vec<(String, String)> {
-    vec![(
+    let mut vars = vec![(
         "WSLENV".to_owned(),
-        "TERM/u:COLORTERM/u:TERM_PROGRAM/u".to_owned(),
-    )]
+        "TERM/u:COLORTERM/u:TERM_PROGRAM/u:MISE_IGNORED_CONFIG_PATHS/p".to_owned(),
+    )];
+    if let Some(config) = mise_config_path() {
+        vars.push((
+            "MISE_IGNORED_CONFIG_PATHS".to_owned(),
+            config.to_string_lossy().into_owned(),
+        ));
+    }
+    vars
 }
 
 /// Resolve a program through `PATH` without spawning `where.exe`.
@@ -314,4 +334,20 @@ fn find_program(name: &str) -> Option<PathBuf> {
     }
 
     None
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn wsl_env_translates_the_ignored_mise_config_path() {
+        let env = wsl_env();
+        let value = env
+            .iter()
+            .find(|(key, _)| key == "WSLENV")
+            .map(|(_, value)| value.as_str())
+            .unwrap();
+        assert!(value.contains("MISE_IGNORED_CONFIG_PATHS/p"));
+    }
 }
