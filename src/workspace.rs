@@ -336,8 +336,8 @@ impl Workspace {
 
         self.tabs.push(Tab {
             id: tab_id,
-            title: "Nueva sesión".to_owned(),
-            default_title: "Nueva sesión".to_owned(),
+            title: "New session".to_owned(),
+            default_title: "New session".to_owned(),
             layout: LayoutNode::Leaf(pane_id),
             focused: pane_id,
             panes: HashMap::new(),
@@ -399,7 +399,7 @@ impl Workspace {
         let tab_id = TabId(self.alloc_id());
         let title = title
             .filter(|title| !title.trim().is_empty())
-            .unwrap_or_else(|| "Nueva sesión".to_owned());
+            .unwrap_or_else(|| "New session".to_owned());
         self.tabs.push(Tab {
             id: tab_id,
             title: title.clone(),

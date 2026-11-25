@@ -37,7 +37,6 @@ enum ListMode {
 struct Layout {
     header: Rect,
     footer: Rect,
-    close: Rect,
     refresh: Rect,
     reviews: Rect,
     tabs: [Rect; 2],
@@ -282,7 +281,7 @@ impl ReviewWindow {
 
         if let Err(error) = spawned {
             self.list_loading = false;
-            self.review.error = Some(format!("No se pudo cargar Code Review: {error}"));
+            self.review.error = Some(format!("Could not load Code Review: {error}"));
         }
 
         self.window.request_redraw();
@@ -316,8 +315,7 @@ impl ReviewWindow {
 
         if let Err(error) = spawned {
             self.review.prs_loading = false;
-            self.review.prs_error =
-                Some(format!("No se pudieron cargar los pull requests: {error}"));
+            self.review.prs_error = Some(format!("Could not load pull requests: {error}"));
         }
 
         self.window.request_redraw();
@@ -482,7 +480,7 @@ impl ReviewWindow {
 
         if let Err(error) = spawned {
             self.review.loading = false;
-            self.review.error = Some(format!("No se pudo abrir Code Review: {error}"));
+            self.review.error = Some(format!("Could not open Code Review: {error}"));
         }
 
         self.window.request_redraw();
@@ -758,11 +756,6 @@ impl ReviewWindow {
         let x = self.cursor.x as f32;
         let y = self.cursor.y as f32;
 
-        if layout.close.contains(x, y) {
-            self.close_requested = true;
-            return;
-        }
-
         if layout.refresh.contains(x, y) {
             self.refresh_current();
             self.window.request_redraw();
@@ -902,18 +895,12 @@ impl ReviewWindow {
             width,
             (footer.y - header.bottom()).max(1.0),
         );
-        let close_size = ui::px(ui::CLOSE_SIZE, scale);
-        let close = Rect::new(
-            width - padding - close_size,
-            (header.height - close_size) / 2.0,
-            close_size,
-            close_size,
-        );
+        let button_size = ui::px(ui::CLOSE_SIZE, scale);
         let refresh = Rect::new(
-            (close.x - close_size - ui::px(8.0, scale)).max(padding),
-            close.y,
-            close_size,
-            close_size,
+            width - padding - button_size,
+            (header.height - button_size) / 2.0,
+            button_size,
+            button_size,
         );
 
         let reviews_width = ui::px(300.0, scale)
@@ -1077,7 +1064,6 @@ impl ReviewWindow {
         Layout {
             header,
             footer,
-            close,
             refresh,
             reviews,
             tabs,
@@ -1152,7 +1138,7 @@ impl ReviewWindow {
         });
         let subtitle = if let Some(detail) = &self.review.detail {
             format!(
-                "{} · {} archivos · +{} −{} · {}",
+                "{} · {} files · +{} −{} · {}",
                 detail.summary.title,
                 detail.files.len(),
                 detail.additions,
@@ -1173,20 +1159,6 @@ impl ReviewWindow {
             bold: false,
         });
 
-        ui::icon_button(
-            &mut quads,
-            &mut labels,
-            ui::IconButtonSpec {
-                rect: layout.close,
-                glyph: "×",
-                enabled: true,
-                hovered: layout.close.contains(cursor.0, cursor.1),
-                focused: false,
-                danger: false,
-            },
-            theme,
-            tokens,
-        );
         ui::icon_button(
             &mut quads,
             &mut labels,
@@ -1221,9 +1193,9 @@ impl ReviewWindow {
         let remote_label = self
             .review
             .forge
-            .map_or("Cambios remotos", ForgeKind::tab_label);
+            .map_or("Remote changes", ForgeKind::tab_label);
         let tab_labels = [
-            format!("Locales {}", self.review.reviews.len()),
+            format!("Local {}", self.review.reviews.len()),
             if self.review.prs_error.is_some() {
                 format!("{remote_label} !")
             } else {
@@ -1306,7 +1278,7 @@ impl ReviewWindow {
             let placeholder = self
                 .review
                 .forge
-                .map_or("Buscar PR/MR…", ForgeKind::search_placeholder);
+                .map_or("Search PRs/MRs…", ForgeKind::search_placeholder);
             let text = match (self.search.is_empty(), self.search_focused) {
                 (true, true) => format!("{placeholder}▌"),
                 (true, false) => placeholder.to_owned(),
@@ -1344,7 +1316,7 @@ impl ReviewWindow {
                     else {
                         continue;
                     };
-                    let draft = if pull.draft { " · borrador" } else { "" };
+                    let draft = if pull.draft { " · draft" } else { "" };
                     (
                         pull.list_title(),
                         format!(
@@ -1422,14 +1394,14 @@ impl ReviewWindow {
                 let empty = self
                     .review
                     .forge
-                    .map_or("No hay cambios remotos abiertos.".to_owned(), |forge| {
+                    .map_or("No open remote changes.".to_owned(), |forge| {
                         forge.empty_message().to_owned()
                     });
                 ui::empty_state(
                     &mut quads,
                     &mut labels,
                     layout.list_area,
-                    "Sin pull requests",
+                    "No pull requests",
                     &empty,
                     theme,
                     tokens,
@@ -1439,8 +1411,8 @@ impl ReviewWindow {
                     &mut quads,
                     &mut labels,
                     layout.list_area,
-                    "Sin resultados",
-                    "Prueba con otra búsqueda.",
+                    "No results",
+                    "Try a different search.",
                     theme,
                     tokens,
                 );
@@ -1454,8 +1426,8 @@ impl ReviewWindow {
                     &mut quads,
                     &mut labels,
                     layout.list_area,
-                    "Sin reviews",
-                    "No hay cambios ni commits locales para revisar. Pulsa R para actualizar.",
+                    "No reviews",
+                    "No local changes or commits to review. Press R to refresh.",
                     theme,
                     tokens,
                 );
@@ -1503,7 +1475,7 @@ impl ReviewWindow {
                     .filter(|file| self.is_reviewed(file))
                     .count();
                 labels.push(Label {
-                    text: format!("Archivos · {reviewed}/{} revisados", detail.files.len()),
+                    text: format!("Files · {reviewed}/{} reviewed", detail.files.len()),
                     x: files.x + layout.padding,
                     y: files.y + ui::px(9.0, scale),
                     width: (files.width - layout.padding * 2.0).max(1.0),
@@ -1626,7 +1598,7 @@ impl ReviewWindow {
 
                     if file.binary {
                         labels.push(Label {
-                            text: "Archivo binario".into(),
+                            text: "Binary file".into(),
                             x: area.x,
                             y: area.y,
                             width: area.width,
@@ -1636,7 +1608,7 @@ impl ReviewWindow {
                         });
                     } else if file.lines.is_empty() {
                         labels.push(Label {
-                            text: "Sin cambios de texto".into(),
+                            text: "No text changes".into(),
                             x: area.x,
                             y: area.y,
                             width: area.width,
@@ -1672,8 +1644,8 @@ impl ReviewWindow {
                         &mut quads,
                         &mut labels,
                         area,
-                        "Nada seleccionado",
-                        "Selecciona un archivo para ver su diff.",
+                        "Nothing selected",
+                        "Select a file to view its diff.",
                         theme,
                         tokens,
                     );
@@ -1740,31 +1712,30 @@ impl ReviewWindow {
             });
         } else {
             let (title, body) = match self.mode {
-                ListMode::PullRequests if self.review.prs_loading => (
-                    "Cargando pull requests…",
-                    "Consultando el forge configurado.",
-                ),
+                ListMode::PullRequests if self.review.prs_loading => {
+                    ("Loading pull requests…", "Querying the configured forge.")
+                }
                 ListMode::PullRequests if self.review.pull_requests.is_empty() => (
-                    "Sin pull requests",
-                    "No hay cambios remotos abiertos en este repositorio. Pulsa R para actualizar.",
+                    "No pull requests",
+                    "There are no open remote changes in this repository. Press R to refresh.",
                 ),
                 ListMode::PullRequests => (
-                    "Elige un pull request",
-                    "Selecciona un pull request o merge request de la izquierda y pulsa Enter.",
+                    "Choose a pull request",
+                    "Select a pull request or merge request on the left and press Enter.",
                 ),
                 ListMode::Local if self.list_loading => {
-                    ("Cargando reviews…", "Leyendo commits y cambios locales.")
+                    ("Loading reviews…", "Reading commits and local changes.")
                 }
                 ListMode::Local if self.review.loading => {
-                    ("Cargando review…", "Leyendo commits y cambios locales.")
+                    ("Loading review…", "Reading commits and local changes.")
                 }
                 ListMode::Local if self.review.reviews.is_empty() => (
-                    "Sin cambios",
-                    "No hay cambios ni commits en este repositorio. Pulsa R para actualizar.",
+                    "No changes",
+                    "There are no changes or commits in this repository. Press R to refresh.",
                 ),
                 ListMode::Local => (
-                    "Elige una review",
-                    "Selecciona una review de la izquierda y pulsa Enter.",
+                    "Choose a review",
+                    "Select a review on the left and press Enter.",
                 ),
             };
             ui::empty_state(
@@ -1801,18 +1772,18 @@ impl ReviewWindow {
 
     fn hint(&self, focus: Focus) -> &'static str {
         if self.search_focused && self.mode == ListMode::PullRequests {
-            return "Escribe para filtrar   Enter abrir   ↑↓ mover   Esc salir de búsqueda";
+            return "Type to filter   Enter open   ↑↓ move   Esc exit search";
         }
 
         match focus {
             Focus::Reviews if self.mode == ListMode::PullRequests => {
-                "↑↓ PR/MR   Enter revisar   / o Ctrl+F buscar   R refrescar   Tab panel   Esc cerrar"
+                "↑↓ PR/MR   Enter review   / or Ctrl+F search   R refresh   Tab panel   Esc close"
             }
             Focus::Reviews => {
-                "↑↓ revisar   Enter abrir   / buscar PRs   R refrescar   Tab panel   Esc cerrar"
+                "↑↓ review   Enter open   / search PRs   R refresh   Tab panel   Esc close"
             }
-            Focus::Files => "↑↓ archivo   Espacio marcar   Enter diff   Tab panel   Esc cerrar",
-            Focus::Diff => "↑↓ scroll   ←→ horizontal   PgUp/PgDn   Tab panel   Esc cerrar",
+            Focus::Files => "↑↓ file   Space mark   Enter diff   Tab panel   Esc close",
+            Focus::Diff => "↑↓ scroll   ←→ horizontal   PgUp/PgDn   Tab panel   Esc close",
         }
     }
 }

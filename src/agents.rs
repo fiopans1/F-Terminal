@@ -103,15 +103,15 @@ pub enum AgentState {
 impl AgentState {
     pub fn label(&self) -> &'static str {
         match self {
-            Self::Working => "Trabajando",
-            Self::Blocked(BlockKind::Permission) => "Pide permiso",
-            Self::Blocked(BlockKind::Question) => "Pide respuesta",
-            Self::Blocked(BlockKind::Auth) => "Pide login",
-            Self::Attention => "Requiere atención",
-            Self::Done => "Terminado",
+            Self::Working => "Working",
+            Self::Blocked(BlockKind::Permission) => "Needs permission",
+            Self::Blocked(BlockKind::Question) => "Needs input",
+            Self::Blocked(BlockKind::Auth) => "Needs login",
+            Self::Attention => "Needs attention",
+            Self::Done => "Finished",
             Self::Error => "Error",
-            Self::Idle => "Inactivo",
-            Self::Detected => "En ejecución",
+            Self::Idle => "Idle",
+            Self::Detected => "Running",
         }
     }
 
@@ -152,9 +152,9 @@ impl AgentSource {
     pub fn label(self) -> &'static str {
         match self {
             Self::Protocol => "OSC 7501",
-            Self::Process => "Proceso",
-            Self::Hook => "Hook de Junie",
-            Self::External => "Externo",
+            Self::Process => "Process",
+            Self::Hook => "Junie hook",
+            Self::External => "External",
         }
     }
 }

@@ -266,7 +266,7 @@ impl App {
         }
 
         let attributes = Window::default_attributes()
-            .with_title("Centro de Agentes — F-Terminal")
+            .with_title("Agent Center — F-Terminal")
             .with_inner_size(LogicalSize::new(1140.0, 740.0))
             .with_min_inner_size(LogicalSize::new(760.0, 480.0))
             .with_theme(Some(WindowTheme::Dark))
@@ -551,11 +551,10 @@ impl ApplicationHandler<UserEvent> for App {
                     .is_some_and(|state| state.send_agent_input(pane, &bytes));
                 if let Some(agent) = &mut self.agent {
                     if sent {
-                        agent
-                            .on_action_notice(format!("Enviado a pane {}: {label}", pane.0), false);
+                        agent.on_action_notice(format!("Sent to pane {}: {label}", pane.0), false);
                     } else {
                         agent.on_action_notice(
-                            format!("El pane {} ya no está disponible", pane.0),
+                            format!("Pane {} is no longer available", pane.0),
                             true,
                         );
                     }
@@ -577,14 +576,14 @@ impl ApplicationHandler<UserEvent> for App {
                     if let Some(pane) = launched {
                         agent.on_action_notice(
                             format!(
-                                "Lanzando {} en pane {} (Enter para enfocar)",
+                                "Launching {} in pane {} (Enter to focus)",
                                 kind.label(),
                                 pane.0
                             ),
                             false,
                         );
                     } else {
-                        agent.on_action_notice(format!("No se pudo lanzar {}", kind.label()), true);
+                        agent.on_action_notice(format!("Could not launch {}", kind.label()), true);
                     }
                 }
                 if launched.is_some() {
@@ -602,7 +601,7 @@ impl ApplicationHandler<UserEvent> for App {
                     state.window.request_redraw();
                 }
                 if let Some(agent) = &mut self.agent {
-                    agent.on_action_notice("Marcado como visto".into(), false);
+                    agent.on_action_notice("Marked as seen".into(), false);
                 }
                 self.sync_agent_window();
                 return;
@@ -619,9 +618,9 @@ impl ApplicationHandler<UserEvent> for App {
                     .unwrap_or(0);
                 if let Some(agent) = &mut self.agent {
                     let text = if marked == 0 {
-                        "No había avisos pendientes por marcar".into()
+                        "There were no pending notifications to mark".into()
                     } else {
-                        format!("{marked} agente(s) marcados como vistos")
+                        format!("{marked} agent(s) marked as seen")
                     };
                     agent.on_action_notice(text, false);
                 }
@@ -2502,7 +2501,7 @@ impl WindowState {
             && menu.pane == pane_id
         {
             menu.loading = false;
-            menu.error = Some("No se pudo leer las ramas de Git".to_owned());
+            menu.error = Some("Could not read Git branches".to_owned());
         }
     }
 
@@ -2547,7 +2546,7 @@ impl WindowState {
         }
 
         let name = branch.name.clone();
-        menu.busy = Some(format!("Cambiando a {name}…"));
+        menu.busy = Some(format!("Switching to {name}…"));
         menu.error = None;
         let pane_id = menu.pane;
         let cwd = menu.cwd.clone();
@@ -2578,7 +2577,7 @@ impl WindowState {
             && menu.pane == pane_id
         {
             menu.busy = None;
-            menu.error = Some("No se pudo iniciar el checkout de Git".to_owned());
+            menu.error = Some("Could not start the Git checkout".to_owned());
         }
         self.window.request_redraw();
     }
@@ -2678,7 +2677,7 @@ impl WindowState {
         let proxy = self.proxy.clone();
         let thread_cwd = cwd.clone();
         let summary = ReviewSummary {
-            title: "Cambios locales".to_owned(),
+            title: "Local changes".to_owned(),
             subtitle: String::new(),
             kind: ReviewKind::Working,
         };
@@ -2714,7 +2713,7 @@ impl WindowState {
             && diff.generation == generation
         {
             diff.loading = false;
-            diff.error = Some("No se pudo iniciar la lectura del diff".to_owned());
+            diff.error = Some("Could not start reading the diff".to_owned());
         }
     }
 
@@ -6747,7 +6746,7 @@ impl WindowState {
                 .get(&pane.profile_id)
                 .map(|profile| profile.name.as_str())
                 .unwrap_or("shell");
-            let text = format!("Iniciando {profile}…");
+            let text = format!("Starting {profile}…");
             let font = (ui_font_size * 0.95).max(11.0);
             labels.push(Label {
                 text,
@@ -6953,13 +6952,13 @@ impl WindowState {
                     .as_ref()
                     .map(|detail| {
                         format!(
-                            "Cambios locales · {} archivos · +{} −{}",
+                            "Local changes · {} files · +{} −{}",
                             detail.files.len(),
                             detail.additions,
                             detail.deletions
                         )
                     })
-                    .unwrap_or_else(|| "Cambios locales".to_owned())
+                    .unwrap_or_else(|| "Local changes".to_owned())
             } else {
                 self.editor
                     .as_ref()
@@ -7212,7 +7211,7 @@ impl WindowState {
                 format!("{}/{}", search.current + 1, search.matches.len())
             };
             let text = if search.query.is_empty() {
-                "Buscar en el scrollback…".to_owned()
+                "Search scrollback…".to_owned()
             } else {
                 format!("{}▌  {count}", search.query)
             };
@@ -7321,11 +7320,11 @@ impl WindowState {
 
         let header_line_height = header_font_size * 1.35;
         let title = if layout.profile_menu {
-            "Nueva terminal"
+            "New terminal"
         } else {
             match layout.mode {
-                SidebarMode::Terminals => "Sesiones",
-                SidebarMode::Files => "Archivos",
+                SidebarMode::Terminals => "Sessions",
+                SidebarMode::Files => "Files",
             }
         };
         labels.push(Label {
@@ -7472,7 +7471,7 @@ impl WindowState {
 
             if self.shells.profiles.is_empty() {
                 labels.push(Label {
-                    text: "No se detectaron shells".into(),
+                    text: "No shells detected".into(),
                     x: layout.list.x + layout.padding,
                     y: layout.list.y + layout.padding,
                     width: (layout.list.width - layout.padding * 2.0).max(1.0),
@@ -8172,7 +8171,7 @@ fn build_diff_frame(
         } else if let Some(error) = &diff.error {
             (error.replace('\n', " "), theme.diff_remove_text)
         } else {
-            ("Sin cambios".to_owned(), theme.sidebar_text_dim)
+            ("No changes".to_owned(), theme.sidebar_text_dim)
         };
         let text: String = text.chars().take(cols).collect();
         let mut row = Row::default();
@@ -8325,7 +8324,7 @@ fn build_branch_menu(
     let tokens = ui::Tokens::new(ui_font_size, scale);
     let padding = (6.0 * scale).max(4.0);
     labels.push(Label {
-        text: "Ramas".into(),
+        text: "Branches".into(),
         x: rect.x + padding,
         y: rect.y + padding,
         width: (rect.width - padding * 2.0).max(1.0),
@@ -8339,9 +8338,9 @@ fn build_branch_menu(
 
     if menu.branches.is_empty() {
         let text = if menu.loading {
-            "Cargando ramas…"
+            "Loading branches…"
         } else {
-            "Sin ramas locales"
+            "No local branches"
         };
         labels.push(Label {
             text: text.into(),
@@ -9244,17 +9243,25 @@ mod tests {
         std::fs::create_dir_all(&dir).unwrap();
         let first = dir.join("first.ansi");
         let second = dir.join("second.ansi");
-        std::fs::write(&first, b"first history").unwrap();
-        std::fs::write(&second, b"second history").unwrap();
+        std::fs::write(
+            &first,
+            format!("{}first history\r\n", session::SCROLLBACK_MAGIC),
+        )
+        .unwrap();
+        std::fs::write(
+            &second,
+            format!("{}second history\r\n", session::SCROLLBACK_MAGIC),
+        )
+        .unwrap();
 
         let scrollbacks = read_scrollbacks(vec![(PaneId(1), first), (PaneId(2), second)]);
         assert_eq!(
             scrollbacks.get(&PaneId(1)).map(|bytes| bytes.as_slice()),
-            Some(b"first history".as_slice())
+            Some(b"first history\r\n".as_slice())
         );
         assert_eq!(
             scrollbacks.get(&PaneId(2)).map(|bytes| bytes.as_slice()),
-            Some(b"second history".as_slice())
+            Some(b"second history\r\n".as_slice())
         );
 
         std::fs::remove_dir_all(&dir).ok();
@@ -9363,8 +9370,8 @@ mod tests {
         }
 
         assert_eq!(
-            clean_pty_title("Nueva sesión", true).as_deref(),
-            Some("Nueva sesión")
+            clean_pty_title("New session", true).as_deref(),
+            Some("New session")
         );
         assert_eq!(
             clean_pty_title("  vim README.md  ", true).as_deref(),
@@ -9519,7 +9526,7 @@ mod tests {
             branches,
             selected: 1,
             loading: false,
-            error: Some("falló el checkout".into()),
+            error: Some("checkout failed".into()),
             busy: None,
         };
         let theme = Theme::tokyo_night();
@@ -9543,12 +9550,12 @@ mod tests {
         );
 
         assert!(!quads.is_empty());
-        assert!(labels.iter().any(|label| label.text == "Ramas"));
+        assert!(labels.iter().any(|label| label.text == "Branches"));
         assert!(labels.iter().any(|label| label.text == "branch-0"));
-        assert!(labels.iter().any(|label| label.text == "falló el checkout"));
+        assert!(labels.iter().any(|label| label.text == "checkout failed"));
 
         menu.error = None;
-        menu.busy = Some("Cambiando a branch-1…".into());
+        menu.busy = Some("Switching to branch-1…".into());
         labels.clear();
         build_branch_menu(
             &menu,
@@ -9566,7 +9573,7 @@ mod tests {
         assert!(
             labels
                 .iter()
-                .any(|label| label.text == "Cambiando a branch-1…")
+                .any(|label| label.text == "Switching to branch-1…")
         );
     }
 
@@ -9574,7 +9581,7 @@ mod tests {
     fn diff_rows_format_files_and_line_numbers() {
         let detail = ReviewDetail {
             summary: ReviewSummary {
-                title: "Cambios locales".to_owned(),
+                title: "Local changes".to_owned(),
                 subtitle: String::new(),
                 kind: ReviewKind::Working,
             },

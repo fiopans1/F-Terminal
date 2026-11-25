@@ -107,16 +107,16 @@ impl MenuState {
     pub fn install(proxy: EventLoopProxy<UserEvent>) -> anyhow::Result<Self> {
         use muda::{IsMenuItem, Menu, MenuEvent, MenuItem, PredefinedMenuItem, Submenu};
 
-        let explorer = MenuItem::with_id("open-explorer", "Abrir explorador", true, None);
-        let code = MenuItem::with_id("open-code", "Abrir en VS Code", true, None);
+        let explorer = MenuItem::with_id("open-explorer", "Open Explorer", true, None);
+        let code = MenuItem::with_id("open-code", "Open in VS Code", true, None);
         let review = MenuItem::with_id("code-review", "Code Review", true, None);
         let git = MenuItem::with_id("git-manager", "Git", true, None);
-        let agent = MenuItem::with_id("agent-mode", "Agentes", true, None);
-        let settings = MenuItem::with_id("open-settings", "Abrir configuración…", true, None);
+        let agent = MenuItem::with_id("agent-mode", "Agents", true, None);
+        let settings = MenuItem::with_id("open-settings", "Open Settings…", true, None);
 
         let separator_one = PredefinedMenuItem::separator();
         let separator_two = PredefinedMenuItem::separator();
-        let quit = PredefinedMenuItem::quit(Some("Salir"));
+        let quit = PredefinedMenuItem::quit(Some("Quit"));
 
         let items: [&dyn IsMenuItem; 9] = [
             &explorer,

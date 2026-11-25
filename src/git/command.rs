@@ -56,12 +56,10 @@ fn run_impl(repo: &Path, args: &[&str], input: Option<&str>) -> Result<Output> {
     {
         stdin
             .write_all(input.as_bytes())
-            .context("no se pudo escribir en la entrada de Git")?;
+            .context("could not write to Git stdin")?;
     }
 
-    let output = child
-        .wait_with_output()
-        .context("no se pudo esperar a Git")?;
+    let output = child.wait_with_output().context("could not wait for Git")?;
     let stdout = String::from_utf8_lossy(&output.stdout).into_owned();
     let stderr = String::from_utf8_lossy(&output.stderr).into_owned();
 

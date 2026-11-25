@@ -28,14 +28,14 @@ pub enum Kind {
 impl Kind {
     pub fn label(self) -> &'static str {
         match self {
-            Self::History => "historial",
-            Self::Command => "comando",
+            Self::History => "history",
+            Self::Command => "command",
             Self::Builtin => "builtin",
-            Self::Subcommand => "subcomando",
-            Self::Branch => "rama",
-            Self::RemoteBranch => "rama remota",
+            Self::Subcommand => "subcommand",
+            Self::Branch => "branch",
+            Self::RemoteBranch => "remote branch",
             Self::Tag => "tag",
-            Self::Path => "ruta",
+            Self::Path => "path",
         }
     }
 }
@@ -205,7 +205,7 @@ impl Engine {
                                 label: branch.clone(),
                                 kind: Kind::Branch,
                                 detail: if refs.current.as_deref() == Some(branch.as_str()) {
-                                    "rama actual".to_owned()
+                                    "current branch".to_owned()
                                 } else {
                                     Kind::Branch.label().to_owned()
                                 },
@@ -258,9 +258,9 @@ impl Engine {
                     label: path.label,
                     kind: Kind::Path,
                     detail: if path.is_dir {
-                        "directorio".to_owned()
+                        "directory".to_owned()
                     } else {
-                        "archivo".to_owned()
+                        "file".to_owned()
                     },
                     score: if path.is_dir { 93 } else { 92 },
                 });
@@ -576,7 +576,7 @@ mod tests {
         let completion = engine.completion("git checkout fe", &root, &Options::default());
         assert_eq!(completion.candidates[0].kind, Kind::Branch);
         assert_eq!(completion.candidates[0].append, "ature/login");
-        assert_eq!(completion.candidates[0].detail, "rama");
+        assert_eq!(completion.candidates[0].detail, "branch");
 
         let completion = engine.completion("git checkout -b ne", &root, &Options::default());
         assert!(completion.candidates.iter().all(|candidate| {

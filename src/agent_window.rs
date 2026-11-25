@@ -32,10 +32,10 @@ impl Filter {
 
     fn label(self) -> &'static str {
         match self {
-            Self::All => "Todos",
-            Self::Attention => "Atención",
-            Self::Running => "Activos",
-            Self::Finished => "Terminados",
+            Self::All => "All",
+            Self::Attention => "Attention",
+            Self::Running => "Running",
+            Self::Finished => "Finished",
         }
     }
 
@@ -77,9 +77,9 @@ enum OriginFilter {
 impl OriginFilter {
     fn label(self) -> &'static str {
         match self {
-            Self::All => "Origen: Todos",
-            Self::Internal => "Origen: Internos",
-            Self::External => "Origen: Externos",
+            Self::All => "Origin: All",
+            Self::Internal => "Origin: Internal",
+            Self::External => "Origin: External",
         }
     }
 
@@ -112,11 +112,11 @@ enum SortBy {
 impl SortBy {
     fn label(self) -> &'static str {
         match self {
-            Self::Priority => "Orden: Prioridad",
-            Self::Cpu => "Orden: CPU",
-            Self::Memory => "Orden: RAM",
-            Self::Uptime => "Orden: Tiempo",
-            Self::Name => "Orden: Nombre",
+            Self::Priority => "Sort: Priority",
+            Self::Cpu => "Sort: CPU",
+            Self::Memory => "Sort: RAM",
+            Self::Uptime => "Sort: Uptime",
+            Self::Name => "Sort: Name",
         }
     }
 
@@ -143,9 +143,9 @@ impl InspectorTab {
 
     fn label(self) -> &'static str {
         match self {
-            Self::Overview => "Resumen",
-            Self::Console => "Consola",
-            Self::Subagents => "Subagentes",
+            Self::Overview => "Overview",
+            Self::Console => "Console",
+            Self::Subagents => "Subagents",
         }
     }
 
@@ -192,7 +192,6 @@ struct Layout {
     footer: Rect,
     list: Rect,
     detail: Rect,
-    close: Rect,
     refresh: Rect,
     mark_all: Rect,
     launch_toggle: Rect,
@@ -325,7 +324,7 @@ impl AgentWindow {
         let changed = self.snapshot.rows != snapshot.rows;
         self.snapshot = snapshot;
         self.window.set_title(&format!(
-            "Centro de Agentes — {} activos · {} atención · {}",
+            "Agent Center — {} active · {} attention · {}",
             self.snapshot.active_count(),
             self.snapshot.attention_count(),
             format_memory(self.snapshot.total_memory_bytes()),
@@ -688,10 +687,6 @@ impl AgentWindow {
         let layout = self.layout(config);
         self.input_focus = InputFocus::None;
 
-        if layout.close.contains(mx, my) {
-            self.close_requested = true;
-            return;
-        }
         if layout.refresh.contains(mx, my) {
             self.refresh();
             return;
@@ -914,20 +909,20 @@ impl AgentWindow {
 
     fn open_git_for_selected(&mut self) {
         let Some(cwd) = self.selected_row().and_then(|row| row.cwd.clone()) else {
-            self.set_notice("Este agente no tiene directorio conocido".into(), true);
+            self.set_notice("This agent has no known directory".into(), true);
             return;
         };
         let _ = self.proxy.send_event(UserEvent::OpenGitManager { cwd });
-        self.set_notice("Abriendo gestor Git…".into(), false);
+        self.set_notice("Opening Git manager…".into(), false);
     }
 
     fn open_review_for_selected(&mut self) {
         let Some(cwd) = self.selected_row().and_then(|row| row.cwd.clone()) else {
-            self.set_notice("Este agente no tiene directorio conocido".into(), true);
+            self.set_notice("This agent has no known directory".into(), true);
             return;
         };
         let _ = self.proxy.send_event(UserEvent::OpenCodeReview { cwd });
-        self.set_notice("Abriendo Code Review…".into(), false);
+        self.set_notice("Opening Code Review…".into(), false);
     }
 
     fn copy_selected_cwd(&mut self) {
@@ -939,7 +934,7 @@ impl AgentWindow {
         } else if let Some(pid) = row.pid {
             (pid.to_string(), "PID")
         } else {
-            self.set_notice("No hay ruta ni PID para copiar".into(), true);
+            self.set_notice("No path or PID to copy".into(), true);
             return;
         };
         if self.clipboard.is_none() {
@@ -948,15 +943,15 @@ impl AgentWindow {
         if let Some(clipboard) = self.clipboard.as_mut()
             && clipboard.set_text(value.clone()).is_ok()
         {
-            self.set_notice(format!("Copiado ({kind}): {value}"), false);
+            self.set_notice(format!("Copied ({kind}): {value}"), false);
         } else {
-            self.set_notice("No se pudo acceder al portapapeles".into(), true);
+            self.set_notice("Could not access the clipboard".into(), true);
         }
     }
 
     fn send_prompt(&mut self) {
         let Some(pane) = self.selected_row().and_then(|row| row.pane) else {
-            self.set_notice("Solo se puede enviar texto a agentes internos".into(), true);
+            self.set_notice("Text can only be sent to internal agents".into(), true);
             return;
         };
         let text = self.prompt.trim().to_owned();
@@ -978,7 +973,7 @@ impl AgentWindow {
 
     fn focus_prompt(&mut self) {
         if self.selected_row().and_then(|row| row.pane).is_none() {
-            self.set_notice("Solo se puede responder a agentes internos".into(), true);
+            self.set_notice("Only internal agents can be answered".into(), true);
             return;
         }
         self.input_focus = InputFocus::Prompt;
@@ -997,7 +992,7 @@ impl AgentWindow {
             .as_mut()
             .and_then(|clipboard| clipboard.get_text().ok());
         let Some(text) = text else {
-            self.set_notice("No se pudo leer el portapapeles".into(), true);
+            self.set_notice("Could not read the clipboard".into(), true);
             return;
         };
         let text: String = text
@@ -1040,22 +1035,22 @@ impl AgentWindow {
             None => (false, false),
         };
         if !internal {
-            self.set_notice("Solo se puede aprobar a agentes internos".into(), true);
+            self.set_notice("Only internal agents can be approved".into(), true);
             return;
         }
         if !blocked {
             self.set_notice(
-                "El agente no está bloqueado; usa I para enviar una respuesta".into(),
+                "The agent is not blocked; press I to send a response".into(),
                 false,
             );
             return;
         }
-        self.send_quick_bytes(b"y\r".to_vec(), "Aprobar (y)");
+        self.send_quick_bytes(b"y\r".to_vec(), "Approve (y)");
     }
 
     fn send_quick_bytes(&mut self, bytes: Vec<u8>, label: &str) {
         let Some(pane) = self.selected_row().and_then(|row| row.pane) else {
-            self.set_notice("Solo se puede controlar agentes internos".into(), true);
+            self.set_notice("Only internal agents can be controlled".into(), true);
             return;
         };
         let _ = self.proxy.send_event(UserEvent::SendAgentInput {
@@ -1078,7 +1073,7 @@ impl AgentWindow {
             return;
         };
         if !row.state.is_finished() || row.seen {
-            self.set_notice("Este agente no tiene aviso pendiente".into(), false);
+            self.set_notice("This agent has no pending notification".into(), false);
             return;
         }
         let id = row.id.clone();
@@ -1102,7 +1097,7 @@ impl AgentWindow {
             .selected_row()
             .and_then(|row| Some((row.id.clone(), row.pid?)))
         else {
-            self.set_notice("Este agente no tiene un proceso que matar".into(), true);
+            self.set_notice("This agent has no process to kill".into(), true);
             self.kill_armed = None;
             return;
         };
@@ -1121,17 +1116,13 @@ impl AgentWindow {
     }
 
     pub fn on_kill_requested(&mut self, pid: u32) {
-        self.set_notice(format!("Deteniendo PID {pid}…"), false);
+        self.set_notice(format!("Stopping PID {pid}…"), false);
     }
 
     pub fn on_agent_killed(&mut self, pid: u32, result: &Result<String, String>) {
         let (text, error) = match result {
             Ok(message) => {
-                let message = match message.as_str() {
-                    "terminated" => "terminado",
-                    "force-killed" => "terminado a la fuerza",
-                    other => other,
-                };
+                let message = message.as_str();
                 (format!("PID {pid}: {message}"), false)
             }
             Err(message) => (format!("PID {pid}: {message}"), true),
@@ -1214,34 +1205,28 @@ impl AgentWindow {
         let gap = ui::px(8.0, scale);
         let header_height = ui::px(ui::HEADER_HEIGHT, scale);
         let footer_height = ui::px(ui::FOOTER_HEIGHT, scale);
-        let close_size = ui::px(ui::CLOSE_SIZE, scale);
-
-        let close = Rect::new(
-            (width - padding - close_size).max(0.0),
-            ((header_height - close_size) / 2.0).max(0.0),
-            close_size,
-            close_size,
-        );
+        let button_size = ui::px(ui::CLOSE_SIZE, scale);
+        let button_y = ((header_height - button_size) / 2.0).max(0.0);
         let refresh_w = ui::px(106.0, scale);
         let refresh = Rect::new(
-            (close.x - refresh_w - gap).max(padding),
-            close.y,
+            (width - padding - refresh_w).max(padding),
+            button_y,
             refresh_w,
-            close_size,
+            button_size,
         );
         let mark_w = ui::px(82.0, scale);
         let mark_all = Rect::new(
             (refresh.x - mark_w - gap).max(padding),
-            close.y,
+            button_y,
             mark_w,
-            close_size,
+            button_size,
         );
         let launch_w = ui::px(98.0, scale);
         let launch_toggle = Rect::new(
             (mark_all.x - launch_w - gap).max(padding),
-            close.y,
+            button_y,
             launch_w,
-            close_size,
+            button_size,
         );
 
         let mut cursor_y = header_height;
@@ -1374,7 +1359,7 @@ impl AgentWindow {
         );
         let prompt_send = Rect::new(prompt_box.right() + gap, prompt_y, send_w, prompt_h);
 
-        // Quick action chips above prompt (Sí, Enter, Ctrl+C)
+        // Quick action chips above prompt (Yes, Enter, Ctrl+C)
         let quick_h = ui::px(24.0, scale);
         let quick_y = (prompt_y - quick_h - ui::px(6.0, scale)).max(insp_tab_y + insp_tab_h);
         let quick_w = ((avail_w - gap * 2.0) / 3.0).min(ui::px(110.0, scale));
@@ -1399,7 +1384,6 @@ impl AgentWindow {
             footer: Rect::new(0.0, body_bottom, width, footer_height),
             list,
             detail,
-            close,
             refresh,
             mark_all,
             launch_toggle,
@@ -1521,7 +1505,7 @@ impl AgentWindow {
         let scale = tokens.scale;
         let title_width = (layout.launch_toggle.x - layout.padding * 2.0).max(1.0);
         labels.push(Label {
-            text: "Centro de Agentes".into(),
+            text: "Agent Center".into(),
             x: layout.padding,
             y: ui::px(9.0, scale),
             width: title_width,
@@ -1533,10 +1517,10 @@ impl AgentWindow {
         let attention = self.snapshot.attention_count();
         let active = self.snapshot.active_count();
         let subtitle = if self.snapshot.rows.is_empty() {
-            "Sin agentes detectados · pulsa + Lanzar o abre uno en la terminal".to_owned()
+            "No agents detected · click + Launch or open one in the terminal".to_owned()
         } else {
             format!(
-                "{} activos · {} atención · {} detectados · {} subagentes",
+                "{} active · {} attention · {} detected · {} subagents",
                 active,
                 attention,
                 self.snapshot.rows.len(),
@@ -1563,9 +1547,9 @@ impl AgentWindow {
             ButtonSpec {
                 rect: layout.launch_toggle,
                 label: if self.launcher_open {
-                    "Cerrar +"
+                    "Close +"
                 } else {
-                    "+ Lanzar"
+                    "+ Launch"
                 },
                 kind: if self.launcher_open {
                     ButtonKind::Secondary
@@ -1590,7 +1574,7 @@ impl AgentWindow {
             labels,
             ButtonSpec {
                 rect: layout.mark_all,
-                label: "Vistos",
+                label: "Seen",
                 kind: ButtonKind::Ghost,
                 enabled: has_unseen,
                 hovered: layout.mark_all.contains(cursor.0, cursor.1),
@@ -1608,30 +1592,11 @@ impl AgentWindow {
             labels,
             ButtonSpec {
                 rect: layout.refresh,
-                label: if refreshing {
-                    "Escaneando…"
-                } else {
-                    "Actualizar"
-                },
+                label: if refreshing { "Scanning…" } else { "Refresh" },
                 kind: ButtonKind::Ghost,
                 enabled: !refreshing,
                 hovered: layout.refresh.contains(cursor.0, cursor.1),
                 focused: false,
-            },
-            theme,
-            tokens,
-        );
-
-        ui::icon_button(
-            quads,
-            labels,
-            IconButtonSpec {
-                rect: layout.close,
-                glyph: "×",
-                enabled: true,
-                hovered: layout.close.contains(cursor.0, cursor.1),
-                focused: false,
-                danger: false,
             },
             theme,
             tokens,
@@ -1669,10 +1634,10 @@ impl AgentWindow {
             .selected_row()
             .and_then(|row| row.cwd.as_deref())
             .map(short_path)
-            .unwrap_or_else(|| "el directorio actual".into());
+            .unwrap_or_else(|| "the current directory".into());
         labels.push(Label {
             text: truncate(
-                &format!("Lanzar en {target_dir}:"),
+                &format!("Launch in {target_dir}:"),
                 ui::px(200.0, scale),
                 tokens.caption,
             ),
@@ -1737,19 +1702,19 @@ impl AgentWindow {
         let cpu = format_cpu(self.snapshot.total_cpu_tenths());
         let (add, del) = self.snapshot.total_git_diff();
         let git_value = if add == 0 && del == 0 {
-            "Limpio".into()
+            "Clean".into()
         } else {
             format!("+{add} -{del}")
         };
         let active_value = if blocked > 0 {
-            format!("{active} · {blocked} bloq.")
+            format!("{active} · {blocked} blocked")
         } else {
             active.to_string()
         };
 
         let cards: [(&str, String, Rgb); 4] = [
             (
-                "ACTIVOS",
+                "ACTIVE",
                 active_value,
                 if active > 0 {
                     theme.ansi[6]
@@ -1758,11 +1723,11 @@ impl AgentWindow {
                 },
             ),
             (
-                "ATENCIÓN",
+                "ATTENTION",
                 if attention == 0 {
-                    "Todo al día".into()
+                    "All caught up".into()
                 } else {
-                    format!("{attention} pendiente(s)")
+                    format!("{attention} pending")
                 },
                 if attention > 0 {
                     theme.ansi[3]
@@ -1770,9 +1735,9 @@ impl AgentWindow {
                     theme.ansi[2]
                 },
             ),
-            ("RECURSOS", format!("{cpu} · {mem}"), theme.sidebar_text),
+            ("RESOURCES", format!("{cpu} · {mem}"), theme.sidebar_text),
             (
-                "DIFF GIT",
+                "GIT DIFF",
                 git_value,
                 if add > 0 || del > 0 {
                     theme.accent
@@ -1846,9 +1811,9 @@ impl AgentWindow {
         }
         let search_text = if self.search.is_empty() {
             if search_focused {
-                "Escribe para filtrar…".to_owned()
+                "Type to filter…".to_owned()
             } else {
-                "/ Buscar por nombre, rama, ruta, PID…".to_owned()
+                "/ Search by name, branch, path, PID…".to_owned()
             }
         } else if search_focused {
             format!("{}|", self.search)
@@ -2008,13 +1973,13 @@ impl AgentWindow {
             }
             let (title, body) = if self.snapshot.rows.is_empty() {
                 (
-                    "Sin agentes activos",
-                    "Pulsa '+ Lanzar' (tecla N) para iniciar Claude, Codex, OpenCode o Junie.",
+                    "No active agents",
+                    "Press '+ Launch' (N) to start Claude, Codex, OpenCode, or Junie.",
                 )
             } else {
                 (
-                    "Sin coincidencias",
-                    "Ajusta la búsqueda, el filtro de estado o el filtro de origen.",
+                    "No matches",
+                    "Adjust the search, status filter, or origin filter.",
                 )
             };
             ui::empty_state(quads, labels, layout.list_rows, title, body, theme, tokens);
@@ -2139,7 +2104,7 @@ impl AgentWindow {
                 .as_deref()
                 .or(row.title.as_deref())
                 .or_else(|| row.preview_lines.last().map(String::as_str))
-                .unwrap_or("En ejecución sin mensaje");
+                .unwrap_or("Running without a message");
             labels.push(Label {
                 text: truncate(summary, text_width + meta_width * 0.4, tokens.caption),
                 x: text_x,
@@ -2293,8 +2258,8 @@ impl AgentWindow {
                 quads,
                 labels,
                 layout.detail,
-                "Inspector de Agente",
-                "Selecciona un agente para inspeccionar telemetría, consola en vivo, subagentes y enviar comandos.",
+                "Agent Inspector",
+                "Select an agent to inspect telemetry, live console, subagents, and send commands.",
                 theme,
                 tokens,
             );
@@ -2372,7 +2337,7 @@ impl AgentWindow {
                 labels,
                 ButtonSpec {
                     rect: layout.quick_yes,
-                    label: "Aprobar (y)",
+                    label: "Approve (y)",
                     kind: ButtonKind::Secondary,
                     enabled: row.is_blocked(),
                     hovered: layout.quick_yes.contains(cursor.0, cursor.1),
@@ -2386,7 +2351,7 @@ impl AgentWindow {
                 labels,
                 ButtonSpec {
                     rect: layout.quick_enter,
-                    label: "Enviar Enter",
+                    label: "Send Enter",
                     kind: ButtonKind::Secondary,
                     enabled: true,
                     hovered: layout.quick_enter.contains(cursor.0, cursor.1),
@@ -2424,9 +2389,9 @@ impl AgentWindow {
             }
             let prompt_label = if self.prompt.is_empty() {
                 if prompt_focused {
-                    "Escribe comando o respuesta y pulsa Enter…".to_owned()
+                    "Type a command or response and press Enter…".to_owned()
                 } else {
-                    "I · Enviar mensaje rápido al agente…".to_owned()
+                    "I · Send a quick message to the agent…".to_owned()
                 }
             } else if prompt_focused {
                 format!("{}|", self.prompt)
@@ -2455,7 +2420,7 @@ impl AgentWindow {
                 labels,
                 ButtonSpec {
                     rect: layout.prompt_send,
-                    label: "Enviar",
+                    label: "Send",
                     kind: ButtonKind::Primary,
                     enabled: true,
                     hovered: layout.prompt_send.contains(cursor.0, cursor.1),
@@ -2501,7 +2466,7 @@ impl AgentWindow {
             labels,
             ButtonSpec {
                 rect: layout.copy_action,
-                label: "C · Copiar",
+                label: "C · Copy",
                 kind: ButtonKind::Secondary,
                 enabled: has_cwd || row.pid.is_some(),
                 hovered: layout.copy_action.contains(cursor.0, cursor.1),
@@ -2515,7 +2480,7 @@ impl AgentWindow {
             labels,
             ButtonSpec {
                 rect: layout.seen_action,
-                label: "M · Visto",
+                label: "M · Seen",
                 kind: ButtonKind::Secondary,
                 enabled: row.state.is_finished() && !row.seen,
                 hovered: layout.seen_action.contains(cursor.0, cursor.1),
@@ -2527,7 +2492,7 @@ impl AgentWindow {
 
         // Primary focus & Danger kill row
         if let Some(pane) = row.pane {
-            let label = format!("Enter · Enfocar pane {}", pane.0);
+            let label = format!("Enter · Focus pane {}", pane.0);
             ui::button(
                 quads,
                 labels,
@@ -2548,7 +2513,7 @@ impl AgentWindow {
                 labels,
                 ButtonSpec {
                     rect: layout.focus_action,
-                    label: "Proceso externo (sin pane)",
+                    label: "External process (no pane)",
                     kind: ButtonKind::Secondary,
                     enabled: false,
                     hovered: false,
@@ -2565,9 +2530,9 @@ impl AgentWindow {
                 .as_ref()
                 .is_some_and(|(id, at)| id == &row.id && at.elapsed() <= Duration::from_secs(4));
             let label = if armed {
-                format!("Confirmar · {pid}")
+                format!("Confirm · {pid}")
             } else {
-                format!("X · Matar {pid}")
+                format!("X · Kill {pid}")
             };
             ui::button(
                 quads,
@@ -2655,7 +2620,7 @@ impl AgentWindow {
             .message
             .as_deref()
             .or(row.title.as_deref())
-            .unwrap_or("Sin mensaje de estado");
+            .unwrap_or("No status message");
         labels.push(Label {
             text: truncate(message, width, tokens.small),
             x,
@@ -2707,14 +2672,14 @@ impl AgentWindow {
                         .unwrap_or_else(|| "—".into()),
                 ),
                 (
-                    "ACTIVIDAD",
+                    "ACTIVITY",
                     row.last_output
                         .map(|t| elapsed_label(t.elapsed()))
                         .or_else(|| (row.started > 0).then(|| duration_since(row.started)))
                         .unwrap_or_else(|| "—".into()),
                 ),
                 (
-                    "HIJOS / SUB",
+                    "CHILDREN / SUB",
                     format!("{} / {}", row.child_processes, row.subagents.len()),
                 ),
             ];
@@ -2768,13 +2733,13 @@ impl AgentWindow {
             meta.push(("Git", format!("{branch}{diff}")));
         }
         if row.started > 0 {
-            meta.push(("Duración", duration_since(row.started)));
+            meta.push(("Duration", duration_since(row.started)));
         }
         if let Some(cwd) = &row.cwd {
-            meta.push(("Directorio", cwd.display().to_string()));
+            meta.push(("Directory", cwd.display().to_string()));
         }
         if let Some(cmd) = &row.command {
-            meta.push(("Comando", cmd.clone()));
+            meta.push(("Command", cmd.clone()));
         }
 
         let preview_reserve = if !row.preview_lines.is_empty() {
@@ -2817,7 +2782,7 @@ impl AgentWindow {
                 quads,
                 labels,
                 box_rect,
-                "SALIDA RECIENTE",
+                "RECENT OUTPUT",
                 &row.preview_lines,
                 0,
                 theme,
@@ -2841,8 +2806,8 @@ impl AgentWindow {
                 quads,
                 labels,
                 area,
-                "Consola no disponible",
-                "Los procesos externos no pertenecen a un pane de F-Terminal; solo se puede ver telemetría del sistema.",
+                "Console unavailable",
+                "External processes do not belong to an F-Terminal pane; only system telemetry is available.",
                 theme,
                 tokens,
             );
@@ -2853,8 +2818,8 @@ impl AgentWindow {
                 quads,
                 labels,
                 area,
-                "Sin salida visible todavía",
-                "Cuando el agente escriba en la terminal, las últimas líneas aparecerán aquí en vivo.",
+                "No visible output yet",
+                "When the agent writes to the terminal, the latest lines will appear here live.",
                 theme,
                 tokens,
             );
@@ -2862,8 +2827,8 @@ impl AgentWindow {
         }
         let header = row
             .last_output
-            .map(|at| format!("CONSOLA · últ. salida {}", elapsed_label(at.elapsed())))
-            .unwrap_or_else(|| "CONSOLA EN VIVO".into());
+            .map(|at| format!("CONSOLE · last output {}", elapsed_label(at.elapsed())))
+            .unwrap_or_else(|| "LIVE CONSOLE".into());
         draw_preview_box(
             quads,
             labels,
@@ -2891,7 +2856,7 @@ impl AgentWindow {
 
         labels.push(Label {
             text: format!(
-                "Árbol de procesos: {} descendiente(s) · {} subagente(s) registrados",
+                "Process tree: {} descendant(s) · {} registered subagent(s)",
                 row.child_processes,
                 row.subagents.len()
             ),
@@ -2921,13 +2886,13 @@ impl AgentWindow {
             let empty_rect = Rect::new(area.x, y, area.width, (area.bottom() - y).max(1.0));
             let (title, body) = if row.child_processes > 0 {
                 (
-                    format!("{} procesos hijo activos", row.child_processes),
-                    "El agente no publica subagentes por OSC. Puedes inspectar el proceso raíz con su PID y comando; el detalle individual de los hijos no está disponible.".to_owned(),
+                    format!("{} active child processes", row.child_processes),
+                    "The agent does not publish subagents over OSC. You can inspect the root process with its PID and command; individual child details are not available.".to_owned(),
                 )
             } else {
                 (
-                    "Sin subagentes reportados".to_owned(),
-                    "Cuando el agente publique subagentes vía protocolo (OSC), aparecerán aquí con su progreso individual.".to_owned(),
+                    "No subagents reported".to_owned(),
+                    "When the agent publishes subagents over the protocol (OSC), they will appear here with their individual progress.".to_owned(),
                 )
             };
             ui::empty_state(quads, labels, empty_rect, &title, &body, theme, tokens);
@@ -3015,27 +2980,25 @@ impl AgentWindow {
                     .snapshot
                     .generated
                     .map(|generated| elapsed_label(generated.elapsed()))
-                    .unwrap_or_else(|| "nunca".into());
+                    .unwrap_or_else(|| "never".into());
                 let text = match self.input_focus {
                     InputFocus::Search => {
                         let count = self.filtered().len();
                         format!(
-                            "Búsqueda activa · {count} resultado(s) · ↑↓ mover · Enter confirmar · Esc limpiar"
+                            "Active search · {count} result(s) · ↑↓ move · Enter confirm · Esc clear"
                         )
                     }
-                    InputFocus::Prompt => {
-                        "Mensaje rápido · Enter enviar al pane · Esc cancelar".into()
-                    }
+                    InputFocus::Prompt => "Quick message · Enter send to pane · Esc cancel".into(),
                     InputFocus::None if self.launcher_open => {
-                        "Lanzador: 1 Claude · 2 Codex · 3 OpenCode · 4 Junie · Esc cerrar".into()
+                        "Launcher: 1 Claude · 2 Codex · 3 OpenCode · 4 Junie · Esc close".into()
                     }
                     InputFocus::None => {
                         let approve = self
                             .selected_row()
                             .is_some_and(|row| row.is_blocked() && row.pane.is_some());
-                        let prefix = if approve { "Y aprobar · " } else { "" };
+                        let prefix = if approve { "Y approve · " } else { "" };
                         format!(
-                            "{prefix}/ buscar · I responder · N lanzar · S ordenar · E origen · [ ] pestañas · G git · V review · X matar · {updated}"
+                            "{prefix}/ search · I respond · N launch · S sort · E origin · [ ] tabs · G git · V review · X kill · {updated}"
                         )
                     }
                 };
@@ -3161,7 +3124,7 @@ fn draw_preview_box(
     let end = lines.len() - scroll;
     let start = end.saturating_sub(max_lines);
     let header = if lines.len() > max_lines {
-        format!("{header} · {}-{} de {}", start + 1, end, lines.len())
+        format!("{header} · {}-{} of {}", start + 1, end, lines.len())
     } else {
         header.to_owned()
     };
@@ -3305,13 +3268,13 @@ fn truncate(text: &str, max_width: f32, font_size: f32) -> String {
 fn elapsed_label(elapsed: Duration) -> String {
     let seconds = elapsed.as_secs();
     if seconds < 1 {
-        "ahora".into()
+        "now".into()
     } else if seconds < 60 {
-        format!("hace {seconds}s")
+        format!("{seconds}s ago")
     } else if seconds < 3600 {
-        format!("hace {}m", seconds / 60)
+        format!("{}m ago", seconds / 60)
     } else {
-        format!("hace {}h", seconds / 3600)
+        format!("{}h ago", seconds / 3600)
     }
 }
 
@@ -3350,7 +3313,7 @@ mod tests {
             id: AgentId::External { pid },
             kind,
             state,
-            message: Some("trabajando en refactor".into()),
+            message: Some("working on refactor".into()),
             title: None,
             cwd: Some(PathBuf::from("/workspace/f-terminal")),
             pane: Some(PaneId(u64::from(pid))),

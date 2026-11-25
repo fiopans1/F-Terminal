@@ -542,7 +542,7 @@ show_user_in_prompt = true
 sidebar_width = 210.0
 ui_font_size = 12.5
 option_as_meta = {option_as_meta}
-# Temas: foundry, tokyo-night, catppuccin-mocha, dracula, nord, gruvbox-dark,
+# Themes: foundry, tokyo-night, catppuccin-mocha, dracula, nord, gruvbox-dark,
 # one-dark, solarized-dark, github-dark, kanagawa.
 theme = "foundry"
 

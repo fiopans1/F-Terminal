@@ -29,6 +29,11 @@ pub const SESSION_VERSION: u32 = 1;
 const MAX_SESSION_BYTES: u64 = 16 * 1024 * 1024;
 pub const MAX_SCROLLBACK_BYTES: u64 = 16 * 1024 * 1024;
 
+/// Marker at the start of every scrollback file written by the current format.
+/// Files without it come from the first implementation, which also saved the
+/// blank rows below the cursor, so they are sanitized when they are read.
+pub(crate) const SCROLLBACK_MAGIC: &str = "\x1b[0m\x1b[0m";
+
 /// Everything needed to recreate the main window.
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 #[serde(default)]
@@ -259,10 +264,9 @@ fn write_job(root: &Path, job: SaveJob) -> anyhow::Result<()> {
         let Some(ansi) = ansi_from_grid(&source.grid, source.size, source.theme) else {
             continue;
         };
-        if ansi.is_empty() {
-            continue;
-        }
         let path = scrollback_dir.join(format!("{:016x}.ansi", source.key));
+        // Always rewrite, even when there is no history left, so an old file
+        // cannot resurrect content that has since been cleared.
         write_atomic(&path, ansi.as_bytes())?;
     }
 
@@ -379,7 +383,7 @@ pub fn read_scrollback(path: &Path) -> Option<Vec<u8>> {
         return None;
     }
     match fs::read(path) {
-        Ok(bytes) => Some(bytes),
+        Ok(bytes) => decode_scrollback(&bytes),
         Err(error) => {
             log::warn!("could not read {}: {error}", path.display());
             None
@@ -387,9 +391,86 @@ pub fn read_scrollback(path: &Path) -> Option<Vec<u8>> {
     }
 }
 
+fn decode_scrollback(bytes: &[u8]) -> Option<Vec<u8>> {
+    if let Some(history) = bytes.strip_prefix(SCROLLBACK_MAGIC.as_bytes()) {
+        return (!history.is_empty()).then(|| history.to_vec());
+    }
+
+    let history = sanitize_legacy_scrollback(bytes);
+    (!history.is_empty()).then_some(history)
+}
+
+/// Older builds exported the whole viewport, including the blank rows after
+/// the cursor and the live prompt line. Replaying that content put the new
+/// prompt at the bottom of the pane and added more blank rows on every
+/// restart. Trim that padding once so existing sessions heal on load.
+fn sanitize_legacy_scrollback(bytes: &[u8]) -> Vec<u8> {
+    let mut rows: Vec<&[u8]> = bytes
+        .split(|byte| *byte == b'\n')
+        .map(|row| row.strip_suffix(b"\r").unwrap_or(row))
+        .collect();
+    if rows.last().is_some_and(|row| row.is_empty()) {
+        rows.pop();
+    }
+
+    let start = rows
+        .iter()
+        .position(|row| !ansi_row_is_blank(row))
+        .unwrap_or(rows.len());
+    rows.drain(..start);
+
+    trim_blank_rows(&mut rows);
+    // The final non-blank row was where the old shell cursor lived. The new
+    // shell prints its own prompt there, so keeping it would duplicate it.
+    if !rows.is_empty() {
+        rows.pop();
+    }
+    trim_blank_rows(&mut rows);
+
+    let mut output = Vec::new();
+    for row in rows {
+        output.extend_from_slice(row);
+        output.extend_from_slice(b"\r\n");
+    }
+    output
+}
+
+fn trim_blank_rows(rows: &mut Vec<&[u8]>) {
+    while rows.last().is_some_and(|row| ansi_row_is_blank(row)) {
+        rows.pop();
+    }
+}
+
+/// A row with only SGR escapes and whitespace has no visible content.
+fn ansi_row_is_blank(mut row: &[u8]) -> bool {
+    while let Some((&byte, rest)) = row.split_first() {
+        match byte {
+            b' ' | b'\t' => row = rest,
+            b'\x1b' => {
+                let Some((&b'[', rest)) = rest.split_first() else {
+                    return false;
+                };
+                let mut index = 0;
+                while index < rest.len() {
+                    let byte = rest[index];
+                    index += 1;
+                    if (0x40..=0x7e).contains(&byte) {
+                        break;
+                    }
+                }
+                row = &rest[index..];
+            }
+            _ => return false,
+        }
+    }
+    true
+}
+
 /// Turn a cloned terminal grid into the ANSI stream replayed before the shell
 /// starts. Only text, colors and line breaks are emitted; OSC notifications,
-/// titles and clipboard requests never reach the new terminal.
+/// titles and clipboard requests never reach the new terminal. Rows below the
+/// cursor are the empty tail of the viewport and are left out: saving them
+/// pushed the next prompt to the bottom on every relaunch.
 pub fn ansi_from_grid(grid: &Grid<Cell>, size: GridSize, theme: Theme) -> Option<String> {
     let columns = size.cols.min(grid.columns());
     if columns == 0 {
@@ -398,9 +479,12 @@ pub fn ansi_from_grid(grid: &Grid<Cell>, size: GridSize, theme: Theme) -> Option
 
     let top = grid.topmost_line().0;
     let bottom = grid.bottommost_line().0;
-    let mut output = String::new();
+    // The cursor row is the live prompt/input line. It is recreated by the new
+    // shell, so it is not part of the history either.
+    let end = grid.cursor.point.line.0.clamp(top, bottom + 1);
+    let mut output = String::from(SCROLLBACK_MAGIC);
 
-    for line in top..=bottom {
+    for line in top..end {
         let row = &grid[Line(line)];
         let mut last = 0;
         for column in 0..columns {
@@ -662,9 +746,72 @@ mod tests {
 
     #[test]
     fn trailing_blank_cells_are_trimmed() {
-        let (grid, size) = grid_for("ok");
+        let (grid, size) = grid_for("ok\r\n");
         let ansi = ansi_from_grid(&grid, size, Theme::foundry()).unwrap();
         assert!(ansi.contains("ok"));
         assert!(!ansi.contains("ok                          "));
+    }
+
+    #[test]
+    fn scrollback_omits_the_cursor_row_and_the_viewport_tail() {
+        let (grid, size) = grid_for("first\r\nsecond\r\n");
+        let ansi = ansi_from_grid(&grid, size, Theme::foundry()).unwrap();
+        let history = ansi.strip_prefix(SCROLLBACK_MAGIC).unwrap();
+
+        assert!(history.contains("first"));
+        assert!(history.contains("second"));
+        assert_eq!(history.matches("\r\n").count(), 2);
+        assert!(!history.contains("\r\n\r\n"));
+    }
+
+    #[test]
+    fn a_fresh_prompt_is_not_saved_as_history() {
+        let (grid, size) = grid_for("prompt$ ");
+        let ansi = ansi_from_grid(&grid, size, Theme::foundry()).unwrap();
+        assert_eq!(ansi, SCROLLBACK_MAGIC);
+        assert!(decode_scrollback(ansi.as_bytes()).is_none());
+    }
+
+    #[test]
+    fn legacy_scrollback_drops_padding_and_the_live_prompt() {
+        let legacy = b"\x1b[0m\r\n\x1b[0mold output\r\n\x1b[0m$ prompt\r\n\x1b[0m\r\n\x1b[0m\r\n";
+        assert_eq!(sanitize_legacy_scrollback(legacy), b"\x1b[0mold output\r\n");
+    }
+
+    #[test]
+    fn decode_keeps_current_scrollback_intact() {
+        let mut bytes = String::from(SCROLLBACK_MAGIC);
+        bytes.push_str("\x1b[0mhistory\r\n");
+        assert_eq!(
+            decode_scrollback(bytes.as_bytes()),
+            Some(b"\x1b[0mhistory\r\n".to_vec())
+        );
+    }
+
+    #[test]
+    fn restored_history_keeps_the_new_prompt_after_the_last_line() {
+        let size = GridSize {
+            cols: 40,
+            lines: 10,
+        };
+        let mut source = Term::new(TermConfig::default(), &size, VoidListener);
+        let mut parser: vte::ansi::Processor = vte::ansi::Processor::new();
+        parser.advance(&mut source, b"first\r\nsecond\r\n");
+        let ansi = ansi_from_grid(source.grid(), size, Theme::foundry()).unwrap();
+        let history = decode_scrollback(ansi.as_bytes()).unwrap();
+
+        let mut restored = Term::new(TermConfig::default(), &size, VoidListener);
+        let mut parser: vte::ansi::Processor = vte::ansi::Processor::new();
+        parser.advance(&mut restored, &history);
+        parser.advance(&mut restored, b"prompt$ ");
+
+        let row_text = |line: i32| {
+            let row = &restored.grid()[Line(line)];
+            row.into_iter().map(|cell| cell.c).collect::<String>()
+        };
+        assert_eq!(restored.grid().cursor.point.line.0, 2);
+        assert!(row_text(0).starts_with("first"));
+        assert!(row_text(1).starts_with("second"));
+        assert!(row_text(2).starts_with("prompt$"));
     }
 }

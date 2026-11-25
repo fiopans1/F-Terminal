@@ -59,7 +59,7 @@ pub(crate) fn build_diff_rows(detail: &ReviewDetail) -> Vec<DiffRow> {
         if file.binary {
             rows.push(DiffRow {
                 kind: DiffRowKind::Meta,
-                text: "Archivo binario".to_owned(),
+                text: "Binary file".to_owned(),
             });
             continue;
         }

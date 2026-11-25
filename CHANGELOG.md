@@ -85,6 +85,12 @@ usa [Versionado Semántico](https://semver.org/lang/es/).
 
 ### Changed
 
+- La interfaz está ahora íntegramente en inglés: menús, sidebar, ventanas Git,
+  Code Review y Agentes, estados, atajos y mensajes de estado.
+- Las ventanas Git, Code Review y Agentes ya no dibujan una “×” de cierre
+  propia; se cierran con el botón nativo de la ventana.
+- El terminal y la UI usan shaping avanzado con fallback para emojis, símbolos
+  y otros caracteres que no están en la fuente principal.
 - `Ctrl+Shift+F` / `Cmd+Shift+F` abre la búsqueda en el scrollback; la sidebar
   cambia entre Sesiones y Archivos con `Ctrl+Shift+E` / `Cmd+Shift+E`. En
   Linux/Windows el split inferior pasa de `Ctrl+Shift+E` a `Ctrl+Shift+Down`.
@@ -103,6 +109,9 @@ usa [Versionado Semántico](https://semver.org/lang/es/).
 
 ### Fixed
 
+- Al restaurar la sesión, el scrollback ya no guarda las filas vacías de debajo
+  del cursor ni la línea viva del prompt: el prompt reaparece donde estaba en
+  lugar de acumular líneas en blanco y saltar al fondo en cada reinicio.
 - El cursor del editor se coloca ahora al hacer clic y el frame cacheado se
   invalida, por lo que el cursor se mueve de inmediato.
 - La respuesta del editor al teclear ya no se bloquea con el resaltado de

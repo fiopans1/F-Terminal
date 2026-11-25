@@ -60,21 +60,21 @@ pub enum Action {
 impl Action {
     pub fn label(&self) -> &'static str {
         match self {
-            Self::Stage { .. } | Self::StageAll => "Preparando",
-            Self::Unstage { .. } | Self::UnstageAll => "Quitando de preparados",
-            Self::Discard { .. } => "Descartando",
-            Self::Commit { .. } => "Confirmando",
-            Self::Checkout { .. } => "Cambiando de rama",
-            Self::CreateBranch { .. } => "Creando rama",
-            Self::DeleteBranch { .. } => "Borrando rama",
-            Self::Fetch => "Fetch en curso",
-            Self::Pull => "Pull en curso",
-            Self::Push { .. } => "Push en curso",
-            Self::StashSave { .. } => "Guardando stash",
-            Self::StashPop { .. } => "Aplicando stash",
-            Self::StashDrop { .. } => "Borrando stash",
-            Self::Merge { .. } => "Haciendo merge",
-            Self::AbortMerge => "Abortando merge",
+            Self::Stage { .. } | Self::StageAll => "Staging",
+            Self::Unstage { .. } | Self::UnstageAll => "Unstaging",
+            Self::Discard { .. } => "Discarding",
+            Self::Commit { .. } => "Committing",
+            Self::Checkout { .. } => "Switching branches",
+            Self::CreateBranch { .. } => "Creating branch",
+            Self::DeleteBranch { .. } => "Deleting branch",
+            Self::Fetch => "Fetching",
+            Self::Pull => "Pulling",
+            Self::Push { .. } => "Pushing",
+            Self::StashSave { .. } => "Saving stash",
+            Self::StashPop { .. } => "Applying stash",
+            Self::StashDrop { .. } => "Dropping stash",
+            Self::Merge { .. } => "Merging",
+            Self::AbortMerge => "Aborting merge",
         }
     }
 }
@@ -84,14 +84,14 @@ pub fn apply(repo: &Path, action: &Action) -> Result<String> {
         Action::Stage { paths } => {
             if paths.is_empty() {
                 command::run(repo, &["add", "-A"])?;
-                return Ok("Todos los cambios preparados".to_owned());
+                return Ok("All changes staged".to_owned());
             }
             command::run_args(repo, &path_args(&["add", "--"], paths))?;
-            Ok(format!("Preparados: {}", files(paths.len())))
+            Ok(format!("Staged: {}", files(paths.len())))
         }
         Action::StageAll => {
             command::run(repo, &["add", "-A"])?;
-            Ok("Todos los cambios preparados".to_owned())
+            Ok("All changes staged".to_owned())
         }
         Action::Unstage { paths } => {
             if paths.is_empty() {
@@ -100,7 +100,7 @@ pub fn apply(repo: &Path, action: &Action) -> Result<String> {
             if command::run_args(repo, &path_args(&["restore", "--staged", "--"], paths)).is_err() {
                 command::run_args(repo, &path_args(&["reset", "HEAD", "--"], paths))?;
             }
-            Ok(format!("Quitados de preparados: {}", files(paths.len())))
+            Ok(format!("Unstaged: {}", files(paths.len())))
         }
         Action::UnstageAll => {
             if command::run(repo, &["restore", "--staged", "."]).is_err()
@@ -108,22 +108,22 @@ pub fn apply(repo: &Path, action: &Action) -> Result<String> {
             {
                 command::run(repo, &["rm", "-r", "--cached", "--", "."])?;
             }
-            Ok("Todos los cambios quitados de preparados".to_owned())
+            Ok("All changes unstaged".to_owned())
         }
         Action::Discard { paths, untracked } => {
             if paths.is_empty() {
-                bail!("no hay archivos seleccionados para descartar");
+                bail!("no files selected to discard");
             }
             if *untracked {
                 command::run_args(repo, &path_args(&["clean", "-fd", "--"], paths))?;
             } else {
                 command::run_args(repo, &path_args(&["restore", "--worktree", "--"], paths))?;
             }
-            Ok(format!("Descartados: {}", files(paths.len())))
+            Ok(format!("Discarded: {}", files(paths.len())))
         }
         Action::Commit { message, amend } => {
             if message.trim().is_empty() {
-                bail!("el mensaje del commit está vacío");
+                bail!("the commit message is empty");
             }
             let mut args = vec!["commit", "-F", "-"];
             if *amend {
@@ -133,9 +133,9 @@ pub fn apply(repo: &Path, action: &Action) -> Result<String> {
             Ok(first_line(
                 &output,
                 if *amend {
-                    "Commit enmendado"
+                    "Commit amended"
                 } else {
-                    "Commit creado"
+                    "Commit created"
                 },
             ))
         }
@@ -151,7 +151,7 @@ pub fn apply(repo: &Path, action: &Action) -> Result<String> {
             } else if command::run(repo, &["switch", branch]).is_err() {
                 command::run(repo, &["checkout", branch])?;
             }
-            Ok(format!("En la rama {branch}"))
+            Ok(format!("On branch {branch}"))
         }
         Action::CreateBranch { name, checkout } => {
             validate_branch(repo, name)?;
@@ -159,24 +159,24 @@ pub fn apply(repo: &Path, action: &Action) -> Result<String> {
                 if command::run(repo, &["switch", "-c", name]).is_err() {
                     command::run(repo, &["checkout", "-b", name])?;
                 }
-                Ok(format!("Rama {name} creada y activa"))
+                Ok(format!("Branch {name} created and checked out"))
             } else {
                 command::run(repo, &["branch", name])?;
-                Ok(format!("Rama {name} creada"))
+                Ok(format!("Branch {name} created"))
             }
         }
         Action::DeleteBranch { name, force } => {
             let flag = if *force { "-D" } else { "-d" };
             command::run(repo, &["branch", flag, name])?;
-            Ok(format!("Rama {name} borrada"))
+            Ok(format!("Branch {name} deleted"))
         }
         Action::Fetch => {
             command::run(repo, &["fetch", "--all", "--prune"])?;
-            Ok("Fetch completado".to_owned())
+            Ok("Fetch complete".to_owned())
         }
         Action::Pull => {
             command::run(repo, &["pull", "--ff-only"])?;
-            Ok("Pull completado".to_owned())
+            Ok("Pull complete".to_owned())
         }
         Action::Push {
             branch,
@@ -184,10 +184,10 @@ pub fn apply(repo: &Path, action: &Action) -> Result<String> {
         } => {
             if *set_upstream {
                 command::run(repo, &["push", "-u", "origin", branch])?;
-                Ok(format!("Push completado · upstream origin/{branch}"))
+                Ok(format!("Push complete · upstream origin/{branch}"))
             } else {
                 command::run(repo, &["push"])?;
-                Ok("Push completado".to_owned())
+                Ok("Push complete".to_owned())
             }
         }
         Action::StashSave {
@@ -203,23 +203,23 @@ pub fn apply(repo: &Path, action: &Action) -> Result<String> {
                 args.push(message.trim().to_owned());
             }
             command::run_args(repo, &args)?;
-            Ok("Stash guardado".to_owned())
+            Ok("Stash saved".to_owned())
         }
         Action::StashPop { index } => {
             command::run(repo, &["stash", "pop", &format!("stash@{{{index}}}")])?;
-            Ok("Stash aplicado".to_owned())
+            Ok("Stash applied".to_owned())
         }
         Action::StashDrop { index } => {
             command::run(repo, &["stash", "drop", &format!("stash@{{{index}}}")])?;
-            Ok("Stash borrado".to_owned())
+            Ok("Stash dropped".to_owned())
         }
         Action::Merge { branch } => {
             command::run(repo, &["merge", branch])?;
-            Ok("Merge completado".to_owned())
+            Ok("Merge complete".to_owned())
         }
         Action::AbortMerge => {
             command::run(repo, &["merge", "--abort"])?;
-            Ok("Merge abortado".to_owned())
+            Ok("Merge aborted".to_owned())
         }
     }
 }
@@ -239,7 +239,7 @@ fn path_args(prefix: &[&str], paths: &[String]) -> Vec<String> {
 fn validate_branch(repo: &Path, name: &str) -> Result<()> {
     let name = name.trim();
     if name.is_empty() {
-        bail!("el nombre de la rama está vacío");
+        bail!("the branch name is empty");
     }
     command::run(repo, &["check-ref-format", "--branch", name])?;
     Ok(())
@@ -247,9 +247,9 @@ fn validate_branch(repo: &Path, name: &str) -> Result<()> {
 
 fn files(count: usize) -> String {
     if count == 1 {
-        "1 archivo".to_owned()
+        "1 file".to_owned()
     } else {
-        format!("{count} archivos")
+        format!("{count} files")
     }
 }
 

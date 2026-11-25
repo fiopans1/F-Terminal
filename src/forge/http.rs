@@ -55,7 +55,7 @@ pub fn get(
     let mut child = command
         .arg(url)
         .spawn()
-        .context("no se pudo ejecutar curl; instala curl para usar reviews remotas")?;
+        .context("could not run curl; install curl to use remote reviews")?;
 
     if let Some(auth) = auth
         && let Some(mut stdin) = child.stdin.take()
@@ -65,24 +65,24 @@ pub fn get(
 
     let output = child
         .wait_with_output()
-        .context("no se pudo esperar la petición al forge")?;
+        .context("could not wait for the forge request")?;
 
     if !output.status.success() {
         bail!(
-            "la petición a {service} falló: {}",
+            "the request to {service} failed: {}",
             String::from_utf8_lossy(&output.stderr).trim()
         );
     }
 
     let response = String::from_utf8_lossy(&output.stdout);
     let Some((body, status)) = response.rsplit_once('\n') else {
-        bail!("respuesta inesperada de la API de {service}");
+        bail!("unexpected response from the {service} API");
     };
     let status = status.trim();
 
     if status != "200" {
         bail!(
-            "la API de {service} devolvió HTTP {status}{hint}: {}",
+            "the {service} API returned HTTP {status}{hint}: {}",
             body.trim()
         );
     }

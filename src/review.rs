@@ -294,10 +294,10 @@ fn repository_root(start: &Path) -> Result<PathBuf> {
     };
 
     let output = git_at(start, &["rev-parse", "--show-toplevel"])
-        .with_context(|| format!("no se pudo inspeccionar {}", start.display()))?;
+        .with_context(|| format!("could not inspect {}", start.display()))?;
     let root = output.trim();
     if root.is_empty() {
-        bail!("no es un repositorio Git: {}", start.display());
+        bail!("not a Git repository: {}", start.display());
     }
     Ok(PathBuf::from(root))
 }
@@ -328,12 +328,12 @@ fn load_reviews(repo: &Path) -> Result<Vec<ReviewSummary>> {
         let stat = stat.trim();
         let subtitle = match (stat.is_empty(), untracked) {
             (false, 0) => stat.to_owned(),
-            (false, count) => format!("{stat} · {count} sin seguimiento"),
-            (true, 0) => "cambios sin commitear".to_owned(),
-            (true, count) => format!("{count} archivo(s) sin seguimiento"),
+            (false, count) => format!("{stat} · {count} untracked"),
+            (true, 0) => "uncommitted changes".to_owned(),
+            (true, count) => format!("{count} untracked file(s)"),
         };
         reviews.push(ReviewSummary {
-            title: "Cambios locales".to_owned(),
+            title: "Local changes".to_owned(),
             subtitle,
             kind: ReviewKind::Working,
         });
@@ -345,7 +345,7 @@ fn load_reviews(repo: &Path) -> Result<Vec<ReviewSummary>> {
         let stat = stat.trim();
         if !stat.is_empty() {
             reviews.push(ReviewSummary {
-                title: format!("Rama vs {base}"),
+                title: format!("Branch vs {base}"),
                 subtitle: stat.to_owned(),
                 kind: ReviewKind::Branch { base },
             });
@@ -426,7 +426,7 @@ fn untracked_diff(repo: &Path) -> Result<String> {
             || bytes.contains(&0)
         {
             diff.push_str(&format!(
-                "diff --git a/{path} b/{path}\nnew file mode 100644\n--- /dev/null\n+++ b/{path}\n@@ -0,0 +1 @@\n+[archivo sin seguimiento omitido]\n"
+                "diff --git a/{path} b/{path}\nnew file mode 100644\n--- /dev/null\n+++ b/{path}\n@@ -0,0 +1 @@\n+[untracked file omitted]\n"
             ));
             continue;
         }
@@ -661,11 +661,11 @@ fn git_at(repo: &Path, args: &[&str]) -> Result<String> {
         .env("GIT_PAGER", "cat")
         .env("LC_ALL", "C")
         .output()
-        .context("no se pudo ejecutar Git")?;
+        .context("could not run Git")?;
 
     if !output.status.success() {
         let stderr = String::from_utf8_lossy(&output.stderr);
-        bail!("Git {} falló: {}", args.join(" "), stderr.trim());
+        bail!("Git {} failed: {}", args.join(" "), stderr.trim());
     }
 
     Ok(String::from_utf8_lossy(&output.stdout).into_owned())

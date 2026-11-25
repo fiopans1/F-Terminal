@@ -159,7 +159,6 @@ struct Layout {
     center: Rect,
     right: Rect,
     tabs: [Rect; 2],
-    close: Rect,
     list_area: Rect,
     header_buttons: Vec<(HeaderAction, Rect, bool)>,
     left_actions: Vec<(LeftAction, Rect, bool)>,
@@ -527,7 +526,7 @@ impl GitWindow {
             return;
         }
 
-        let was_commit = self.busy.as_deref() == Some("Confirmando");
+        let was_commit = self.busy.as_deref() == Some("Committing");
         let scope = std::mem::replace(&mut self.operation_scope, RefreshScope::Status);
         self.busy = None;
 
@@ -592,7 +591,7 @@ impl GitWindow {
 
         if spawned.is_err() {
             self.loading = false;
-            self.error = Some("No se pudo iniciar la lectura del repositorio Git".to_owned());
+            self.error = Some("Could not start reading the Git repository".to_owned());
         }
         self.window.request_redraw();
     }
@@ -637,7 +636,7 @@ impl GitWindow {
         let target = self.detail_target_for_selection();
         let summary = match &target {
             DetailTarget::Working => ReviewSummary {
-                title: "Árbol de trabajo".to_owned(),
+                title: "Working tree".to_owned(),
                 subtitle: String::new(),
                 kind: ReviewKind::Working,
             },
@@ -684,7 +683,7 @@ impl GitWindow {
 
         if spawned.is_err() {
             self.detail_loading = false;
-            self.detail_error = Some("No se pudo iniciar la lectura del diff".to_owned());
+            self.detail_error = Some("Could not start reading the diff".to_owned());
         }
         self.window.request_redraw();
     }
@@ -720,7 +719,7 @@ impl GitWindow {
         if spawned.is_err() {
             self.busy = None;
             self.toast = Some((
-                "No se pudo iniciar la operación de Git".to_owned(),
+                "Could not start the Git operation".to_owned(),
                 true,
                 Instant::now(),
             ));
@@ -939,8 +938,8 @@ impl GitWindow {
             return;
         };
         self.dialog = Some(Dialog::Confirm {
-            title: "Descartar cambios".to_owned(),
-            message: format!("¿Descartar los cambios en {}?", entry.display_path()),
+            title: "Discard changes".to_owned(),
+            message: format!("Discard changes in {}?", entry.display_path()),
             action: PendingAction::Discard {
                 paths: entry_paths(&entry),
                 untracked: entry.untracked,
@@ -1039,8 +1038,8 @@ impl GitWindow {
             return;
         }
         self.dialog = Some(Dialog::Confirm {
-            title: "Borrar rama".to_owned(),
-            message: format!("¿Borrar la rama {}?", branch.name),
+            title: "Delete branch".to_owned(),
+            message: format!("Delete branch {}?", branch.name),
             action: PendingAction::DeleteBranch {
                 name: branch.name.clone(),
             },
@@ -1071,8 +1070,8 @@ impl GitWindow {
             return;
         };
         self.dialog = Some(Dialog::Confirm {
-            title: "Borrar stash".to_owned(),
-            message: format!("¿Borrar {}?", stash.name),
+            title: "Delete stash".to_owned(),
+            message: format!("Delete {}?", stash.name),
             action: PendingAction::DropStash { index: stash.index },
         });
         self.window.request_redraw();
@@ -1080,8 +1079,8 @@ impl GitWindow {
 
     fn request_new_branch(&mut self) {
         self.dialog = Some(Dialog::Input {
-            title: "Nueva rama".to_owned(),
-            prompt: "Nombre de la rama".to_owned(),
+            title: "New branch".to_owned(),
+            prompt: "Branch name".to_owned(),
             value: String::new(),
             action: InputAction::NewBranch,
         });
@@ -1523,11 +1522,6 @@ impl GitWindow {
             return;
         }
 
-        if layout.close.contains(x, y) {
-            self.close_requested = true;
-            return;
-        }
-
         for (action, rect, enabled) in &layout.header_buttons {
             if *enabled && rect.contains(x, y) {
                 match action {
@@ -1541,7 +1535,7 @@ impl GitWindow {
                             self.run_operation(GitAction::Pull);
                         } else {
                             self.toast = Some((
-                                "La rama no tiene upstream configurado".to_owned(),
+                                "The branch has no upstream configured".to_owned(),
                                 true,
                                 Instant::now(),
                             ));
@@ -1838,14 +1832,6 @@ impl GitWindow {
             body.height,
         );
 
-        let close_size = ui::px(ui::CLOSE_SIZE, scale);
-        let close = Rect::new(
-            width - padding - close_size,
-            (header.height - close_size) / 2.0,
-            close_size,
-            close_size,
-        );
-
         let button_height = ui::px(ui::BUTTON_HEIGHT, scale);
         let button_y = (header.height - button_height) / 2.0;
         let gap = 6.0 * scale;
@@ -1854,7 +1840,7 @@ impl GitWindow {
         let pull_width = ui::px(58.0, scale);
         let fetch_width = ui::px(66.0, scale);
         let refresh = Rect::new(
-            close.x - gap - refresh_width,
+            width - padding - refresh_width,
             button_y,
             refresh_width,
             button_height,
@@ -2039,7 +2025,6 @@ impl GitWindow {
             center,
             right,
             tabs,
-            close,
             list_area,
             header_buttons,
             left_actions,
@@ -2151,8 +2136,7 @@ impl GitWindow {
             return;
         };
 
-        self.change_row_kinds
-            .push(ChangeRowKind::Section("Preparados"));
+        self.change_row_kinds.push(ChangeRowKind::Section("Staged"));
         self.change_row_kinds.extend(
             snapshot
                 .status
@@ -2163,7 +2147,7 @@ impl GitWindow {
                 .map(|(index, _)| ChangeRowKind::Entry(ListKind::Staged, index)),
         );
         self.change_row_kinds
-            .push(ChangeRowKind::Section("Cambios"));
+            .push(ChangeRowKind::Section("Changes"));
         self.change_row_kinds.extend(
             snapshot
                 .status
@@ -2174,12 +2158,12 @@ impl GitWindow {
                 .map(|(index, _)| ChangeRowKind::Entry(ListKind::Unstaged, index)),
         );
 
-        self.ref_row_kinds.push(RefRowKind::Section("Ramas"));
+        self.ref_row_kinds.push(RefRowKind::Section("Branches"));
         self.ref_row_kinds.extend(
             (0..snapshot.refs.local_branches.len())
                 .map(|index| RefRowKind::Target(RefTarget::Local(index))),
         );
-        self.ref_row_kinds.push(RefRowKind::Section("Remotos"));
+        self.ref_row_kinds.push(RefRowKind::Section("Remotes"));
         self.ref_row_kinds.extend(
             (0..snapshot.refs.remote_branches.len())
                 .map(|index| RefRowKind::Target(RefTarget::Remote(index))),
@@ -2506,7 +2490,9 @@ impl GitWindow {
         let actions_x = layout
             .header_buttons
             .first()
-            .map_or(layout.close.x, |(_, rect, _)| rect.x);
+            .map_or(layout.header.right() - layout.padding, |(_, rect, _)| {
+                rect.x
+            });
         let context_width = (actions_x - layout.padding - ui::px(16.0, scale)).max(1.0);
 
         labels.push(Label {
@@ -2535,13 +2521,13 @@ impl GitWindow {
         });
 
         let subtitle = match &self.snapshot {
-            None => "Cargando repositorio…".to_owned(),
+            None => "Loading repository…".to_owned(),
             Some(snapshot) => {
                 let branch = snapshot.status.branch.clone().unwrap_or_else(|| {
                     if snapshot.status.detached {
-                        "HEAD separado".to_owned()
+                        "Detached HEAD".to_owned()
                     } else {
-                        "sin rama".to_owned()
+                        "no branch".to_owned()
                     }
                 });
                 let mut value = branch;
@@ -2569,7 +2555,7 @@ impl GitWindow {
                 HeaderAction::Fetch => "Fetch",
                 HeaderAction::Pull => "Pull",
                 HeaderAction::Push => "Push",
-                HeaderAction::Refresh => "Actualizar",
+                HeaderAction::Refresh => "Refresh",
             };
             ui::button(
                 quads,
@@ -2590,21 +2576,6 @@ impl GitWindow {
                 tokens,
             );
         }
-
-        ui::icon_button(
-            quads,
-            labels,
-            ui::IconButtonSpec {
-                rect: layout.close,
-                glyph: "×",
-                enabled: true,
-                hovered: layout.close.contains(cursor.0, cursor.1),
-                focused: false,
-                danger: false,
-            },
-            theme,
-            tokens,
-        );
     }
 
     fn draw_left(
@@ -2633,7 +2604,7 @@ impl GitWindow {
 
         let tokens = Tokens::new(ui_font, scale);
         let cursor = (self.cursor.x as f32, self.cursor.y as f32);
-        let tabs = ["Cambios", "Refs"];
+        let tabs = ["Changes", "Refs"];
         for (index, rect) in layout.tabs.iter().enumerate() {
             let active = (index == 0 && self.left_tab == LeftTab::Changes)
                 || (index == 1 && self.left_tab == LeftTab::Refs);
@@ -2686,13 +2657,13 @@ impl GitWindow {
 
         for (action, rect, enabled) in &layout.left_actions {
             let text = match action {
-                LeftAction::StageAll => "Preparar todo",
-                LeftAction::UnstageAll => "Quitar todo",
-                LeftAction::AbortMerge => "Abortar",
-                LeftAction::NewBranch => "Nueva",
+                LeftAction::StageAll => "Stage all",
+                LeftAction::UnstageAll => "Unstage all",
+                LeftAction::AbortMerge => "Abort",
+                LeftAction::NewBranch => "New",
                 LeftAction::Checkout => "Checkout",
                 LeftAction::Merge => "Merge",
-                LeftAction::Delete => "Borrar",
+                LeftAction::Delete => "Delete",
                 LeftAction::StashPop => "Pop",
                 LeftAction::StashDrop => "Drop",
             };
@@ -2733,8 +2704,8 @@ impl GitWindow {
             match kind {
                 ChangeRowKind::Section(title) => {
                     let text = match *title {
-                        "Preparados" => format!("Preparados {}", snapshot.status.staged_count()),
-                        "Cambios" => format!("Cambios {}", snapshot.status.unstaged_count()),
+                        "Staged" => format!("Staged {}", snapshot.status.staged_count()),
+                        "Changes" => format!("Changes {}", snapshot.status.unstaged_count()),
                         _ => (*title).into(),
                     };
                     labels.push(Label {
@@ -2838,8 +2809,8 @@ impl GitWindow {
                 quads,
                 labels,
                 layout.list_area,
-                "Árbol limpio",
-                "No hay cambios pendientes. Puedes cambiar de rama o revisar el historial.",
+                "Working tree clean",
+                "No pending changes. You can switch branches or review the history.",
                 theme,
                 tokens,
             );
@@ -2974,8 +2945,8 @@ impl GitWindow {
                 quads,
                 labels,
                 layout.list_area,
-                "Sin referencias",
-                "No hay ramas, remotos, tags ni stashes que mostrar.",
+                "No refs",
+                "No branches, remotes, tags, or stashes to show.",
                 theme,
                 tokens,
             );
@@ -3030,7 +3001,7 @@ impl GitWindow {
         ));
 
         labels.push(Label {
-            text: "Historial".into(),
+            text: "History".into(),
             x: layout.center.x + layout.padding,
             y: layout.center.y + ui::px(8.0, scale),
             width: (layout.center.width - layout.padding * 2.0).max(1.0),
@@ -3082,7 +3053,7 @@ impl GitWindow {
                     to_linear(theme.accent, 1.0),
                 ));
                 labels.push(Label {
-                    text: "Árbol de trabajo".into(),
+                    text: "Working tree".into(),
                     x: rect.x + 26.0 * scale,
                     y: rect.y + ui::px(5.0, scale),
                     width: (rect.width - 32.0 * scale).max(1.0),
@@ -3091,7 +3062,7 @@ impl GitWindow {
                     bold: true,
                 });
                 labels.push(Label {
-                    text: format!("{staged} preparados · {unstaged} cambios"),
+                    text: format!("{staged} staged · {unstaged} changes"),
                     x: rect.x + 26.0 * scale,
                     y: rect.y + ui::px(23.0, scale),
                     width: (rect.width - 32.0 * scale).max(1.0),
@@ -3163,8 +3134,8 @@ impl GitWindow {
                 quads,
                 labels,
                 layout.history_area,
-                "Sin historial",
-                "Este repositorio todavía no tiene commits.",
+                "No history",
+                "This repository does not have any commits yet.",
                 theme,
                 tokens,
             );
@@ -3220,8 +3191,8 @@ impl GitWindow {
                 )
             });
             (
-                "Árbol de trabajo".to_owned(),
-                format!("{staged} preparados · {unstaged} cambios"),
+                "Working tree".to_owned(),
+                format!("{staged} staged · {unstaged} changes"),
             )
         } else if let Some(commit) = self.selected_commit() {
             (
@@ -3234,7 +3205,7 @@ impl GitWindow {
                 ),
             )
         } else {
-            ("Detalle".to_owned(), String::new())
+            ("Detail".to_owned(), String::new())
         };
 
         labels.push(Label {
@@ -3258,7 +3229,7 @@ impl GitWindow {
 
         if self.detail_loading {
             labels.push(Label {
-                text: "Cargando diff…".into(),
+                text: "Loading diff…".into(),
                 x: layout.detail_header.x,
                 y: layout.detail_header.y + ui::px(44.0, scale),
                 width: layout.detail_header.width,
@@ -3284,8 +3255,8 @@ impl GitWindow {
                     quads,
                     labels,
                     layout.right,
-                    "Nada seleccionado",
-                    "Selecciona un commit o un cambio del árbol de trabajo para ver el diff.",
+                    "Nothing selected",
+                    "Select a commit or working tree change to view its diff.",
                     theme,
                     tokens,
                 );
@@ -3295,7 +3266,7 @@ impl GitWindow {
 
         if let Some(files) = layout.file_list {
             labels.push(Label {
-                text: format!("Archivos · {}", detail.files.len()),
+                text: format!("Files · {}", detail.files.len()),
                 x: files.x + layout.padding,
                 y: files.y + ui::px(5.0, scale),
                 width: (files.width - layout.padding * 2.0).max(1.0),
@@ -3397,7 +3368,7 @@ impl GitWindow {
             ));
             if file.binary {
                 labels.push(Label {
-                    text: "Archivo binario".into(),
+                    text: "Binary file".into(),
                     x: area.x,
                     y: area.y,
                     width: area.width,
@@ -3407,7 +3378,7 @@ impl GitWindow {
                 });
             } else if file.lines.is_empty() {
                 labels.push(Label {
-                    text: "Sin cambios de texto".into(),
+                    text: "No text changes".into(),
                     x: area.x,
                     y: area.y,
                     width: area.width,
@@ -3487,7 +3458,7 @@ impl GitWindow {
         );
 
         let text = if self.message.is_empty() {
-            "Mensaje del commit…".to_owned()
+            "Commit message…".to_owned()
         } else if self.focus == Focus::Message {
             format!("{}▌", self.message)
         } else {
@@ -3562,13 +3533,11 @@ impl GitWindow {
 
         let tokens = Tokens::new(ui_font, scale);
         let hint = match self.focus {
-            Focus::Changes => {
-                "↑↓ archivo · Enter preparar/quitar · Supr descartar · R actualizar · Tab panel"
-            }
-            Focus::Refs => "↑↓ rama · Enter checkout · M merge · N nueva · D borrar · R actualizar",
-            Focus::History => "↑↓ commit · PgUp/PgDn · R actualizar · Tab panel",
-            Focus::Detail => "↑↓ archivo · PgUp/PgDn diff · ←→ horizontal · Tab panel",
-            Focus::Message => "Enter commit · Esc salir · Cmd/Ctrl+W cerrar",
+            Focus::Changes => "↑↓ file · Enter stage/unstage · Del discard · R refresh · Tab panel",
+            Focus::Refs => "↑↓ branch · Enter checkout · M merge · N new · D delete · R refresh",
+            Focus::History => "↑↓ commit · PgUp/PgDn · R refresh · Tab panel",
+            Focus::Detail => "↑↓ file · PgUp/PgDn diff · ←→ horizontal · Tab panel",
+            Focus::Message => "Enter commit · Esc exit · Cmd/Ctrl+W close",
         };
         labels.push(Label {
             text: hint.into(),
@@ -3683,7 +3652,7 @@ impl GitWindow {
             push_outline(quads, input_rect, 1.0, to_linear(theme.accent, 1.0));
             labels.push(Label {
                 text: if input_value.is_empty() {
-                    "Nombre de la rama…▌".to_owned()
+                    "Branch name…▌".to_owned()
                 } else {
                     format!("{input_value}▌")
                 },
@@ -3703,12 +3672,12 @@ impl GitWindow {
         for (confirm, rect) in &layout.dialog_buttons {
             let text = if *confirm {
                 if matches!(self.dialog, Some(Dialog::Input { .. })) {
-                    "Crear"
+                    "Create"
                 } else {
-                    "Confirmar"
+                    "Confirm"
                 }
             } else {
-                "Cancelar"
+                "Cancel"
             };
             ui::button(
                 quads,
@@ -3731,7 +3700,7 @@ impl GitWindow {
         }
 
         labels.push(Label {
-            text: "Enter confirmar · Esc cancelar".into(),
+            text: "Enter confirm · Esc cancel".into(),
             x: panel.x + 16.0 * scale,
             y: panel.bottom() - ui::px(62.0, scale),
             width: (panel.width - ui::px(32.0, scale)).max(1.0),

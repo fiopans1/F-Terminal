@@ -47,15 +47,15 @@ impl ForgeKind {
 
     pub fn search_placeholder(self) -> &'static str {
         match self {
-            Self::GitHub => "Buscar PRs…",
-            Self::GitLab => "Buscar MRs…",
+            Self::GitHub => "Search PRs…",
+            Self::GitLab => "Search MRs…",
         }
     }
 
     pub fn empty_message(self) -> &'static str {
         match self {
-            Self::GitHub => "No hay pull requests abiertos.",
-            Self::GitLab => "No hay merge requests abiertos.",
+            Self::GitHub => "No open pull requests.",
+            Self::GitLab => "No open merge requests.",
         }
     }
 }
@@ -121,7 +121,7 @@ pub fn load_change_diff(
     let remote = detect(repo)?;
     if remote.kind != kind {
         bail!(
-            "el remoto del repositorio cambió de {} a {} mientras Code Review estaba abierto",
+            "the repository remote changed from {} to {} while Code Review was open",
             kind.name(),
             remote.kind.name()
         );
@@ -178,10 +178,10 @@ pub fn token_from_file(name: &str) -> Option<String> {
 
 pub fn detect_url(url: &str) -> Result<RemoteInfo> {
     let (host, path) = parse_remote_url(url)
-        .with_context(|| format!("URL de remoto Git no compatible: {}", url.trim()))?;
+        .with_context(|| format!("unsupported Git remote URL: {}", url.trim()))?;
     let path = path.trim_matches('/').trim_end_matches(".git").to_owned();
     if path.is_empty() {
-        bail!("el remoto no tiene ruta de repositorio: {}", url.trim());
+        bail!("the remote has no repository path: {}", url.trim());
     }
 
     let host_without_port = host.split(':').next().unwrap_or(&host).to_ascii_lowercase();
@@ -197,18 +197,18 @@ pub fn detect_url(url: &str) -> Result<RemoteInfo> {
         (ForgeKind::GitLab, format!("https://{host}/api/v4"))
     } else {
         bail!(
-            "el host del remoto no es GitHub ni GitLab: {host}. \
-             Las instancias autogestionadas necesitan un host que empiece por github. o gitlab."
+            "the remote host is neither GitHub nor GitLab: {host}. \
+             Self-hosted instances need a host starting with github. or gitlab."
         );
     };
 
     let segments: Vec<&str> = path.split('/').filter(|part| !part.is_empty()).collect();
     match kind {
         ForgeKind::GitHub if segments.len() != 2 => {
-            bail!("la ruta del remoto de GitHub debe ser owner/repository: {path}")
+            bail!("the GitHub remote path must be owner/repository: {path}")
         }
         ForgeKind::GitLab if segments.len() < 2 => {
-            bail!("la ruta del remoto de GitLab debe ser group/repository: {path}")
+            bail!("the GitLab remote path must be group/repository: {path}")
         }
         _ => {}
     }
@@ -249,7 +249,7 @@ fn remote_url(repo: &Path) -> Result<String> {
             git(repo, &["remote", "get-url", name]).ok()
         })
         .map(|url| url.trim().to_owned())
-        .context("este repositorio no tiene remoto Git")
+        .context("this repository has no Git remote")
 }
 
 fn git(repo: &Path, args: &[&str]) -> Result<String> {
@@ -260,9 +260,9 @@ fn git(repo: &Path, args: &[&str]) -> Result<String> {
         .env("GIT_PAGER", "cat")
         .env("LC_ALL", "C")
         .output()
-        .context("no se pudo ejecutar Git")?;
+        .context("could not run Git")?;
     if !output.status.success() {
-        bail!("Git {} falló", args.join(" "));
+        bail!("Git {} failed", args.join(" "));
     }
     Ok(String::from_utf8_lossy(&output.stdout).into_owned())
 }
