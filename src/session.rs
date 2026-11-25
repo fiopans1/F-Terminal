@@ -182,7 +182,26 @@ impl SessionWriter {
     pub fn request(&self, job: SaveJob) {
         let (lock, condvar) = &*self.queue;
         if let Ok(mut queue) = lock.lock() {
-            queue.job = Some(job);
+            if let Some(pending) = queue.job.as_mut() {
+                // Keep every pane that changed between requests. Replacing the
+                // whole job would drop scrollback for panes that were queued
+                // while the writer was busy.
+                pending.state = job.state;
+                pending.keys = job.keys;
+                for source in job.scrollbacks {
+                    if let Some(existing) = pending
+                        .scrollbacks
+                        .iter_mut()
+                        .find(|existing| existing.key == source.key)
+                    {
+                        *existing = source;
+                    } else {
+                        pending.scrollbacks.push(source);
+                    }
+                }
+            } else {
+                queue.job = Some(job);
+            }
             condvar.notify_one();
         }
     }
