@@ -18,6 +18,7 @@ pub enum Action {
     GitManager,
     AgentMode,
     Settings,
+    About,
 }
 
 #[cfg_attr(not(target_os = "macos"), allow(dead_code))]
@@ -30,6 +31,7 @@ impl Action {
             "git-manager" => Some(Self::GitManager),
             "agent-mode" => Some(Self::AgentMode),
             "open-settings" => Some(Self::Settings),
+            "about" => Some(Self::About),
             _ => None,
         }
     }
@@ -113,12 +115,16 @@ impl MenuState {
         let git = MenuItem::with_id("git-manager", "Git", true, None);
         let agent = MenuItem::with_id("agent-mode", "Agents", true, None);
         let settings = MenuItem::with_id("open-settings", "Open Settings…", true, None);
+        let about = MenuItem::with_id("about", "About F-Terminal", true, None);
 
+        let separator_zero = PredefinedMenuItem::separator();
         let separator_one = PredefinedMenuItem::separator();
         let separator_two = PredefinedMenuItem::separator();
         let quit = PredefinedMenuItem::quit(Some("Quit"));
 
-        let items: [&dyn IsMenuItem; 9] = [
+        let items: [&dyn IsMenuItem; 11] = [
+            &about,
+            &separator_zero,
             &explorer,
             &code,
             &review,
@@ -184,6 +190,7 @@ mod tests {
             Action::from_menu_id("open-settings"),
             Some(Action::Settings)
         );
+        assert_eq!(Action::from_menu_id("about"), Some(Action::About));
         assert_eq!(Action::from_menu_id("unknown"), None);
     }
 }

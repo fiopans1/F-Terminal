@@ -19,6 +19,20 @@ usa [Versionado Semántico](https://semver.org/lang/es/).
   no permitidos (`file://`, etc.) se ignoran.
 - Reordenación de sesiones arrastrando su fila en la sidebar, con línea de
   inserción, pane enfocado preservado y orden persistido en la sesión guardada.
+- Sesiones fijadas desde el menú contextual (clic derecho → **Pin tab** /
+  **Unpin tab**): quedan agrupadas arriba, el arrastre no las mezcla con las no
+  fijadas y el estado se guarda con la sesión.
+- Renombrado en línea desde el menú contextual (**Rename**) o con `F2`: `Enter`
+  confirma, `Esc` cancela y un título vacío recupera el nombre automático. El
+  nombre personalizado se guarda y tiene prioridad sobre el título que reporta
+  el shell.
+- Barra de título propia en Windows y Linux: icono de la aplicación, título de
+  la sesión activa, controles de minimizar/maximizar/cerrar, arrastre, doble
+  clic para maximizar y redimensionado desde los bordes. En macOS se mantiene la
+  barra nativa y se dibuja una barra de estado con el icono y **F-Terminal**.
+- Botón **?** en la barra de título con un desplegable About: desarrollador,
+  versión actual, enlace al repositorio y una fila reservada para el futuro
+  botón de actualizaciones. En macOS, About también aparece en el menú nativo.
 - Recarga en caliente de `config.toml`: al guardar el fichero se aplican sin
   reiniciar el tema, tipografías, márgenes, scrollback, shell por defecto,
   agentes y opciones de comportamiento. `font_family` y `render.mode` siguen

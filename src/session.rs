@@ -76,6 +76,8 @@ pub struct SavedWindow {
 #[serde(default)]
 pub struct SavedTab {
     pub title: Option<String>,
+    pub custom_title: Option<String>,
+    pub pinned: bool,
     pub focused: usize,
     pub layout: SavedLayout,
     pub panes: Vec<SavedPane>,
@@ -85,6 +87,8 @@ impl Default for SavedTab {
     fn default() -> Self {
         Self {
             title: None,
+            custom_title: None,
+            pinned: false,
             focused: 0,
             layout: SavedLayout::Leaf { index: 0 },
             panes: Vec::new(),
@@ -651,6 +655,8 @@ mod tests {
             active_tab: 0,
             tabs: vec![SavedTab {
                 title: Some("saved".into()),
+                custom_title: None,
+                pinned: false,
                 focused: 0,
                 layout: SavedLayout::Leaf { index: 0 },
                 panes: vec![SavedPane {
@@ -697,6 +703,8 @@ mod tests {
             active_tab: 1,
             tabs: vec![SavedTab {
                 title: Some("api".into()),
+                custom_title: Some("api".into()),
+                pinned: true,
                 focused: 1,
                 layout: SavedLayout::Split {
                     direction: SavedDirection::Right,

@@ -5,6 +5,7 @@ edition = "2024"
 rust-version = "1.95"
 description = "Native GPU terminal with Git and code review"
 repository = "https://github.com/fiopans1/F-Terminal"
+authors = ["Diego Suárez Ramos"]
 license = "AGPL-3.0-only"
 readme = "README.md"
 keywords = ["terminal", "gpu", "wgpu", "git", "pty"]
@@ -20,6 +21,7 @@ cosmic-text = "0.19"
 env_logger = "0.11"
 glyphon = "0.12"
 log = "0.4"
+png = "0.18"
 pollster = "0.4"
 portable-pty = "0.9"
 serde = { version = "1", features = ["derive"] }

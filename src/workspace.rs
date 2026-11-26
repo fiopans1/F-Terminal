@@ -286,6 +286,10 @@ pub struct Tab {
     pub id: TabId,
     pub title: String,
     pub default_title: String,
+    /// Title written by the user; it wins over the title reported by the pane.
+    pub custom_title: Option<String>,
+    /// Pinned tabs stay at the top of the sidebar.
+    pub pinned: bool,
     pub layout: LayoutNode,
     pub focused: PaneId,
     pub panes: HashMap<PaneId, Pane>,
@@ -338,6 +342,8 @@ impl Workspace {
             id: tab_id,
             title: "New session".to_owned(),
             default_title: "New session".to_owned(),
+            custom_title: None,
+            pinned: false,
             layout: LayoutNode::Leaf(pane_id),
             focused: pane_id,
             panes: HashMap::new(),
@@ -354,12 +360,9 @@ impl Workspace {
             .find(|tab| tab.layout.contains(pane.id))
         {
             let focused = tab.focused == pane.id;
-            let title = pane.title.clone();
             tab.panes.insert(pane.id, pane);
             if focused {
-                tab.title = title
-                    .filter(|title| !title.is_empty())
-                    .unwrap_or_else(|| tab.default_title.clone());
+                Self::refresh_title(tab);
             }
             true
         } else {
@@ -376,6 +379,8 @@ impl Workspace {
         pane_count: usize,
         focused: usize,
         title: Option<String>,
+        pinned: bool,
+        custom_title: Option<String>,
     ) -> Option<(TabId, Vec<PaneId>)> {
         if pane_count == 0 || focused >= pane_count {
             return None;
@@ -397,13 +402,19 @@ impl Workspace {
         }
 
         let tab_id = TabId(self.alloc_id());
-        let title = title
+        let default_title = title
             .filter(|title| !title.trim().is_empty())
             .unwrap_or_else(|| "New session".to_owned());
+        let custom_title = custom_title.filter(|title| !title.trim().is_empty());
+        let title = custom_title
+            .clone()
+            .unwrap_or_else(|| default_title.clone());
         self.tabs.push(Tab {
             id: tab_id,
-            title: title.clone(),
-            default_title: title,
+            title,
+            default_title,
+            custom_title,
+            pinned,
             layout,
             focused: panes[focused],
             panes: HashMap::new(),
@@ -418,6 +429,7 @@ impl Workspace {
     }
 
     /// Move a tab to a new position, keeping the currently active tab active.
+    /// Pinned tabs always stay above unpinned ones.
     pub fn move_tab(&mut self, id: TabId, target: usize) -> bool {
         let Some(from) = self.tabs.iter().position(|tab| tab.id == id) else {
             return false;
@@ -428,7 +440,7 @@ impl Workspace {
 
         // `target` is an insertion index in the current list. Removing the tab
         // shifts everything after it one slot to the left.
-        let mut target = target.min(self.tabs.len());
+        let mut target = self.clamp_tab_target(id, target);
         if from < target {
             target -= 1;
         }
@@ -439,6 +451,44 @@ impl Workspace {
         let active = self.tabs.get(self.active).map(|tab| tab.id);
         let tab = self.tabs.remove(from);
         self.tabs.insert(target.min(self.tabs.len()), tab);
+
+        if let Some(active) = active {
+            self.active = self
+                .tabs
+                .iter()
+                .position(|tab| tab.id == active)
+                .unwrap_or(0);
+        }
+        true
+    }
+
+    /// Keep a drag target inside the pinned or unpinned group of `id`.
+    pub fn clamp_tab_target(&self, id: TabId, target: usize) -> usize {
+        let target = target.min(self.tabs.len());
+        let Some(tab) = self.tabs.iter().find(|tab| tab.id == id) else {
+            return target;
+        };
+        let pinned = self.tabs.iter().filter(|tab| tab.pinned).count();
+        if tab.pinned {
+            target.min(pinned)
+        } else {
+            target.max(pinned)
+        }
+    }
+
+    /// Pin a tab at the top of the sidebar, or send it back to the unpinned
+    /// group. The active tab keeps its selection after the reordering.
+    pub fn set_pinned(&mut self, id: TabId, pinned: bool) -> bool {
+        let Some(index) = self.tabs.iter().position(|tab| tab.id == id) else {
+            return false;
+        };
+        if self.tabs[index].pinned == pinned {
+            return false;
+        }
+
+        let active = self.tabs.get(self.active).map(|tab| tab.id);
+        self.tabs[index].pinned = pinned;
+        self.tabs.sort_by_key(|tab| !tab.pinned);
 
         if let Some(active) = active {
             self.active = self
@@ -574,7 +624,23 @@ impl Workspace {
         true
     }
 
+    /// Rename a tab. An empty title restores the automatic pane title.
+    pub fn set_tab_custom_title(&mut self, id: TabId, title: Option<String>) -> bool {
+        let Some(tab) = self.tabs.iter_mut().find(|tab| tab.id == id) else {
+            return false;
+        };
+        tab.custom_title = title
+            .map(|title| title.trim().to_owned())
+            .filter(|title| !title.is_empty());
+        Self::refresh_title(tab);
+        true
+    }
+
     fn refresh_title(tab: &mut Tab) {
+        if let Some(custom) = &tab.custom_title {
+            tab.title = custom.clone();
+            return;
+        }
         tab.title = tab
             .panes
             .get(&tab.focused)
@@ -677,7 +743,7 @@ mod tests {
         };
 
         let (tab_id, panes) = workspace
-            .restore_terminal(&layout, 3, 1, Some("saved".to_owned()))
+            .restore_terminal(&layout, 3, 1, Some("saved".to_owned()), false, None)
             .unwrap();
         assert_eq!(workspace.tabs.len(), 1);
         assert_eq!(workspace.active_tab_id(), Some(tab_id));
@@ -698,7 +764,11 @@ mod tests {
             first: Box::new(LayoutSpec::Leaf(0)),
             second: Box::new(LayoutSpec::Leaf(0)),
         };
-        assert!(workspace.restore_terminal(&layout, 2, 0, None).is_none());
+        assert!(
+            workspace
+                .restore_terminal(&layout, 2, 0, None, false, None)
+                .is_none()
+        );
     }
 
     #[test]
@@ -794,5 +864,60 @@ mod tests {
 
         assert_eq!(workspace.close_tab(second), CloseOutcome::TabClosed);
         assert_eq!(workspace.active_tab_id(), Some(third));
+    }
+
+    #[test]
+    fn pinning_orders_tabs_and_keeps_the_active_one() {
+        let mut workspace = Workspace::new();
+        let (first, _) = workspace.create_terminal();
+        let (second, _) = workspace.create_terminal();
+        let (third, _) = workspace.create_terminal();
+        workspace.select_tab(second);
+
+        assert!(workspace.set_pinned(third, true));
+        let order: Vec<TabId> = workspace.tabs.iter().map(|tab| tab.id).collect();
+        assert_eq!(order, vec![third, first, second]);
+        assert_eq!(workspace.active_tab_id(), Some(second));
+
+        assert!(workspace.set_pinned(first, true));
+        let order: Vec<TabId> = workspace.tabs.iter().map(|tab| tab.id).collect();
+        assert_eq!(order, vec![third, first, second]);
+
+        assert!(workspace.set_pinned(third, false));
+        let order: Vec<TabId> = workspace.tabs.iter().map(|tab| tab.id).collect();
+        assert_eq!(order, vec![first, third, second]);
+    }
+
+    #[test]
+    fn drag_targets_cannot_cross_the_pinned_boundary() {
+        let mut workspace = Workspace::new();
+        let (first, _) = workspace.create_terminal();
+        let (second, _) = workspace.create_terminal();
+        let (third, _) = workspace.create_terminal();
+        workspace.set_pinned(first, true);
+        workspace.set_pinned(second, true);
+
+        assert_eq!(workspace.clamp_tab_target(third, 0), 2);
+        assert_eq!(workspace.clamp_tab_target(first, 3), 2);
+        assert!(!workspace.move_tab(third, 0));
+        let order: Vec<TabId> = workspace.tabs.iter().map(|tab| tab.id).collect();
+        assert_eq!(order, vec![first, second, third]);
+    }
+
+    #[test]
+    fn custom_titles_override_the_automatic_title() {
+        let mut workspace = Workspace::new();
+        let (tab, _) = workspace.create_terminal();
+
+        assert!(workspace.set_tab_custom_title(tab, Some("  deploy  ".into())));
+        assert_eq!(workspace.active_tab().unwrap().title, "deploy");
+        assert_eq!(
+            workspace.active_tab().unwrap().custom_title.as_deref(),
+            Some("deploy")
+        );
+
+        assert!(workspace.set_tab_custom_title(tab, Some("   ".into())));
+        assert_eq!(workspace.active_tab().unwrap().title, "New session");
+        assert_eq!(workspace.active_tab().unwrap().custom_title, None);
     }
 }

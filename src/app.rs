@@ -16,7 +16,7 @@ use winit::dpi::{LogicalSize, PhysicalPosition, PhysicalSize};
 use winit::event::{ElementState, Ime, MouseButton, MouseScrollDelta, WindowEvent};
 use winit::event_loop::{ActiveEventLoop, ControlFlow, EventLoopProxy};
 use winit::keyboard::{Key, KeyCode, ModifiersState, NamedKey, PhysicalKey};
-use winit::window::{CursorIcon, Theme as WindowTheme, Window, WindowId};
+use winit::window::{CursorIcon, Icon, ResizeDirection, Theme as WindowTheme, Window, WindowId};
 
 use crate::agent_window::AgentWindow;
 use crate::agents::{
@@ -58,6 +58,10 @@ use crate::ui;
 use crate::workspace::{CloseOutcome, Pane, PaneId, SplitDirection, TabId, Workspace};
 
 const GIT_STATUS_POLL_INTERVAL: Duration = Duration::from_secs(3);
+const APP_DEVELOPER: &str = "Diego Suárez Ramos";
+const APP_REPOSITORY: &str = env!("CARGO_PKG_REPOSITORY");
+const APP_VERSION: &str = env!("CARGO_PKG_VERSION");
+const TITLE_BAR_HEIGHT: f32 = 36.0;
 
 pub struct App {
     proxy: EventLoopProxy<UserEvent>,
@@ -368,8 +372,7 @@ impl ApplicationHandler<UserEvent> for App {
             };
 
             if matches!(event, WindowEvent::CloseRequested) {
-                state.save_session(&self.config, true);
-                event_loop.exit();
+                state.request_close(event_loop, &self.config);
                 return;
             }
 
@@ -890,6 +893,7 @@ impl ApplicationHandler<UserEvent> for App {
 
 struct ViewLayout {
     sidebar: SidebarLayout,
+    title_bar: TitleBarLayout,
     panes: Vec<PaneLayout>,
     dividers: Vec<DividerLayout>,
     /// Right-side panel layout, used by the editor or the working diff.
@@ -900,10 +904,131 @@ impl ViewLayout {
     fn empty() -> Self {
         Self {
             sidebar: SidebarLayout::empty(),
+            title_bar: TitleBarLayout::default(),
             panes: Vec::new(),
             dividers: Vec::new(),
             editor: None,
         }
+    }
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum TitleButton {
+    About,
+    Minimize,
+    Maximize,
+    Close,
+}
+
+#[derive(Clone, Copy, Debug, Default)]
+struct TitleBarLayout {
+    rect: Rect,
+    drag: Rect,
+    icon: Rect,
+    title: Rect,
+    about: Rect,
+    minimize: Rect,
+    maximize: Rect,
+    close: Rect,
+}
+
+#[derive(Clone, Copy, Debug)]
+struct AboutLayout {
+    rect: Rect,
+    update: Rect,
+    github: Rect,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum AboutAction {
+    Update,
+    Github,
+}
+
+fn title_bar_layout(x: f32, width: f32, height: f32, scale: f32) -> TitleBarLayout {
+    if width <= 1.0 || height <= 1.0 {
+        return TitleBarLayout::default();
+    }
+
+    let scale = scale.max(0.5);
+    let custom_controls = !cfg!(target_os = "macos");
+    let close_width = (46.0 * scale).round().max(28.0);
+    let button_width = (40.0 * scale).round().max(26.0);
+    let about_size = (28.0 * scale).round().max(20.0);
+    let padding = (8.0 * scale).round().max(4.0);
+    let icon_size = (24.0 * scale).round().min(height - 6.0).max(12.0);
+
+    let (close, maximize, minimize, about, drag) = if custom_controls {
+        let close = Rect::new(x + width - close_width, 0.0, close_width, height);
+        let maximize = Rect::new(close.x - button_width, 0.0, button_width, height);
+        let minimize = Rect::new(maximize.x - button_width, 0.0, button_width, height);
+        let about = Rect::new(
+            minimize.x - about_size - padding,
+            ((height - about_size) / 2.0).max(0.0),
+            about_size,
+            about_size,
+        );
+        let drag = Rect::new(x, 0.0, (about.x - x).max(0.0), height);
+        (close, maximize, minimize, about, drag)
+    } else {
+        let about = Rect::new(
+            x + width - about_size - padding,
+            ((height - about_size) / 2.0).max(0.0),
+            about_size,
+            about_size,
+        );
+        (
+            Rect::default(),
+            Rect::default(),
+            Rect::default(),
+            about,
+            Rect::default(),
+        )
+    };
+
+    let icon = Rect::new(
+        x + padding,
+        ((height - icon_size) / 2.0).max(0.0),
+        icon_size,
+        icon_size,
+    );
+    let title_x = icon.right() + (8.0 * scale).max(4.0);
+    let title = Rect::new(
+        title_x,
+        0.0,
+        (about.x - title_x - (8.0 * scale).max(4.0)).max(1.0),
+        height,
+    );
+
+    TitleBarLayout {
+        rect: Rect::new(x, 0.0, width, height),
+        drag,
+        icon,
+        title,
+        about,
+        minimize,
+        maximize,
+        close,
+    }
+}
+
+impl TitleBarLayout {
+    fn button_at(&self, x: f32, y: f32) -> Option<TitleButton> {
+        if self.close.contains(x, y) {
+            Some(TitleButton::Close)
+        } else if self.maximize.contains(x, y) {
+            Some(TitleButton::Maximize)
+        } else if self.minimize.contains(x, y) {
+            Some(TitleButton::Minimize)
+        } else if self.about.contains(x, y) {
+            Some(TitleButton::About)
+        } else {
+            None
+        }
+    }
+
+    fn is_drag_area(&self, x: f32, y: f32) -> bool {
+        self.drag.contains(x, y)
     }
 }
 
@@ -948,6 +1073,35 @@ struct SidebarDrag {
     target: usize,
 }
 
+#[derive(Clone, Copy, Debug)]
+struct ManualResize {
+    direction: ResizeDirection,
+    start_cursor: PhysicalPosition<f64>,
+    start_position: PhysicalPosition<i32>,
+    start_size: PhysicalSize<u32>,
+    min_width: f32,
+    min_height: f32,
+}
+
+#[derive(Clone, Debug)]
+struct RenameState {
+    tab: TabId,
+    text: String,
+}
+
+#[derive(Clone, Copy, Debug)]
+struct TabMenu {
+    tab: TabId,
+    anchor: (f32, f32),
+    selected: usize,
+}
+
+#[derive(Clone, Copy, Debug)]
+struct TabMenuLayout {
+    rect: Rect,
+    rows: [Rect; 2],
+}
+
 #[derive(Clone, Debug)]
 struct SearchState {
     pane: PaneId,
@@ -972,12 +1126,21 @@ struct WindowState {
     clipboard: Option<arboard::Clipboard>,
     sidebar: Sidebar,
     sidebar_drag: Option<SidebarDrag>,
+    manual_resize: Option<ManualResize>,
+    last_sidebar_click: Option<(Instant, TabId)>,
+    rename: Option<RenameState>,
+    tab_menu: Option<TabMenu>,
+    title_hover: Option<TitleButton>,
+    last_title_click: Option<Instant>,
+    about_open: bool,
+    about_hover: Option<AboutAction>,
     search: Option<SearchState>,
     hovered_link: Option<LinkHover>,
     view: ViewLayout,
     modifiers: ModifiersState,
     window_focused: bool,
     cursor_position: PhysicalPosition<f64>,
+    cursor_icon: CursorIcon,
     scroll_accumulators: HashMap<PaneId, f32>,
     drag: Option<DragState>,
     selecting: Option<PaneId>,
@@ -1037,7 +1200,7 @@ struct WindowState {
     completion_view: Option<CompletionView>,
     completion_open: bool,
     completion_selected: usize,
-    popup_occlusion: Option<(PaneId, usize, usize, usize, usize)>,
+    popup_occlusion: Vec<Occlusion>,
     session_writer: Option<SessionWriter>,
     next_session_key: u64,
     last_session_save: Instant,
@@ -1111,6 +1274,7 @@ struct BranchMenuLayout {
 
 type FrameEntry = (PaneId, Rect, Arc<Frame>, Rgb, Option<Vec<usize>>);
 type BuiltFrame = (PaneId, Arc<Frame>, Rgb, Option<Vec<PromptTrim>>);
+type Occlusion = (PaneId, usize, usize, usize, usize);
 
 #[derive(Clone, Debug)]
 struct DiffView {
@@ -1163,6 +1327,8 @@ fn restore_workspace(
                 tab.panes.len(),
                 tab.focused,
                 tab.title.clone(),
+                tab.pinned,
+                tab.custom_title.clone(),
             ) else {
                 continue;
             };
@@ -1334,6 +1500,8 @@ impl WindowState {
 
         let mut attributes = Window::default_attributes()
             .with_title("F-Terminal")
+            .with_decorations(cfg!(target_os = "macos"))
+            .with_window_icon(window_icon())
             .with_inner_size(LogicalSize::new(1100.0, 700.0))
             .with_min_inner_size(LogicalSize::new(520.0, 260.0))
             .with_theme(Some(WindowTheme::Dark))
@@ -1415,12 +1583,21 @@ impl WindowState {
             clipboard: None,
             sidebar: Sidebar::default(),
             sidebar_drag: None,
+            manual_resize: None,
+            last_sidebar_click: None,
+            rename: None,
+            tab_menu: None,
+            title_hover: None,
+            last_title_click: None,
+            about_open: false,
+            about_hover: None,
             search: None,
             hovered_link: None,
             view: ViewLayout::empty(),
             modifiers: ModifiersState::empty(),
             window_focused: true,
             cursor_position: PhysicalPosition::new(0.0, 0.0),
+            cursor_icon: CursorIcon::Default,
             scroll_accumulators: HashMap::new(),
             drag: None,
             selecting: None,
@@ -1481,7 +1658,7 @@ impl WindowState {
             completion_view: None,
             completion_open: false,
             completion_selected: 0,
-            popup_occlusion: None,
+            popup_occlusion: Vec::new(),
             session_writer,
             next_session_key,
             last_session_save: now,
@@ -1625,7 +1802,13 @@ impl WindowState {
                 self.relayout(config);
             }
             WindowEvent::Occluded(false) => self.window.request_redraw(),
-            WindowEvent::CursorLeft { .. } => self.clear_link_hover(),
+            WindowEvent::CursorLeft { .. } => {
+                self.clear_link_hover();
+                self.title_hover = None;
+                self.about_hover = None;
+                self.set_cursor(CursorIcon::Default);
+                self.window.request_redraw();
+            }
             WindowEvent::RedrawRequested => self.on_redraw(config),
             WindowEvent::ModifiersChanged(modifiers) => {
                 self.modifiers = modifiers.state();
@@ -1690,6 +1873,21 @@ impl WindowState {
     // ------------------------------------------------------------------
 
     fn sync_layout(&mut self, config: &Config) -> anyhow::Result<()> {
+        if self
+            .rename
+            .as_ref()
+            .is_some_and(|rename| !self.workspace.tabs.iter().any(|tab| tab.id == rename.tab))
+        {
+            self.rename = None;
+        }
+        if self.tab_menu.as_ref().is_some_and(|menu| {
+            !self.sidebar.visible
+                || self.sidebar.mode != SidebarMode::Terminals
+                || !self.workspace.tabs.iter().any(|tab| tab.id == menu.tab)
+        }) {
+            self.tab_menu = None;
+        }
+
         let size = self.window.inner_size();
         let width = size.width.max(1) as f32;
         let height = size.height.max(1) as f32;
@@ -1734,15 +1932,28 @@ impl WindowState {
             self.sidebar.scroll = clamped_scroll;
         }
 
+        let title_height = (TITLE_BAR_HEIGHT * scale).round().max(1.0);
+        let title_bar = title_bar_layout(
+            sidebar_layout.content_x,
+            (width - sidebar_layout.content_x).max(1.0),
+            title_height,
+            scale,
+        );
         let content_area = Rect::new(
             sidebar_layout.content_x,
-            0.0,
+            title_height,
             (width - sidebar_layout.content_x).max(1.0),
-            height,
+            (height - title_height).max(1.0),
         );
 
         let Some(tab) = self.workspace.active_tab() else {
-            self.view = ViewLayout::empty();
+            self.view = ViewLayout {
+                sidebar: sidebar_layout,
+                title_bar,
+                panes: Vec::new(),
+                dividers: Vec::new(),
+                editor: None,
+            };
             return Ok(());
         };
 
@@ -1764,14 +1975,24 @@ impl WindowState {
                 .clamp(minimum_editor_width, maximum_editor_width);
             let terminal_width = (content_area.width - editor_width - gap).max(1.0);
 
-            terminal_area = Rect::new(content_area.x, 0.0, terminal_width, height);
+            terminal_area = Rect::new(
+                content_area.x,
+                content_area.y,
+                terminal_width,
+                content_area.height,
+            );
 
-            let divider = Rect::new(content_area.x + terminal_width, 0.0, gap, height);
+            let divider = Rect::new(
+                content_area.x + terminal_width,
+                content_area.y,
+                gap,
+                content_area.height,
+            );
             let panel = Rect::new(
                 content_area.x + terminal_width + gap,
-                0.0,
+                content_area.y,
                 editor_width,
-                height,
+                content_area.height,
             );
             let header_height = (28.0 * scale).round();
             let header = Rect::new(panel.x, panel.y, panel.width, header_height);
@@ -1933,6 +2154,7 @@ impl WindowState {
 
         self.view = ViewLayout {
             sidebar: sidebar_layout,
+            title_bar,
             panes: layout.panes,
             dividers: layout.dividers,
             editor: editor_layout,
@@ -2033,6 +2255,294 @@ impl WindowState {
             .map(|tab| tab.title.as_str())
             .unwrap_or("F-Terminal");
         self.window.set_title(&format!("{title} — F-Terminal"));
+    }
+
+    fn request_close(&mut self, event_loop: &ActiveEventLoop, config: &Config) {
+        self.commit_rename(config);
+        self.save_session(config, true);
+        event_loop.exit();
+    }
+
+    fn toggle_about(&mut self) {
+        if self.about_open {
+            self.close_about();
+        } else {
+            self.open_about();
+        }
+    }
+
+    fn open_about(&mut self) {
+        self.about_open = true;
+        self.about_hover = None;
+        self.tab_menu = None;
+        self.sidebar.profile_menu = false;
+        self.window.request_redraw();
+    }
+
+    fn close_about(&mut self) {
+        if self.about_open {
+            self.about_open = false;
+            self.about_hover = None;
+            self.window.request_redraw();
+        }
+    }
+
+    fn about_layout(&self) -> Option<AboutLayout> {
+        if !self.about_open {
+            return None;
+        }
+        let bar = self.view.title_bar;
+        if bar.rect.width <= 1.0 || bar.rect.height <= 1.0 {
+            return None;
+        }
+        let scale = self.renderer.scale_factor() as f32;
+        let size = self.window.inner_size();
+        let window_width = size.width.max(1) as f32;
+        let window_height = size.height.max(1) as f32;
+        let padding = (14.0 * scale).max(8.0);
+        let header_height = (52.0 * scale).max(32.0);
+        let line_height = (18.0 * scale).max(12.0);
+        let row_height = (32.0 * scale).max(24.0);
+        let width = (340.0 * scale)
+            .max(220.0 * scale)
+            .min((window_width - 16.0 * scale).max(1.0));
+        let height = padding * 2.0
+            + header_height
+            + line_height
+            + 10.0 * scale
+            + 1.0
+            + 8.0 * scale
+            + row_height * 2.0
+            + 4.0 * scale;
+        let x = (bar.about.right() - width)
+            .min((window_width - width - 4.0 * scale).max(4.0 * scale))
+            .max(4.0 * scale);
+        let mut y = bar.rect.bottom() + 6.0 * scale;
+        if y + height > window_height - 4.0 * scale {
+            y = (bar.rect.bottom() - height - 6.0 * scale).max(4.0 * scale);
+        }
+        let rect = Rect::new(x, y, width, height);
+        let divider_y = y + padding + header_height + line_height + 10.0 * scale;
+        let update = Rect::new(
+            x + padding,
+            divider_y + 1.0 + 8.0 * scale,
+            (width - padding * 2.0).max(1.0),
+            row_height,
+        );
+        let github = Rect::new(
+            update.x,
+            update.bottom() + 4.0 * scale,
+            update.width,
+            row_height,
+        );
+
+        Some(AboutLayout {
+            rect,
+            update,
+            github,
+        })
+    }
+
+    fn about_action_at(&self, x: f32, y: f32) -> Option<AboutAction> {
+        let layout = self.about_layout()?;
+        if layout.github.contains(x, y) {
+            Some(AboutAction::Github)
+        } else if layout.update.contains(x, y) {
+            Some(AboutAction::Update)
+        } else {
+            None
+        }
+    }
+
+    fn handle_about_click(
+        &mut self,
+        state: ElementState,
+        button: MouseButton,
+        x: f32,
+        y: f32,
+    ) -> bool {
+        if !self.about_open {
+            return false;
+        }
+        let Some(layout) = self.about_layout() else {
+            self.about_open = false;
+            return false;
+        };
+        if !layout.rect.contains(x, y) {
+            if self.view.title_bar.about.contains(x, y) {
+                return false;
+            }
+            if state == ElementState::Pressed {
+                self.close_about();
+            }
+            return false;
+        }
+
+        if state == ElementState::Pressed
+            && button == MouseButton::Left
+            && layout.github.contains(x, y)
+        {
+            self.about_open = false;
+            self.about_hover = None;
+            open_url(APP_REPOSITORY);
+            self.window.request_redraw();
+        }
+        true
+    }
+
+    fn on_title_bar_press(
+        &mut self,
+        x: f32,
+        y: f32,
+        event_loop: &ActiveEventLoop,
+        config: &Config,
+    ) -> bool {
+        let bar = self.view.title_bar;
+        if bar.rect.width <= 1.0 || !bar.rect.contains(x, y) {
+            return false;
+        }
+        if let Some(button) = bar.button_at(x, y) {
+            if button == TitleButton::About {
+                self.toggle_about();
+                return true;
+            }
+            self.close_about();
+            self.tab_menu = None;
+            match button {
+                TitleButton::About => {}
+                TitleButton::Minimize => self.window.set_minimized(true),
+                TitleButton::Maximize => {
+                    let maximized = self.window.is_maximized();
+                    self.window.set_maximized(!maximized);
+                }
+                TitleButton::Close => self.request_close(event_loop, config),
+            }
+            return true;
+        }
+
+        if bar.is_drag_area(x, y) {
+            self.close_about();
+            self.tab_menu = None;
+            let now = Instant::now();
+            let double_click = self
+                .last_title_click
+                .is_some_and(|last| now.duration_since(last) < Duration::from_millis(400));
+            self.last_title_click = Some(now);
+            if double_click {
+                let maximized = self.window.is_maximized();
+                self.window.set_maximized(!maximized);
+            } else if let Err(error) = self.window.drag_window() {
+                log::debug!("window drag failed: {error}");
+            }
+            return true;
+        }
+        true
+    }
+
+    fn resize_direction_at(&self, x: f32, y: f32) -> Option<ResizeDirection> {
+        if cfg!(target_os = "macos") || self.window.is_maximized() {
+            return None;
+        }
+        if self.view.title_bar.button_at(x, y).is_some() {
+            return None;
+        }
+        let scale = self.renderer.scale_factor() as f32;
+        let border = (6.0 * scale).max(4.0);
+        let size = self.window.inner_size();
+        let width = size.width.max(1) as f32;
+        let height = size.height.max(1) as f32;
+        let left = x <= border;
+        let right = x >= width - border;
+        let top = y <= border;
+        let bottom = y >= height - border;
+        if !left && !right && !top && !bottom {
+            return None;
+        }
+
+        match (top, bottom, left, right) {
+            (true, _, true, _) => Some(ResizeDirection::NorthWest),
+            (true, _, _, true) => Some(ResizeDirection::NorthEast),
+            (_, true, true, _) => Some(ResizeDirection::SouthWest),
+            (_, true, _, true) => Some(ResizeDirection::SouthEast),
+            (true, _, _, _) => Some(ResizeDirection::North),
+            (_, true, _, _) => Some(ResizeDirection::South),
+            (_, _, true, _) => Some(ResizeDirection::West),
+            (_, _, _, true) => Some(ResizeDirection::East),
+            _ => None,
+        }
+    }
+
+    fn begin_manual_resize(&mut self, direction: ResizeDirection, cursor: PhysicalPosition<f64>) {
+        let Ok(position) = self.window.outer_position() else {
+            return;
+        };
+        let size = self.window.inner_size();
+        let scale = self.window.scale_factor() as f32;
+        self.manual_resize = Some(ManualResize {
+            direction,
+            start_cursor: cursor,
+            start_position: position,
+            start_size: size,
+            min_width: (520.0 * scale).max(1.0),
+            min_height: (260.0 * scale).max(1.0),
+        });
+    }
+
+    fn update_manual_resize(&mut self, cursor: PhysicalPosition<f64>) {
+        let Some(resize) = self.manual_resize else {
+            return;
+        };
+        let dx = (cursor.x - resize.start_cursor.x) as f32;
+        let dy = (cursor.y - resize.start_cursor.y) as f32;
+        let west = matches!(
+            resize.direction,
+            ResizeDirection::West | ResizeDirection::NorthWest | ResizeDirection::SouthWest
+        );
+        let east = matches!(
+            resize.direction,
+            ResizeDirection::East | ResizeDirection::NorthEast | ResizeDirection::SouthEast
+        );
+        let north = matches!(
+            resize.direction,
+            ResizeDirection::North | ResizeDirection::NorthWest | ResizeDirection::NorthEast
+        );
+        let south = matches!(
+            resize.direction,
+            ResizeDirection::South | ResizeDirection::SouthWest | ResizeDirection::SouthEast
+        );
+
+        let mut width = resize.start_size.width as f32;
+        let mut height = resize.start_size.height as f32;
+        if east {
+            width += dx;
+        }
+        if west {
+            width -= dx;
+        }
+        if south {
+            height += dy;
+        }
+        if north {
+            height -= dy;
+        }
+        width = width.max(resize.min_width);
+        height = height.max(resize.min_height);
+
+        let mut x = resize.start_position.x as f32;
+        let mut y = resize.start_position.y as f32;
+        if west {
+            x += resize.start_size.width as f32 - width;
+        }
+        if north {
+            y += resize.start_size.height as f32 - height;
+        }
+
+        self.window
+            .set_outer_position(PhysicalPosition::new(x.round() as i32, y.round() as i32));
+        let _ = self.window.request_inner_size(PhysicalSize::new(
+            width.round().max(1.0) as u32,
+            height.round().max(1.0) as u32,
+        ));
     }
 
     // ------------------------------------------------------------------
@@ -2187,6 +2697,237 @@ impl WindowState {
         self.relayout(config);
     }
 
+    fn toggle_tab_pinned(&mut self, tab: TabId, config: &Config) {
+        let Some(pinned) = self
+            .workspace
+            .tabs
+            .iter()
+            .find(|item| item.id == tab)
+            .map(|item| !item.pinned)
+        else {
+            return;
+        };
+        if !self.workspace.set_pinned(tab, pinned) {
+            return;
+        }
+        self.sidebar_drag = None;
+        self.relayout(config);
+        self.save_session(config, false);
+        self.window.request_redraw();
+    }
+
+    fn open_tab_menu(&mut self, tab: TabId, x: f32, y: f32, config: &Config) {
+        if self.rename.is_some() {
+            self.commit_rename(config);
+        }
+        self.select_tab(tab, config);
+        self.sidebar_drag = None;
+        self.tab_menu = Some(TabMenu {
+            tab,
+            anchor: (x, y),
+            selected: 0,
+        });
+        self.window.request_redraw();
+    }
+
+    fn close_tab_menu(&mut self) {
+        if self.tab_menu.take().is_some() {
+            self.window.request_redraw();
+        }
+    }
+
+    fn tab_menu_layout(&self, config: &Config) -> Option<TabMenuLayout> {
+        let menu = self.tab_menu.as_ref()?;
+        let sidebar = self.view.sidebar.rect;
+        if sidebar.width <= 1.0 {
+            return None;
+        }
+        let scale = self.renderer.scale_factor() as f32;
+        let ui_font_size = self.renderer.physical(config.ui_font_size);
+        let size = self.window.inner_size();
+        let window_width = size.width.max(1) as f32;
+        let window_height = size.height.max(1) as f32;
+        let padding = (6.0 * scale).max(4.0);
+        let row_height = (ui_font_size * 1.75).max(24.0 * scale);
+        let width = (sidebar.width - 8.0 * scale)
+            .max(1.0)
+            .min((190.0 * scale).max(140.0));
+        let height = padding * 2.0 + row_height * 2.0;
+
+        let x = menu
+            .anchor
+            .0
+            .min(sidebar.right() - width - 4.0 * scale)
+            .max(sidebar.x + 4.0 * scale)
+            .min((window_width - width).max(0.0));
+        let mut y = menu.anchor.1;
+        if y + height > window_height - 4.0 * scale {
+            y = menu.anchor.1 - height;
+        }
+        let y = y.clamp(0.0, (window_height - height).max(0.0));
+        let row_width = (width - padding * 2.0).max(1.0);
+        let rows = [
+            Rect::new(x + padding, y + padding, row_width, row_height),
+            Rect::new(x + padding, y + padding + row_height, row_width, row_height),
+        ];
+
+        Some(TabMenuLayout {
+            rect: Rect::new(x, y, width, height),
+            rows,
+        })
+    }
+
+    fn handle_tab_menu_click(
+        &mut self,
+        state: ElementState,
+        button: MouseButton,
+        x: f32,
+        y: f32,
+        config: &Config,
+    ) -> bool {
+        let Some(layout) = self.tab_menu_layout(config) else {
+            self.tab_menu = None;
+            return false;
+        };
+        if !layout.rect.contains(x, y) {
+            if state == ElementState::Pressed {
+                self.close_tab_menu();
+            }
+            return false;
+        }
+
+        if state == ElementState::Pressed
+            && button == MouseButton::Left
+            && let Some(index) = layout.rows.iter().position(|row| row.contains(x, y))
+        {
+            self.activate_tab_menu(index, config);
+        }
+        true
+    }
+
+    fn handle_tab_menu_key(&mut self, event: &winit::event::KeyEvent, config: &Config) -> bool {
+        match &event.logical_key {
+            Key::Named(NamedKey::Escape) => {
+                self.close_tab_menu();
+                return true;
+            }
+            Key::Named(NamedKey::Enter) => {
+                let index = self
+                    .tab_menu
+                    .as_ref()
+                    .map(|menu| menu.selected)
+                    .unwrap_or(0);
+                self.activate_tab_menu(index, config);
+                return true;
+            }
+            Key::Named(NamedKey::ArrowUp) | Key::Named(NamedKey::Home) => {
+                if let Some(menu) = self.tab_menu.as_mut() {
+                    menu.selected = 0;
+                }
+            }
+            Key::Named(NamedKey::ArrowDown) | Key::Named(NamedKey::End) => {
+                if let Some(menu) = self.tab_menu.as_mut() {
+                    menu.selected = 1;
+                }
+            }
+            _ => return true,
+        }
+        self.window.request_redraw();
+        true
+    }
+
+    fn activate_tab_menu(&mut self, index: usize, config: &Config) {
+        let Some(menu) = self.tab_menu.take() else {
+            return;
+        };
+        match index {
+            0 => self.toggle_tab_pinned(menu.tab, config),
+            1 => self.start_rename(menu.tab, config),
+            _ => {}
+        }
+        self.window.request_redraw();
+    }
+
+    fn start_rename(&mut self, tab: TabId, config: &Config) {
+        if self.rename.is_some() {
+            self.commit_rename(config);
+        }
+        let Some(text) = self
+            .workspace
+            .tabs
+            .iter()
+            .find(|item| item.id == tab)
+            .map(|item| {
+                item.custom_title
+                    .clone()
+                    .unwrap_or_else(|| item.title.clone())
+            })
+        else {
+            return;
+        };
+        self.select_tab(tab, config);
+        self.sidebar_drag = None;
+        self.last_sidebar_click = None;
+        self.rename = Some(RenameState { tab, text });
+        self.window.request_redraw();
+    }
+
+    fn commit_rename(&mut self, config: &Config) {
+        let Some(state) = self.rename.take() else {
+            return;
+        };
+        let title = (!state.text.trim().is_empty()).then(|| state.text.trim().to_owned());
+        if self.workspace.set_tab_custom_title(state.tab, title) {
+            self.update_window_title();
+            self.save_session(config, false);
+        }
+        self.window.request_redraw();
+    }
+
+    fn handle_rename_key(&mut self, event: &winit::event::KeyEvent, config: &Config) -> bool {
+        match &event.logical_key {
+            Key::Named(NamedKey::Escape) => {
+                self.rename = None;
+                self.window.request_redraw();
+                return true;
+            }
+            Key::Named(NamedKey::Enter) => {
+                self.commit_rename(config);
+                return true;
+            }
+            _ => {}
+        }
+
+        let mut changed = false;
+        if let Some(rename) = self.rename.as_mut() {
+            match &event.logical_key {
+                Key::Named(NamedKey::Backspace) => {
+                    changed = rename.text.pop().is_some();
+                }
+                _ => {
+                    if let Some(text) = &event.text {
+                        let clean: String = text
+                            .chars()
+                            .filter(|character| !character.is_control())
+                            .collect();
+                        if !clean.is_empty() {
+                            let used = rename.text.chars().count();
+                            let room = 120usize.saturating_sub(used);
+                            if room > 0 {
+                                rename.text.extend(clean.chars().take(room));
+                                changed = true;
+                            }
+                        }
+                    }
+                }
+            }
+        }
+        if changed {
+            self.window.request_redraw();
+        }
+        true
+    }
+
     fn select_pane(&mut self, tab: TabId, pane: PaneId, config: &Config) {
         self.close_search();
         self.clear_link_hover();
@@ -2240,6 +2981,10 @@ impl WindowState {
                 let _ = self.proxy.send_event(UserEvent::OpenAgentMode);
             }
             menu::Action::Settings => self.open_settings(config),
+            menu::Action::About => {
+                self.window.focus_window();
+                self.open_about();
+            }
         }
     }
 
@@ -2968,11 +3713,13 @@ impl WindowState {
         self.sidebar.visible = !self.sidebar.visible;
         self.sidebar.hovered = None;
         self.sidebar.hovered_file = None;
+        self.tab_menu = None;
         self.relayout(config);
     }
 
     fn toggle_sidebar_mode(&mut self, config: &Config) {
         self.refresh_cwds(config);
+        self.tab_menu = None;
         self.sidebar.mode = match self.sidebar.mode {
             SidebarMode::Terminals => SidebarMode::Files,
             SidebarMode::Files => SidebarMode::Terminals,
@@ -4589,6 +5336,8 @@ impl WindowState {
 
             tabs.push(SavedTab {
                 title: Some(tab.title.clone()),
+                custom_title: tab.custom_title.clone(),
+                pinned: tab.pinned,
                 focused,
                 layout,
                 panes,
@@ -5058,13 +5807,28 @@ impl WindowState {
             return;
         }
 
+        if self.about_open && matches!(event.logical_key, Key::Named(NamedKey::Escape)) {
+            self.close_about();
+            return;
+        }
+
         if self.branch_menu.is_some() {
             self.on_branch_menu_key(&event);
             return;
         }
 
+        if self.tab_menu.is_some() {
+            self.handle_tab_menu_key(&event, config);
+            return;
+        }
+
         if self.sidebar.profile_menu {
             self.on_profile_menu_key(&event, config);
+            return;
+        }
+
+        if self.rename.is_some() {
+            self.handle_rename_key(&event, config);
             return;
         }
 
@@ -5436,6 +6200,18 @@ impl WindowState {
             return false;
         };
 
+        // F2 renames the active sidebar session.
+        if code == KeyCode::F2
+            && !ctrl
+            && !shift
+            && !alt
+            && !super_key
+            && let Some(tab) = self.workspace.active_tab_id()
+        {
+            self.start_rename(tab, config);
+            return true;
+        }
+
         // Ctrl+Tab switches sidebar terminals on every platform.
         if ctrl && code == KeyCode::Tab {
             self.next_terminal(if shift { -1 } else { 1 }, config);
@@ -5645,8 +6421,7 @@ impl WindowState {
                 true
             }
             KeyCode::KeyQ if macos => {
-                self.save_session(config, true);
-                event_loop.exit();
+                self.request_close(event_loop, config);
                 true
             }
             _ => false,
@@ -5666,13 +6441,20 @@ impl WindowState {
     fn on_cursor_moved(&mut self, position: PhysicalPosition<f64>, config: &Config) {
         self.cursor_position = position;
 
+        if self.manual_resize.is_some() {
+            self.update_manual_resize(position);
+            return;
+        }
+
         if let Some(mut drag) = self.sidebar_drag {
             let threshold = 4.0 * self.renderer.scale_factor() as f32;
             if (position.y as f32 - drag.start_y).abs() > threshold {
                 drag.active = true;
             }
             if drag.active {
-                drag.target = self.sidebar_insertion_index(position.y as f32);
+                drag.target = self
+                    .workspace
+                    .clamp_tab_target(drag.tab, self.sidebar_insertion_index(position.y as f32));
                 self.window.request_redraw();
             }
             self.sidebar_drag = Some(drag);
@@ -5733,6 +6515,20 @@ impl WindowState {
             return;
         }
 
+        if self.tab_menu.is_some()
+            && let Some(layout) = self.tab_menu_layout(config)
+        {
+            let x = position.x as f32;
+            let y = position.y as f32;
+            if let Some(selected) = layout.rows.iter().position(|row| row.contains(x, y))
+                && let Some(menu) = self.tab_menu.as_mut()
+                && menu.selected != selected
+            {
+                menu.selected = selected;
+                self.window.request_redraw();
+            }
+        }
+
         self.update_hovered_link(position);
 
         let mut hovered_tab = None;
@@ -5770,6 +6566,36 @@ impl WindowState {
         if self.branch_menu.is_some() {
             self.window.request_redraw();
         }
+
+        let x = position.x as f32;
+        let y = position.y as f32;
+        let title_hover = self.view.title_bar.button_at(x, y);
+        if title_hover != self.title_hover {
+            self.title_hover = title_hover;
+            self.window.request_redraw();
+        }
+        let about_hover = if self.about_open {
+            self.about_action_at(x, y)
+                .filter(|action| *action == AboutAction::Github)
+        } else {
+            None
+        };
+        if about_hover != self.about_hover {
+            self.about_hover = about_hover;
+            self.window.request_redraw();
+        }
+
+        let cursor = if let Some(direction) = self.resize_direction_at(x, y) {
+            cursor_for_resize(direction)
+        } else if self.title_hover.is_some()
+            || self.about_hover.is_some()
+            || self.hovered_link.is_some()
+        {
+            CursorIcon::Pointer
+        } else {
+            CursorIcon::Default
+        };
+        self.set_cursor(cursor);
     }
 
     fn on_mouse_input(
@@ -5784,6 +6610,13 @@ impl WindowState {
 
         if state == ElementState::Released
             && button == MouseButton::Left
+            && self.manual_resize.take().is_some()
+        {
+            return;
+        }
+
+        if state == ElementState::Released
+            && button == MouseButton::Left
             && let Some(drag) = self.sidebar_drag.take()
         {
             if drag.active && self.workspace.move_tab(drag.tab, drag.target) {
@@ -5793,9 +6626,75 @@ impl WindowState {
             return;
         }
 
+        if self.tab_menu.is_some() && self.handle_tab_menu_click(state, button, x, y, config) {
+            return;
+        }
+
+        if self.about_open && self.handle_about_click(state, button, x, y) {
+            return;
+        }
+
+        if state == ElementState::Pressed && button == MouseButton::Left && self.rename.is_some() {
+            self.commit_rename(config);
+        }
+
         if self.branch_menu.is_some() && self.handle_branch_menu_click(state, button, x, y, config)
         {
             return;
+        }
+
+        if state == ElementState::Pressed
+            && button == MouseButton::Left
+            && let Some(direction) = self.resize_direction_at(x, y)
+        {
+            if self.window.drag_resize_window(direction).is_err() {
+                self.begin_manual_resize(direction, self.cursor_position);
+            }
+            return;
+        }
+
+        if state == ElementState::Pressed
+            && button == MouseButton::Left
+            && self.view.title_bar.rect.contains(x, y)
+            && self.on_title_bar_press(x, y, event_loop, config)
+        {
+            return;
+        }
+
+        if state == ElementState::Pressed
+            && button == MouseButton::Right
+            && self.view.title_bar.rect.contains(x, y)
+        {
+            self.close_about();
+            self.tab_menu = None;
+            return;
+        }
+
+        if state == ElementState::Pressed
+            && button == MouseButton::Right
+            && self.view.sidebar.rect.width > 0.0
+        {
+            let tab = match sidebar::hit_test(&self.view.sidebar, x, y) {
+                Some(SidebarHit::Select(tab))
+                | Some(SidebarHit::Close(tab))
+                | Some(SidebarHit::ToggleWorkspace(tab)) => Some(tab),
+                Some(SidebarHit::SelectPane(tab, _)) => Some(tab),
+                Some(SidebarHit::ClosePane(pane)) => self
+                    .workspace
+                    .tabs
+                    .iter()
+                    .find(|tab| tab.layout.contains(pane))
+                    .map(|tab| tab.id),
+                _ => None,
+            };
+            if let Some(tab) = tab {
+                self.open_tab_menu(tab, x, y, config);
+                return;
+            }
+            if self.view.sidebar.rect.contains(x, y) {
+                self.close_tab_menu();
+                return;
+            }
         }
 
         if state == ElementState::Pressed && button == MouseButton::Left {
@@ -5824,6 +6723,17 @@ impl WindowState {
                             self.toggle_workspace(tab, config);
                         }
                         SidebarHit::Select(tab) => {
+                            let now = Instant::now();
+                            let double_click =
+                                self.last_sidebar_click.is_some_and(|(time, last_tab)| {
+                                    last_tab == tab
+                                        && now.duration_since(time) < Duration::from_millis(400)
+                                });
+                            self.last_sidebar_click = Some((now, tab));
+                            if double_click {
+                                self.start_rename(tab, config);
+                                return;
+                            }
                             self.sidebar_drag = Some(SidebarDrag {
                                 tab,
                                 start_y: y,
@@ -6251,20 +7161,21 @@ impl WindowState {
         }
 
         if self.hovered_link != hovered {
-            let has_link = hovered.is_some();
             self.hovered_link = hovered;
-            self.window.set_cursor(if has_link {
-                CursorIcon::Pointer
-            } else {
-                CursorIcon::Default
-            });
             self.window.request_redraw();
+        }
+    }
+
+    fn set_cursor(&mut self, cursor: CursorIcon) {
+        if self.cursor_icon != cursor {
+            self.cursor_icon = cursor;
+            self.window.set_cursor(cursor);
         }
     }
 
     fn clear_link_hover(&mut self) {
         if self.hovered_link.take().is_some() {
-            self.window.set_cursor(CursorIcon::Default);
+            self.set_cursor(CursorIcon::Default);
             self.window.request_redraw();
         }
     }
@@ -6609,7 +7520,7 @@ impl WindowState {
         self.prompt_trims
             .retain(|pane_id, _| visible_panes.contains(pane_id));
 
-        let editor_frame = if self.diff_view.is_some() {
+        let mut editor_frame = if self.diff_view.is_some() {
             None
         } else {
             self.editor
@@ -6636,7 +7547,7 @@ impl WindowState {
         let mut labels = std::mem::take(&mut self.label_scratch);
         labels.clear();
 
-        let diff_frame = self
+        let mut diff_frame = self
             .diff_view
             .as_ref()
             .zip(self.view.editor)
@@ -6671,6 +7582,7 @@ impl WindowState {
             ui_font_size,
             header_font_size,
         );
+        self.build_title_bar(&config.theme, &mut quads, &mut labels, scale, ui_font_size);
 
         if let Some(drag) = &self.sidebar_drag
             && drag.active
@@ -7002,7 +7914,7 @@ impl WindowState {
             push_close_icon(&mut quads, layout.close, scale, theme.sidebar_text);
         }
 
-        let mut branch_occlusion = None;
+        let mut occlusions: Vec<Occlusion> = Vec::new();
         if let Some(menu) = &self.branch_menu
             && let Some(anchor) = self
                 .footer_hits
@@ -7026,7 +7938,7 @@ impl WindowState {
                 let col_end =
                     (((rect.right() - content.x) / metrics.width).ceil() as usize).min(frame.cols);
                 blank_region(frame, row_start..row_end, col_start..col_end, theme);
-                branch_occlusion = Some((menu.pane, row_start, row_end, col_start, col_end));
+                occlusions.push((menu.pane, row_start, row_end, col_start, col_end));
             }
 
             build_branch_menu(
@@ -7044,7 +7956,6 @@ impl WindowState {
             );
         }
 
-        let mut popup_occlusion = branch_occlusion;
         if self.completion_open
             && let Some(view) = &self.completion_view
             && let Some((_, content, frame, _, _)) =
@@ -7143,18 +8054,115 @@ impl WindowState {
                 let col_end =
                     (((rect.right() - content.x) / metrics.width).ceil() as usize).min(frame.cols);
                 blank_region(frame, row_start..row_end, col_start..col_end, theme);
-                popup_occlusion = Some((view.pane, row_start, row_end, col_start, col_end));
+                occlusions.push((view.pane, row_start, row_end, col_start, col_end));
             }
         }
 
-        if popup_occlusion != self.popup_occlusion {
-            if let Some((pane, _, _, _, _)) = self.popup_occlusion {
-                self.dirty_panes.insert(pane);
+        if let Some(layout) = self.tab_menu_layout(config)
+            && let Some(menu) = &self.tab_menu
+        {
+            // The menu floats over the sidebar rows, so their labels must not
+            // be drawn on top of it.
+            labels.retain(|label| !label_intersects_rect(label, layout.rect));
+
+            let border = (1.0 * scale).max(1.0);
+            quads.push(Quad::rounded(
+                layout.rect.x - border,
+                layout.rect.y - border,
+                layout.rect.width + border * 2.0,
+                layout.rect.height + border * 2.0,
+                8.0 * scale,
+                to_linear(theme.border, 1.0),
+            ));
+            quads.push(Quad::rounded(
+                layout.rect.x,
+                layout.rect.y,
+                layout.rect.width,
+                layout.rect.height,
+                7.0 * scale,
+                to_linear(theme.sidebar_background, 1.0),
+            ));
+
+            let pinned = self
+                .workspace
+                .tabs
+                .iter()
+                .find(|tab| tab.id == menu.tab)
+                .is_some_and(|tab| tab.pinned);
+            let item_font = ui_font_size * 0.92;
+            let line_height = item_font * 1.35;
+            for (index, row) in layout.rows.iter().enumerate() {
+                let selected = index == menu.selected;
+                if selected {
+                    quads.push(Quad::rounded(
+                        row.x + 2.0 * scale,
+                        row.y + 1.0 * scale,
+                        (row.width - 4.0 * scale).max(1.0),
+                        (row.height - 2.0 * scale).max(1.0),
+                        4.0 * scale,
+                        to_linear(theme.sidebar_active, 1.0),
+                    ));
+                }
+
+                let text = match index {
+                    0 if pinned => "Unpin tab",
+                    0 => "Pin tab",
+                    1 => "Rename",
+                    _ => continue,
+                };
+                labels.push(Label {
+                    text: text.into(),
+                    x: row.x + 10.0 * scale,
+                    y: row.y + (row.height - line_height) / 2.0,
+                    width: (row.width - 46.0 * scale).max(1.0),
+                    font_size: item_font,
+                    color: if selected {
+                        theme.sidebar_text
+                    } else {
+                        theme.sidebar_text_dim
+                    },
+                    bold: selected,
+                });
+                if index == 1 {
+                    labels.push(Label {
+                        text: "F2".into(),
+                        x: row.right() - 34.0 * scale,
+                        y: row.y + (row.height - line_height) / 2.0,
+                        width: 24.0 * scale,
+                        font_size: item_font * 0.82,
+                        color: theme.sidebar_text_dim,
+                        bold: false,
+                    });
+                }
             }
-            if let Some((pane, _, _, _, _)) = popup_occlusion {
-                self.dirty_panes.insert(pane);
+        }
+
+        if let Some(layout) = self.about_layout() {
+            // The popup floats over the terminal, so its text and the rows
+            // behind it cannot be drawn at the same time.
+            labels.retain(|label| !label_intersects_rect(label, layout.rect));
+            self.build_about_popup(layout, theme, &mut quads, &mut labels, scale, ui_font_size);
+
+            for (pane_id, content, frame, _, _) in frames.iter_mut() {
+                if let Some(region) =
+                    blank_frame_rect(Arc::make_mut(frame), *content, layout.rect, metrics, theme)
+                {
+                    occlusions.push((*pane_id, region.0, region.1, region.2, region.3));
+                }
             }
-            self.popup_occlusion = popup_occlusion;
+            for (content, frame) in editor_frame.as_mut().into_iter().chain(diff_frame.as_mut()) {
+                blank_frame_rect(Arc::make_mut(frame), *content, layout.rect, metrics, theme);
+            }
+        }
+
+        if occlusions != self.popup_occlusion {
+            for (pane, _, _, _, _) in &self.popup_occlusion {
+                self.dirty_panes.insert(*pane);
+            }
+            for (pane, _, _, _, _) in &occlusions {
+                self.dirty_panes.insert(*pane);
+            }
+            self.popup_occlusion = occlusions;
         }
 
         let ghost = self.ghost_text(config);
@@ -7310,6 +8318,15 @@ impl WindowState {
             layout.rect.height,
             to_linear(theme.border, 1.0),
         ));
+        if layout.header.height > 0.0 {
+            quads.push(Quad::new(
+                layout.rect.x,
+                layout.header.bottom() - 1.0,
+                layout.rect.width,
+                1.0,
+                to_linear(theme.border, 1.0),
+            ));
+        }
 
         if layout.collapsed {
             let chevron_size = ui_font_size * 0.95;
@@ -7570,6 +8587,8 @@ impl WindowState {
                                 ));
                             }
 
+                            let tab = self.workspace.tabs.iter().find(|tab| tab.id == item.tab);
+
                             if item.pane_count > 1 {
                                 let chevron_size = ui_font_size * 0.82;
                                 labels.push(Label {
@@ -7589,25 +8608,28 @@ impl WindowState {
                                 });
                             }
 
-                            let title = self
-                                .workspace
-                                .tabs
-                                .iter()
-                                .find(|tab| tab.id == item.tab)
-                                .map(|tab| tab.title.as_str())
-                                .unwrap_or_default();
+                            let renaming =
+                                self.rename.as_ref().filter(|rename| rename.tab == item.tab);
+                            let (title, title_color, title_bold) = match renaming {
+                                Some(rename) => (format!("{}▌", rename.text), theme.accent, true),
+                                None => (
+                                    tab.map(|tab| tab.title.clone()).unwrap_or_default(),
+                                    if item.is_active {
+                                        theme.sidebar_text
+                                    } else {
+                                        theme.sidebar_text_dim
+                                    },
+                                    item.is_active,
+                                ),
+                            };
                             labels.push(Label {
-                                text: title.to_owned(),
+                                text: title,
                                 x: item.label.x,
                                 y: item.label.y + (item.label.height - line_height) / 2.0,
                                 width: item.label.width,
                                 font_size: ui_font_size,
-                                color: if item.is_active {
-                                    theme.sidebar_text
-                                } else {
-                                    theme.sidebar_text_dim
-                                },
-                                bold: item.is_active,
+                                color: title_color,
+                                bold: title_bold,
                             });
 
                             if item.pane_count > 1 {
@@ -7794,6 +8816,308 @@ impl WindowState {
                 }
             }
         }
+    }
+
+    fn build_title_bar(
+        &mut self,
+        theme: &Theme,
+        quads: &mut Vec<Quad>,
+        labels: &mut Vec<Label>,
+        scale: f32,
+        ui_font_size: f32,
+    ) {
+        let layout = self.view.title_bar;
+        if layout.rect.width <= 1.0 || layout.rect.height <= 1.0 {
+            return;
+        }
+
+        quads.push(Quad::new(
+            layout.rect.x,
+            layout.rect.y,
+            layout.rect.width,
+            layout.rect.height,
+            to_linear(theme.sidebar_background, 1.0),
+        ));
+        quads.push(Quad::new(
+            layout.rect.x,
+            layout.rect.y,
+            1.0,
+            layout.rect.height,
+            to_linear(theme.border, 1.0),
+        ));
+        quads.push(Quad::new(
+            layout.rect.x,
+            layout.rect.bottom() - 1.0,
+            layout.rect.width,
+            1.0,
+            to_linear(theme.border, 1.0),
+        ));
+
+        push_app_icon(quads, layout.icon);
+
+        let line_height = ui_font_size * 1.35;
+        let app_name = "F-Terminal";
+        let app_width = self
+            .renderer
+            .measure_ui_text(app_name, ui_font_size, true)
+            .min(layout.title.width)
+            .max(1.0);
+        labels.push(Label {
+            text: app_name.into(),
+            x: layout.title.x,
+            y: layout.title.y + (layout.title.height - line_height) / 2.0,
+            width: app_width,
+            font_size: ui_font_size,
+            color: theme.sidebar_text,
+            bold: true,
+        });
+        if !cfg!(target_os = "macos")
+            && let Some(tab) = self.workspace.active_tab()
+        {
+            let x = layout.title.x + app_width + (10.0 * scale);
+            if x < layout.title.right() - 10.0 * scale {
+                labels.push(Label {
+                    text: tab.title.clone(),
+                    x,
+                    y: layout.title.y + (layout.title.height - line_height) / 2.0,
+                    width: (layout.title.right() - x).max(1.0),
+                    font_size: ui_font_size * 0.92,
+                    color: theme.sidebar_text_dim,
+                    bold: false,
+                });
+            }
+        }
+
+        let about_active = self.about_open || self.title_hover == Some(TitleButton::About);
+        if about_active {
+            quads.push(Quad::rounded(
+                layout.about.x,
+                layout.about.y,
+                layout.about.width,
+                layout.about.height,
+                5.0 * scale,
+                to_linear(
+                    if self.about_open {
+                        theme.sidebar_active
+                    } else {
+                        theme.sidebar_hover
+                    },
+                    1.0,
+                ),
+            ));
+        }
+        let about_font = ui_font_size * 1.1;
+        labels.push(Label {
+            text: "?".into(),
+            x: layout.about.x + (layout.about.width - about_font * 0.55) / 2.0,
+            y: layout.about.y + (layout.about.height - about_font * 1.35) / 2.0,
+            width: layout.about.width,
+            font_size: about_font,
+            color: if self.about_open {
+                theme.accent
+            } else if about_active {
+                theme.sidebar_text
+            } else {
+                theme.sidebar_text_dim
+            },
+            bold: self.about_open,
+        });
+
+        if !cfg!(target_os = "macos") {
+            let maximized = self.window.is_maximized();
+            let controls = [
+                (TitleButton::Minimize, layout.minimize),
+                (TitleButton::Maximize, layout.maximize),
+                (TitleButton::Close, layout.close),
+            ];
+            for (button, rect) in controls {
+                let hovered = self.title_hover == Some(button);
+                if hovered {
+                    quads.push(Quad::new(
+                        rect.x,
+                        rect.y,
+                        rect.width,
+                        rect.height,
+                        to_linear(
+                            if button == TitleButton::Close {
+                                Rgb {
+                                    r: 0xc4,
+                                    g: 0x2b,
+                                    b: 0x1c,
+                                }
+                            } else {
+                                theme.sidebar_hover
+                            },
+                            1.0,
+                        ),
+                    ));
+                }
+                let color = if hovered {
+                    theme.sidebar_text
+                } else {
+                    theme.sidebar_text_dim
+                };
+                match button {
+                    TitleButton::Minimize => {
+                        push_minimize_icon(&mut *quads, rect, scale, color);
+                    }
+                    TitleButton::Maximize => {
+                        push_maximize_icon(&mut *quads, rect, scale, maximized, color);
+                    }
+                    TitleButton::Close => {
+                        let extent = (11.0 * scale).max(7.0);
+                        push_close_icon(
+                            &mut *quads,
+                            Rect::new(
+                                rect.x + (rect.width - extent) / 2.0,
+                                rect.y + (rect.height - extent) / 2.0,
+                                extent,
+                                extent,
+                            ),
+                            scale,
+                            color,
+                        );
+                    }
+                    TitleButton::About => {}
+                }
+            }
+        }
+    }
+
+    fn build_about_popup(
+        &self,
+        layout: AboutLayout,
+        theme: &Theme,
+        quads: &mut Vec<Quad>,
+        labels: &mut Vec<Label>,
+        scale: f32,
+        ui_font_size: f32,
+    ) {
+        let rect = layout.rect;
+        let border = (1.0 * scale).max(1.0);
+        quads.push(Quad::rounded(
+            rect.x - border,
+            rect.y - border,
+            rect.width + border * 2.0,
+            rect.height + border * 2.0,
+            9.0 * scale,
+            to_linear(theme.border, 1.0),
+        ));
+        quads.push(Quad::rounded(
+            rect.x,
+            rect.y,
+            rect.width,
+            rect.height,
+            8.0 * scale,
+            to_linear(theme.sidebar_background, 1.0),
+        ));
+        quads.push(Quad::rounded(
+            rect.x,
+            rect.y,
+            rect.width,
+            (2.0 * scale).max(1.0),
+            1.0 * scale,
+            to_linear(theme.accent, 1.0),
+        ));
+
+        let padding = (14.0 * scale).max(8.0);
+        let icon_size = (40.0 * scale).min(rect.height - padding * 2.0);
+        let icon = Rect::new(rect.x + padding, rect.y + padding, icon_size, icon_size);
+        push_app_icon(&mut *quads, icon);
+
+        let title_font = ui_font_size * 1.15;
+        let small_font = ui_font_size * 0.82;
+        let text_x = icon.right() + (12.0 * scale).max(6.0);
+        labels.push(Label {
+            text: "F-Terminal".into(),
+            x: text_x,
+            y: rect.y + padding,
+            width: (rect.right() - padding - text_x).max(1.0),
+            font_size: title_font,
+            color: theme.sidebar_text,
+            bold: true,
+        });
+        labels.push(Label {
+            text: format!("Version {APP_VERSION}"),
+            x: text_x,
+            y: rect.y + padding + title_font * 1.35,
+            width: (rect.right() - padding - text_x).max(1.0),
+            font_size: small_font,
+            color: theme.sidebar_text_dim,
+            bold: false,
+        });
+        labels.push(Label {
+            text: format!("Developed by {APP_DEVELOPER}"),
+            x: rect.x + padding,
+            y: rect.y + padding + (52.0 * scale).max(32.0),
+            width: (rect.width - padding * 2.0).max(1.0),
+            font_size: small_font,
+            color: theme.sidebar_text,
+            bold: false,
+        });
+
+        let divider_y = layout.update.y - (9.0 * scale).max(4.0);
+        quads.push(Quad::new(
+            rect.x + padding,
+            divider_y,
+            (rect.width - padding * 2.0).max(1.0),
+            1.0,
+            to_linear(theme.border, 1.0),
+        ));
+
+        let row_font = ui_font_size * 0.9;
+        let line_height = row_font * 1.35;
+        if self.about_hover == Some(AboutAction::Github) {
+            quads.push(Quad::rounded(
+                layout.github.x,
+                layout.github.y,
+                layout.github.width,
+                layout.github.height,
+                4.0 * scale,
+                to_linear(theme.sidebar_hover, 1.0),
+            ));
+        }
+        labels.push(Label {
+            text: "Check for updates".into(),
+            x: layout.update.x + 6.0 * scale,
+            y: layout.update.y + (layout.update.height - line_height) / 2.0,
+            width: (layout.update.width - 100.0 * scale).max(1.0),
+            font_size: row_font,
+            color: theme.sidebar_text_dim,
+            bold: false,
+        });
+        labels.push(Label {
+            text: "Coming soon".into(),
+            x: layout.update.right() - 88.0 * scale,
+            y: layout.update.y + (layout.update.height - line_height) / 2.0,
+            width: 82.0 * scale,
+            font_size: small_font,
+            color: theme.sidebar_text_dim,
+            bold: false,
+        });
+
+        labels.push(Label {
+            text: "GitHub repository".into(),
+            x: layout.github.x + 6.0 * scale,
+            y: layout.github.y + (layout.github.height - line_height) / 2.0,
+            width: (layout.github.width - 60.0 * scale).max(1.0),
+            font_size: row_font,
+            color: if self.about_hover == Some(AboutAction::Github) {
+                theme.sidebar_text
+            } else {
+                theme.sidebar_text_dim
+            },
+            bold: self.about_hover == Some(AboutAction::Github),
+        });
+        labels.push(Label {
+            text: "Open".into(),
+            x: layout.github.right() - 40.0 * scale,
+            y: layout.github.y + (layout.github.height - line_height) / 2.0,
+            width: 34.0 * scale,
+            font_size: small_font,
+            color: theme.accent,
+            bold: self.about_hover == Some(AboutAction::Github),
+        });
     }
 }
 
@@ -8771,6 +10095,222 @@ fn push_agent_dot(quads: &mut Vec<Quad>, x: f32, center_y: f32, scale: f32, colo
     ));
 }
 
+fn push_app_icon(quads: &mut Vec<Quad>, rect: Rect) {
+    let u = rect.width.min(rect.height) / 24.0;
+    if u <= 0.1 {
+        return;
+    }
+    let border = u.max(0.5);
+    let body = Rgb {
+        r: 0x1e,
+        g: 0x1e,
+        b: 0x2a,
+    };
+    let panel = Rgb {
+        r: 0x16,
+        g: 0x16,
+        b: 0x20,
+    };
+    let blue = Rgb {
+        r: 0x5b,
+        g: 0x8c,
+        b: 0xff,
+    };
+
+    quads.push(Quad::rounded(
+        rect.x,
+        rect.y,
+        rect.width,
+        rect.height,
+        5.5 * u,
+        to_linear(
+            Rgb {
+                r: 0x3a,
+                g: 0x3a,
+                b: 0x4a,
+            },
+            1.0,
+        ),
+    ));
+    quads.push(Quad::rounded(
+        rect.x + border,
+        rect.y + border,
+        (rect.width - border * 2.0).max(1.0),
+        (rect.height - border * 2.0).max(1.0),
+        4.8 * u,
+        to_linear(body, 1.0),
+    ));
+
+    let screen = Rect::new(rect.x + 3.0 * u, rect.y + 4.0 * u, 18.0 * u, 17.0 * u);
+    quads.push(Quad::rounded(
+        screen.x,
+        screen.y,
+        screen.width,
+        screen.height,
+        2.0 * u,
+        to_linear(panel, 1.0),
+    ));
+
+    let dot = (1.4 * u).max(0.8);
+    for (index, color) in [
+        Rgb {
+            r: 0xef,
+            g: 0x6f,
+            b: 0x6c,
+        },
+        Rgb {
+            r: 0xf4,
+            g: 0xc9,
+            b: 0x6b,
+        },
+        Rgb {
+            r: 0x8f,
+            g: 0xce,
+            b: 0x7a,
+        },
+    ]
+    .into_iter()
+    .enumerate()
+    {
+        quads.push(Quad::rounded(
+            rect.x + (5.5 + index as f32 * 2.5) * u,
+            rect.y + 5.2 * u,
+            dot,
+            dot,
+            dot / 2.0,
+            to_linear(color, 1.0),
+        ));
+    }
+
+    let stroke = (1.6 * u).max(0.9);
+    let steps = 5;
+    let left = rect.x + 7.0 * u;
+    let middle_x = rect.x + 11.0 * u;
+    let top = rect.y + 10.5 * u;
+    let middle_y = rect.y + 13.5 * u;
+    let bottom = rect.y + 16.5 * u;
+    for step in 0..steps {
+        let t = step as f32 / (steps - 1) as f32;
+        let x = left + (middle_x - left) * t;
+        let y_top = top + (middle_y - top) * t;
+        let y_bottom = bottom + (middle_y - bottom) * t;
+        quads.push(Quad::rounded(
+            x - stroke / 2.0,
+            y_top - stroke / 2.0,
+            stroke,
+            stroke,
+            stroke / 2.0,
+            to_linear(blue, 1.0),
+        ));
+        quads.push(Quad::rounded(
+            x - stroke / 2.0,
+            y_bottom - stroke / 2.0,
+            stroke,
+            stroke,
+            stroke / 2.0,
+            to_linear(blue, 1.0),
+        ));
+    }
+    quads.push(Quad::rounded(
+        rect.x + 13.0 * u,
+        rect.y + 15.6 * u,
+        7.0 * u,
+        2.2 * u,
+        1.1 * u,
+        to_linear(blue, 1.0),
+    ));
+}
+
+fn push_minimize_icon(quads: &mut Vec<Quad>, rect: Rect, scale: f32, color: Rgb) {
+    let width = (10.0 * scale).max(6.0);
+    let thickness = (1.5 * scale).max(1.0);
+    quads.push(Quad::rounded(
+        rect.x + (rect.width - width) / 2.0,
+        rect.y + (rect.height - thickness) / 2.0,
+        width,
+        thickness,
+        thickness / 2.0,
+        to_linear(color, 1.0),
+    ));
+}
+
+fn push_square_outline(
+    quads: &mut Vec<Quad>,
+    x: f32,
+    y: f32,
+    size: f32,
+    thickness: f32,
+    color: [f32; 4],
+) {
+    quads.push(Quad::new(x, y, size, thickness, color));
+    quads.push(Quad::new(x, y + size - thickness, size, thickness, color));
+    quads.push(Quad::new(x, y, thickness, size, color));
+    quads.push(Quad::new(x + size - thickness, y, thickness, size, color));
+}
+
+fn push_maximize_icon(quads: &mut Vec<Quad>, rect: Rect, scale: f32, maximized: bool, color: Rgb) {
+    let color = to_linear(color, 1.0);
+    let size = (9.0 * scale).max(6.0);
+    let thickness = (1.2 * scale).max(1.0);
+    let x = rect.x + (rect.width - size) / 2.0;
+    let y = rect.y + (rect.height - size) / 2.0;
+    if maximized {
+        let offset = (2.0 * scale).max(1.5);
+        push_square_outline(quads, x + offset, y - offset + 1.0, size, thickness, color);
+        push_square_outline(quads, x - offset + 1.0, y + offset, size, thickness, color);
+    } else {
+        push_square_outline(quads, x, y, size, thickness, color);
+    }
+}
+
+fn cursor_for_resize(direction: ResizeDirection) -> CursorIcon {
+    match direction {
+        ResizeDirection::East => CursorIcon::EResize,
+        ResizeDirection::North => CursorIcon::NResize,
+        ResizeDirection::NorthEast => CursorIcon::NeResize,
+        ResizeDirection::NorthWest => CursorIcon::NwResize,
+        ResizeDirection::South => CursorIcon::SResize,
+        ResizeDirection::SouthEast => CursorIcon::SeResize,
+        ResizeDirection::SouthWest => CursorIcon::SwResize,
+        ResizeDirection::West => CursorIcon::WResize,
+    }
+}
+
+fn window_icon() -> Option<Icon> {
+    let bytes = include_bytes!("../assets/icon-512.png");
+    let mut reader = png::Decoder::new(std::io::Cursor::new(bytes))
+        .read_info()
+        .ok()?;
+    let mut buffer = vec![0u8; reader.output_buffer_size()?];
+    let info = reader.next_frame(&mut buffer).ok()?;
+    let data = &buffer[..info.buffer_size()];
+    let rgba = match (info.color_type, info.bit_depth) {
+        (png::ColorType::Rgba, png::BitDepth::Eight) => data.to_vec(),
+        (png::ColorType::Rgb, png::BitDepth::Eight) => {
+            let (pixels, remainder) = data.as_chunks::<3>();
+            if !remainder.is_empty() {
+                return None;
+            }
+            let mut rgba = Vec::with_capacity(pixels.len() * 4);
+            for pixel in pixels {
+                rgba.extend_from_slice(pixel);
+                rgba.push(255);
+            }
+            rgba
+        }
+        _ => return None,
+    };
+    Icon::from_rgba(rgba, info.width, info.height).ok()
+}
+
+fn label_intersects_rect(label: &Label, rect: Rect) -> bool {
+    let height = (label.font_size * 1.35).max(1.0);
+    label.x < rect.right()
+        && label.x + label.width > rect.x
+        && label.y < rect.bottom()
+        && label.y + height > rect.y
+}
+
 fn push_close_icon(quads: &mut Vec<Quad>, rect: Rect, scale: f32, color: Rgb) {
     let extent = (rect.width.min(rect.height) * 0.5).max(4.0 * scale);
     let thickness = (1.6 * scale).max(1.0);
@@ -9054,6 +10594,32 @@ fn trim_prompt_row(frame: &mut Frame, row_index: usize, columns: usize) {
     }
 }
 
+fn blank_frame_rect(
+    frame: &mut Frame,
+    content: Rect,
+    rect: Rect,
+    metrics: CellMetrics,
+    theme: &Theme,
+) -> Option<(usize, usize, usize, usize)> {
+    if frame.rows.is_empty()
+        || rect.right() <= content.x
+        || rect.x >= content.right()
+        || rect.bottom() <= content.y
+        || rect.y >= content.bottom()
+    {
+        return None;
+    }
+    let row_start = (((rect.y - content.y) / metrics.height).floor() as isize)
+        .clamp(0, frame.rows.len() as isize - 1) as usize;
+    let row_end =
+        (((rect.bottom() - content.y) / metrics.height).ceil() as usize).min(frame.rows.len());
+    let col_start = (((rect.x - content.x) / metrics.width).floor() as isize)
+        .clamp(0, frame.cols as isize - 1) as usize;
+    let col_end = (((rect.right() - content.x) / metrics.width).ceil() as usize).min(frame.cols);
+    blank_region(frame, row_start..row_end, col_start..col_end, theme);
+    Some((row_start, row_end, col_start, col_end))
+}
+
 fn blank_region(
     frame: &mut Frame,
     rows: std::ops::Range<usize>,
@@ -9293,6 +10859,41 @@ mod tests {
     use super::*;
     use crate::review::{DiffLineKind, FileStatus};
 
+    #[test]
+    fn title_bar_controls_fit_without_overlaps() {
+        let layout = title_bar_layout(200.0, 900.0, 36.0, 1.0);
+
+        assert!(layout.drag.width >= 0.0);
+        assert!(layout.close.right() <= 1100.0);
+        assert!(layout.about.right() <= 1100.0);
+        assert!(layout.title.right() <= layout.about.x);
+        assert_eq!(
+            layout.button_at(layout.about.x + 2.0, 18.0),
+            Some(TitleButton::About)
+        );
+        if cfg!(target_os = "macos") {
+            assert_eq!(layout.close, Rect::default());
+            assert_eq!(layout.minimize, Rect::default());
+            assert_eq!(layout.maximize, Rect::default());
+            assert!(!layout.is_drag_area(layout.title.x + 2.0, 18.0));
+        } else {
+            assert!(layout.drag.width > 0.0);
+            assert!(layout.minimize.right() <= layout.maximize.x);
+            assert!(layout.maximize.right() <= layout.close.x);
+            assert!(layout.about.right() <= layout.minimize.x);
+            assert_eq!(
+                layout.button_at(layout.close.x + 2.0, 18.0),
+                Some(TitleButton::Close)
+            );
+            assert!(layout.is_drag_area(layout.title.x + 2.0, 18.0));
+        }
+    }
+
+    #[test]
+    fn the_window_icon_decodes() {
+        assert!(window_icon().is_some());
+    }
+
     fn candidate(label: &str) -> complete::Candidate {
         complete::Candidate {
             append: label.to_owned(),
@@ -9359,6 +10960,8 @@ mod tests {
             tabs: vec![
                 SavedTab {
                     title: Some("first".into()),
+                    custom_title: None,
+                    pinned: true,
                     focused: 1,
                     layout: SavedLayout::Split {
                         direction: SavedDirection::Right,
@@ -9381,6 +10984,8 @@ mod tests {
                 },
                 SavedTab {
                     title: Some("second".into()),
+                    custom_title: Some("pinned-name".into()),
+                    pinned: false,
                     focused: 0,
                     layout: SavedLayout::Leaf { index: 0 },
                     panes: vec![SavedPane {
@@ -9423,6 +11028,12 @@ mod tests {
         );
         assert!(restored.collapsed.contains(&workspace.tabs[0].id));
         assert_eq!(workspace.tabs[0].leaves().len(), 2);
+        assert!(workspace.tabs[0].pinned);
+        assert_eq!(
+            workspace.tabs[1].custom_title.as_deref(),
+            Some("pinned-name")
+        );
+        assert_eq!(workspace.tabs[1].title, "pinned-name");
     }
 
     #[test]

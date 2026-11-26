@@ -687,6 +687,7 @@ dependencies = [
  "glyphon",
  "log",
  "muda",
+ "png",
  "pollster",
  "portable-pty",
  "serde",

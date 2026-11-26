@@ -64,6 +64,13 @@ welcome.
 - Búsqueda literal en scrollback con *smart case*, navegación y resaltado de
   coincidencias; enlaces `OSC 8` y URLs planas con `Ctrl/Cmd+Click`.
 - Sidebar con sesiones reordenables arrastrando y orden persistido.
+- Barra de título propia en Windows y Linux, con icono, título, botón **?** de
+  About y controles de minimizar/maximizar/cerrar; admite arrastre, doble clic
+  para maximizar y redimensionado desde los bordes. En macOS se conserva la
+  barra nativa y se añade una barra de estado con el icono y **F-Terminal**.
+- El panel About muestra el desarrollador y la versión, enlaza al repositorio y
+  reserva una fila para el futuro botón de actualizaciones. En macOS también se
+  abre desde el menú nativo de la aplicación.
 - Selección con ratón, portapapeles, IME, bracketed paste y alternate screen.
 - Colores ANSI de 16/256/truecolor, OSC 4/10/11 y consultas DA/DSR.
 - Editor integrado con resaltado TextMate en background.
@@ -669,6 +676,13 @@ Cada sesión es un workspace con uno o más panes:
 - El pane enfocado se resalta con una barra de acento.
 - Arrastra una sesión desde su fila para reordenarla; una línea de acento marca
   la posición de destino y el orden se guarda con la sesión.
+- Clic derecho en una sesión abre un menú con **Pin tab**/**Unpin tab** y
+  **Rename**. Las fijadas se agrupan arriba y no se pueden arrastrar fuera de
+  ese grupo; el estado se guarda.
+- **Rename** (o `F2` sobre la activa, o doble clic en la fila) edita el título
+  en línea: `Enter` confirma, `Esc` cancela y dejarlo vacío recupera el título
+  automático. El nombre personalizado se guarda y prevalece sobre el que
+  reporta el shell.
 
 Acciones:
 
@@ -1177,6 +1191,7 @@ poll_interval_ms = 2000
 | Cerrar pane / terminal | `Cmd+W` / `Cmd+Shift+W` |
 | Split derecha / abajo | `Cmd+D` / `Cmd+Shift+S` |
 | Cambiar de terminal | `Cmd+Shift+[` / `]`, `Cmd+1..9`, `Ctrl+Tab` |
+| Renombrar sesión activa | `F2` |
 | Mover foco entre panes | `Cmd+Alt+flechas`, `Cmd+\`` |
 | Mostrar/ocultar sidebar | `Cmd+B` |
 | Cambiar Sesiones / Archivos | `Cmd+Shift+E` |
@@ -1202,6 +1217,7 @@ poll_interval_ms = 2000
 | Cerrar pane | `Ctrl+Shift+W` |
 | Split derecha / abajo | `Ctrl+Shift+D` / `Ctrl+Shift+S` |
 | Cambiar de terminal | `Ctrl+Tab`, `Ctrl+Shift+Tab`, `Ctrl+Shift+[ / ]` |
+| Renombrar sesión activa | `F2` |
 | Mover foco entre panes | `Ctrl+Alt+flechas`, `Ctrl+Shift+\`` |
 | Mostrar/ocultar sidebar | `Ctrl+Shift+B` |
 | Cambiar Sesiones / Archivos | `Ctrl+Shift+E` |
