@@ -1,3 +1,4 @@
+mod font_cache;
 pub mod quads;
 pub mod scene;
 pub mod text;

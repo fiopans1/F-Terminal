@@ -1,6 +1,7 @@
 use std::cell::RefCell;
 use std::collections::HashMap;
 use std::rc::Rc;
+use std::time::Instant;
 
 use glyphon::{
     Attrs, Buffer, Cache, Color, Family, FontSystem, Metrics, Resolution, Shaping, SwashCache,
@@ -10,6 +11,7 @@ use glyphon::{
 use crate::config::Config;
 #[cfg(test)]
 use crate::layout::Rect;
+use crate::render::font_cache;
 use crate::render::scene::{Label, Scene};
 use crate::term::color::Theme;
 use crate::term::frame::Row;
@@ -46,12 +48,27 @@ pub(crate) struct FontResources {
 }
 
 impl FontResources {
-    /// Scan system fonts and pick the terminal and UI families.
+    /// Load system fonts and pick the terminal and UI families.
     ///
-    /// `FontSystem::new` loads every installed face and is one of the slowest
-    /// parts of startup, so callers should run it concurrently with GPU setup.
+    /// A persistent metadata index avoids re-parsing every installed font on
+    /// warm starts. Any cache problem falls back to `FontSystem::new`, which
+    /// scans the system and is one of the slowest parts of startup, so callers
+    /// should run this concurrently with GPU setup.
     pub(crate) fn load(preferred: Option<&str>) -> Self {
-        let mut font_system = FontSystem::new();
+        let mut font_system = match font_cache::load() {
+            Some(font_system) => font_system,
+            None => {
+                let started = Instant::now();
+                let font_system = FontSystem::new();
+                log::info!(
+                    "font index cache miss: scanned {} faces in {:?}",
+                    font_system.db().len(),
+                    started.elapsed()
+                );
+                font_cache::store(font_system.db());
+                font_system
+            }
+        };
         let family = choose_terminal_family(&mut font_system, preferred);
         let ui_family = choose_ui_family(&mut font_system, &family);
 
