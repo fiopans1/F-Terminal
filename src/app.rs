@@ -2434,6 +2434,7 @@ impl WindowState {
             return false;
         }
         let mut changed = false;
+        let mut spawned = Vec::new();
         for (pane_id, result) in outcomes {
             if !self.workspace.contains_pane(pane_id) {
                 self.pending_spawns.remove(&pane_id);
@@ -2464,7 +2465,10 @@ impl WindowState {
                         self.pending_spawns.remove(&pane_id);
                         self.spawn_errors.remove(&pane_id);
                         self.dirty_panes.insert(pane_id);
-                        self.request_git_status(pane_id);
+                        if let Some(pane) = self.workspace.pane(pane_id) {
+                            let cwd = pane.cwd.clone().unwrap_or_else(default_directory);
+                            spawned.push((pane_id, cwd));
+                        }
                         changed = true;
                     }
                 }
@@ -2480,6 +2484,15 @@ impl WindowState {
         }
         self.spawner.pump();
         if changed {
+            // Splits commonly share a directory; inspect each distinct cwd
+            // once and fan the result out to every pane in the group.
+            let mut groups: HashMap<PathBuf, Vec<PaneId>> = HashMap::new();
+            for (pane, cwd) in spawned {
+                groups.entry(cwd).or_default().push(pane);
+            }
+            for (cwd, panes) in groups {
+                self.request_git_status_group(panes, cwd);
+            }
             self.apply_scrollback_policy(config);
             self.window.request_redraw();
         }
