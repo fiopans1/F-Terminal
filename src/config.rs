@@ -506,6 +506,52 @@ pub fn config_path() -> Option<PathBuf> {
     }
 }
 
+/// Directory for disposable caches such as the system font index.
+///
+/// `F_TERMINAL_CACHE_DIR` overrides the platform default and is treated as the
+/// cache directory itself, not as a parent of it.
+pub fn cache_dir() -> Option<PathBuf> {
+    if let Some(path) = std::env::var_os("F_TERMINAL_CACHE_DIR") {
+        let path = PathBuf::from(path);
+        if !path.as_os_str().is_empty() {
+            return Some(path);
+        }
+    }
+
+    #[cfg(windows)]
+    {
+        let base = std::env::var_os("LOCALAPPDATA")?;
+        Some(PathBuf::from(base).join("f-terminal").join("cache"))
+    }
+
+    #[cfg(target_os = "macos")]
+    {
+        let base = std::env::var_os("HOME")?;
+        Some(
+            PathBuf::from(base)
+                .join("Library")
+                .join("Caches")
+                .join("f-terminal"),
+        )
+    }
+
+    #[cfg(all(unix, not(target_os = "macos")))]
+    {
+        if let Some(base) = std::env::var_os("XDG_CACHE_HOME") {
+            return Some(PathBuf::from(base).join("f-terminal"));
+        }
+        if let Some(base) = std::env::var_os("HOME") {
+            return Some(PathBuf::from(base).join(".cache").join("f-terminal"));
+        }
+        None
+    }
+
+    #[cfg(not(any(unix, windows)))]
+    {
+        None
+    }
+}
+
 fn write_default_config(path: &Path) -> std::io::Result<()> {
     if let Some(parent) = path.parent() {
         fs::create_dir_all(parent)?;
