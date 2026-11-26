@@ -1969,9 +1969,13 @@ impl WindowState {
         // Paint once while the window is still hidden so Windows never shows
         // an unpainted white frame. Rendering a second time after showing
         // covers platforms that ignore presents on hidden surfaces.
+        let hidden_draw = Instant::now();
         state.on_redraw(config);
+        log::debug!("hidden first draw took {:?}", hidden_draw.elapsed());
         state.window.set_visible(true);
+        let visible_draw = Instant::now();
         state.on_redraw(config);
+        log::debug!("visible first draw took {:?}", visible_draw.elapsed());
         state.window.request_redraw();
         state.start_deferred_workers(config);
 
@@ -2966,11 +2970,17 @@ impl WindowState {
         self.close_search();
         self.clear_link_hover();
         let cwd = self.focused_cwd();
-        let profile_id = self
-            .workspace
-            .focused_pane()
+        let focused = self.workspace.focused_pane();
+        let profile_id = focused
             .and_then(|id| self.workspace.pane(id))
             .map(|pane| pane.profile_id.clone())
+            .or_else(|| {
+                focused.and_then(|id| {
+                    self.pending_spawns
+                        .get(&id)
+                        .map(|spawn| spawn.profile_id.clone())
+                })
+            })
             .unwrap_or_else(|| self.shells.default_id.clone());
         let Some(new_pane) = self.workspace.split_focused(direction) else {
             return;

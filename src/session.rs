@@ -403,7 +403,16 @@ pub fn read_scrollback(path: &Path) -> Option<Vec<u8>> {
         return None;
     }
     match fs::read(path) {
-        Ok(bytes) => decode_scrollback(&bytes),
+        Ok(bytes) => {
+            // Current-format files can be replayed as-is (the leading SGR
+            // resets are harmless), avoiding a second copy of the history in
+            // memory while the pane is being built.
+            if bytes.starts_with(SCROLLBACK_MAGIC.as_bytes()) {
+                (bytes.len() > SCROLLBACK_MAGIC.len()).then_some(bytes)
+            } else {
+                decode_scrollback(&bytes)
+            }
+        }
         Err(error) => {
             log::warn!("could not read {}: {error}", path.display());
             None
@@ -756,6 +765,19 @@ mod tests {
         let json = serde_json::to_string(&state).unwrap();
         let parsed: SessionState = serde_json::from_str(&json).unwrap();
         assert_eq!(parsed, state);
+    }
+
+    #[test]
+    fn saved_grids_reject_impossible_sizes() {
+        assert!(
+            SavedGrid {
+                cols: 80,
+                lines: 24
+            }
+            .is_valid()
+        );
+        assert!(!SavedGrid { cols: 0, lines: 24 }.is_valid());
+        assert!(!SavedGrid { cols: 80, lines: 0 }.is_valid());
     }
 
     #[test]
