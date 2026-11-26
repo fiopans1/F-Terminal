@@ -197,7 +197,9 @@ impl Session {
         let spawned = std::thread::Builder::new()
             .name(format!("pty-reader-{}", pane.0))
             .spawn(move || {
-                let mut buffer = vec![0u8; 256 * 1024];
+                // 64 KiB is enough to drain a busy PTY without reserving a
+                // large buffer for every open pane.
+                let mut buffer = vec![0u8; 64 * 1024];
                 loop {
                     match reader.read(&mut buffer) {
                         Ok(0) => break,

@@ -2340,7 +2340,7 @@ impl WindowState {
                 }
                 continue;
             }
-            if self.spawner.is_active(*pane_id) {
+            if self.spawner.is_active(*pane_id) || self.spawn_errors.contains_key(pane_id) {
                 continue;
             }
             if !self.pending_spawns.contains_key(pane_id) {
