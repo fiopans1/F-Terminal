@@ -762,6 +762,14 @@ impl ApplicationHandler<UserEvent> for App {
                 self.open_agent_window(event_loop);
                 return;
             }
+            UserEvent::Menu(menu::Action::Quit) => {
+                if let Some(state) = &mut self.window {
+                    state.request_close(event_loop, &self.config);
+                } else {
+                    event_loop.exit();
+                }
+                return;
+            }
             _ => {}
         }
 
@@ -1415,10 +1423,6 @@ impl PaneSpawner {
         self.queue.retain(|request| request.pane_id != pane);
     }
 
-    fn cancel_queued_all(&mut self) {
-        self.queue.clear();
-    }
-
     fn retain_queued(&mut self, mut keep: impl FnMut(PaneId) -> bool) {
         self.queue.retain(|request| keep(request.pane_id));
     }
@@ -1944,7 +1948,9 @@ impl WindowState {
             state.pending_spawns.clear();
             state.pending_input.clear();
             state.spawn_errors.clear();
-            state.spawner.cancel_queued_all();
+            // Drop the old spawner so results for the discarded panes cannot
+            // be inserted into the fresh workspace (pane ids would collide).
+            state.spawner = PaneSpawner::new(state.proxy.clone());
             state.saved_scrollback.clear();
             state.sidebar.collapsed_tabs.clear();
             state.explorer = FileExplorer::empty(working_directory.clone());
@@ -3384,6 +3390,9 @@ impl WindowState {
                 self.window.focus_window();
                 self.open_about();
             }
+            // Quit needs the event loop to save and close; `App::user_event`
+            // handles it before it can reach this method.
+            menu::Action::Quit => {}
         }
     }
 

@@ -19,6 +19,7 @@ pub enum Action {
     AgentMode,
     Settings,
     About,
+    Quit,
 }
 
 #[cfg_attr(not(target_os = "macos"), allow(dead_code))]
@@ -32,6 +33,7 @@ impl Action {
             "agent-mode" => Some(Self::AgentMode),
             "open-settings" => Some(Self::Settings),
             "about" => Some(Self::About),
+            "quit" => Some(Self::Quit),
             _ => None,
         }
     }
@@ -107,6 +109,7 @@ pub struct MenuState {
 #[cfg(target_os = "macos")]
 impl MenuState {
     pub fn install(proxy: EventLoopProxy<UserEvent>) -> anyhow::Result<Self> {
+        use muda::accelerator::{Accelerator, CMD_OR_CTRL, Code};
         use muda::{IsMenuItem, Menu, MenuEvent, MenuItem, PredefinedMenuItem, Submenu};
 
         let explorer = MenuItem::with_id("open-explorer", "Open Explorer", true, None);
@@ -120,7 +123,14 @@ impl MenuState {
         let separator_zero = PredefinedMenuItem::separator();
         let separator_one = PredefinedMenuItem::separator();
         let separator_two = PredefinedMenuItem::separator();
-        let quit = PredefinedMenuItem::quit(Some("Quit"));
+        // A custom item instead of the predefined Quit role: NSApp would
+        // terminate the process directly and skip the final session save.
+        let quit = MenuItem::with_id(
+            "quit",
+            "Quit",
+            true,
+            Some(Accelerator::new(CMD_OR_CTRL, Code::KeyQ)),
+        );
 
         let items: [&dyn IsMenuItem; 11] = [
             &about,
@@ -191,6 +201,7 @@ mod tests {
             Some(Action::Settings)
         );
         assert_eq!(Action::from_menu_id("about"), Some(Action::About));
+        assert_eq!(Action::from_menu_id("quit"), Some(Action::Quit));
         assert_eq!(Action::from_menu_id("unknown"), None);
     }
 }
