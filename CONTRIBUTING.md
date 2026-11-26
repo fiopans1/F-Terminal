@@ -1,12 +1,12 @@
 # Contribuir a F-Terminal
 
-Gracias por querer mejorar F-Terminal. La documentación está en español, pero
-issues y pull requests en inglés son bienvenidos.
+Gracias por querer mejorar F-Terminal. La documentación está disponible en
+español y en inglés; issues y pull requests en inglés son bienvenidos.
 
 ## Antes de empezar
 
-- Revisa el [README](README.md), el [roadmap](README.md#roadmap) y los issues
-  existentes.
+- Revisa la [documentación](docs/README.md), el
+  [roadmap](docs/es/desarrollo.md#roadmap) y los issues existentes.
 - Para bugs de seguridad, sigue [SECURITY.md](SECURITY.md); no abras un issue
   público.
 - Las propuestas grandes conviene discutirlas en un issue antes de escribir
@@ -39,7 +39,7 @@ La configuración se lee de `~/.config/f-terminal/config.toml` (o
 - Sigue el estilo del código existente: Rust 2024, módulos pequeños y errores
   con contexto (`anyhow::Context`).
 - Los comentarios y nombres de código van en inglés; la documentación de usuario
-  va en español.
+  está en español y en inglés.
 - Evita dependencias nuevas si la biblioteca estándar resuelve el problema.
 - No mezcles refactors masivos con cambios funcionales.
 - Para UI, mantén el render ligero: los datos temporales deben liberarse al
@@ -72,7 +72,8 @@ instaladores completos y ConPTY se validan en el workflow de release de tags.
 - Un commit debe contar una cosa. Si el cambio tiene partes independientes,
   sepáralas.
 - Incluye tests para bugs corregidos y para lógica nueva que pueda romperse.
-- Actualiza README o CHANGELOG si el cambio es visible para el usuario.
+- Actualiza la documentación en `docs/` o el CHANGELOG si el cambio es visible
+  para el usuario.
 - En el PR explica el problema, la solución y cómo lo has probado, incluyendo
   la plataforma.
 - No incluyas credenciales, tokens, rutas privadas ni logs sin revisar.

@@ -6,7 +6,7 @@ body:
   - type: markdown
     attributes:
       value: |
-        Antes de abrir la propuesta, revisa el [roadmap](https://github.com/fiopans1/F-Terminal#roadmap)
+        Antes de abrir la propuesta, revisa el [roadmap](https://github.com/fiopans1/F-Terminal/blob/main/docs/es/desarrollo.md#roadmap)
         y los issues existentes. Las propuestas pequeñas y centradas son más fáciles de revisar.
 
   - type: textarea

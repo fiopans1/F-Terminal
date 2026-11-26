@@ -136,6 +136,8 @@ usa [Versionado Semántico](https://semver.org/lang/es/).
 - Los botones de cerrar de la sidebar y del panel lateral se dibujan como icono
   vectorial, no como glifo de fuente, para que se vean igual en Windows.
 - Los tests de render GPU se omiten en CI porque requieren un adaptador real.
+- El README queda como resumen del proyecto: la documentación completa se
+  traslada a `docs/`, con versiones en español e inglés.
 
 ### Fixed
 

@@ -1,7 +1,7 @@
 blank_issues_enabled: true
 contact_links:
   - name: Documentación
-    url: https://github.com/fiopans1/F-Terminal/blob/main/README.md
+    url: https://github.com/fiopans1/F-Terminal/blob/main/docs/README.md
     about: Características, configuración, atajos y arquitectura.
   - name: Reportar una vulnerabilidad
     url: https://github.com/fiopans1/F-Terminal/security/advisories/new

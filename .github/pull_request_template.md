@@ -25,7 +25,8 @@
 
 - [ ] El cambio está centrado y no mezcla refactors ajenos.
 - [ ] He añadido o actualizado tests cuando corresponde.
-- [ ] He actualizado README/CHANGELOG si el cambio es visible para el usuario.
+- [ ] He actualizado la documentación (`docs/`) o el CHANGELOG si el cambio es
+      visible para el usuario.
 - [ ] No incluyo tokens, credenciales ni rutas privadas.
 - [ ] Acepto que la contribución se publique bajo AGPL-3.0.
 
