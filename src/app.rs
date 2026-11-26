@@ -1463,9 +1463,9 @@ fn schedule_early_spawns(
     pending: &HashMap<PaneId, PendingSpawn>,
     shells: &ShellCatalog,
     config: &Config,
-) {
+) -> usize {
     let Some(tab) = workspace.active_tab() else {
-        return;
+        return 0;
     };
     let focused = tab.focused;
     let fallback_profile = shells.default_profile().clone();
@@ -1492,12 +1492,14 @@ fn schedule_early_spawns(
             config.scrollback_lines,
         ));
     }
+    let count = requests.len();
     requests.sort_by_key(|request| (request.pane_id != focused, request.pane_id.0));
     for request in requests {
         let is_focused = request.pane_id == focused;
         spawner.schedule(request, is_focused);
     }
     spawner.pump();
+    count
 }
 
 fn build_pane(request: SpawnRequest, proxy: EventLoopProxy<UserEvent>) -> SpawnOutcome {
@@ -1730,7 +1732,9 @@ impl WindowState {
         proxy: EventLoopProxy<UserEvent>,
     ) -> anyhow::Result<Self> {
         let startup = Instant::now();
+        let session_started = Instant::now();
         let saved_session = config.restore_session.then(session::load).flatten();
+        log::debug!("session load took {:?}", session_started.elapsed());
         let saved_window = saved_session
             .as_ref()
             .and_then(|session| session.window.as_ref());
@@ -1754,15 +1758,19 @@ impl WindowState {
                 attributes = attributes.with_position(PhysicalPosition::new(x, y));
             }
         }
+        let window_started = Instant::now();
         let window = Arc::new(event_loop.create_window(attributes)?);
         window.set_ime_allowed(true);
         if saved_window.is_some_and(|saved| saved.maximized) {
             window.set_maximized(true);
         }
+        log::debug!("window created in {:?}", window_started.elapsed());
 
         let working_directory = default_directory();
         log::info!("working directory: {}", working_directory.display());
+        let shells_started = Instant::now();
         let shells = ShellCatalog::detect(config.shell.as_deref());
+        log::debug!("shell profiles detected in {:?}", shells_started.elapsed());
         log::info!(
             "detected {} shell profile(s), default: {}",
             shells.profiles.len(),
@@ -1778,6 +1786,7 @@ impl WindowState {
                 .join(", ")
         );
 
+        let restore_started = Instant::now();
         let mut workspace = Workspace::new();
         let restored = restore_workspace(
             &mut workspace,
@@ -1786,6 +1795,7 @@ impl WindowState {
             &working_directory,
             config.restore_scrollback,
         );
+        log::debug!("workspace restored in {:?}", restore_started.elapsed());
         let pending_spawns = restored.pending;
         let next_session_key = restored.next_key;
         let collapsed_tabs = restored.collapsed;
@@ -1798,10 +1808,21 @@ impl WindowState {
         // Start shells for panes whose previous grid is known while the GPU
         // and font system initialise. They do not block the first frame.
         let mut spawner = PaneSpawner::new(proxy.clone());
-        schedule_early_spawns(&mut spawner, &workspace, &pending_spawns, &shells, config);
+        let early_started = Instant::now();
+        let early =
+            schedule_early_spawns(&mut spawner, &workspace, &pending_spawns, &shells, config);
+        log::debug!(
+            "scheduled {early} early pane spawn(s) in {:?}",
+            early_started.elapsed()
+        );
 
+        let render_started = Instant::now();
         let renderer = pollster::block_on(Renderer::new(window.clone(), event_loop, config, None))?;
-        log::info!("renderer ready in {:?}", startup.elapsed());
+        log::info!(
+            "renderer ready in {:?} (init {:?})",
+            startup.elapsed(),
+            render_started.elapsed()
+        );
 
         let highlight_tx = highlight::spawn_worker(proxy.clone());
         let agent_watch_tx = if config.agents.enabled {
@@ -7378,6 +7399,9 @@ impl WindowState {
         let Some(pane_id) = self.pane_at(x, y) else {
             return;
         };
+        if self.workspace.pane(pane_id).is_none() {
+            return;
+        }
 
         if self
             .view

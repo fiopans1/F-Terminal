@@ -759,6 +759,26 @@ mod tests {
     }
 
     #[test]
+    fn saved_panes_without_a_grid_still_load() {
+        let json = r#"{
+            "version": 1,
+            "window": null,
+            "active_tab": 0,
+            "tabs": [{
+                "title": null,
+                "custom_title": null,
+                "pinned": false,
+                "focused": 0,
+                "layout": {"kind":"leaf","index":0},
+                "panes": [{"key":1,"profile_id":"unix:/bin/sh","cwd":"/tmp"}]
+            }],
+            "collapsed_tabs": []
+        }"#;
+        let state: SessionState = serde_json::from_str(json).unwrap();
+        assert_eq!(state.tabs[0].panes[0].grid, None);
+    }
+
+    #[test]
     fn scrollback_replays_text_and_colors() {
         let (grid, size) = grid_for("hello \x1b[31mred\x1b[0m\r\n");
         let ansi = ansi_from_grid(&grid, size, Theme::foundry()).unwrap();

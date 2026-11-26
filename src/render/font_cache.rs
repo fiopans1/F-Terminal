@@ -400,10 +400,10 @@ impl FontIndex {
                     age.as_secs() / (24 * 60 * 60)
                 ));
             }
-        } else if let Ok(ahead) = built_at.duration_since(now) {
-            if ahead > CLOCK_SKEW {
-                return Err("cache was built in the future".to_owned());
-            }
+        } else if let Ok(ahead) = built_at.duration_since(now)
+            && ahead > CLOCK_SKEW
+        {
+            return Err("cache was built in the future".to_owned());
         }
 
         // Font collections produce multiple faces per file, so only stat each
@@ -546,23 +546,14 @@ fn unix_secs(time: SystemTime) -> Option<u64> {
     Some(time.duration_since(UNIX_EPOCH).ok()?.as_secs())
 }
 
-/// Derive a BCP-47-ish locale from the environment without adding a
-/// dependency. `en_US.UTF-8` becomes `en-US`.
+/// Match `FontSystem::new`'s locale detection so warm starts shape fallback
+/// glyphs exactly like a cold scan. The direct dependency is already pulled in
+/// by cosmic-text.
 fn system_locale() -> String {
-    for key in ["LC_ALL", "LC_MESSAGES", "LANG"] {
-        let Some(value) = std::env::var_os(key) else {
-            continue;
-        };
-        let Some(value) = value.to_str() else {
-            continue;
-        };
-        if let Some(locale) = parse_locale(value) {
-            return locale;
-        }
-    }
-    "en-US".to_owned()
+    sys_locale::get_locale().unwrap_or_else(|| "en-US".to_owned())
 }
 
+#[cfg(test)]
 fn parse_locale(value: &str) -> Option<String> {
     let value = value.trim();
     let value = value.split('@').next().unwrap_or(value);
@@ -680,7 +671,7 @@ mod tests {
     fn missing_font_file_invalidates() {
         let temp = TempDir::new();
         let font = temp.write("missing.ttf", b"fake font");
-        let index = sample_index(&[font.clone()]);
+        let index = sample_index(std::slice::from_ref(&font));
 
         fs::remove_file(&font).expect("remove temp font");
 
@@ -691,7 +682,7 @@ mod tests {
     fn stale_font_file_invalidates() {
         let temp = TempDir::new();
         let font = temp.write("stale.ttf", b"short");
-        let index = sample_index(&[font.clone()]);
+        let index = sample_index(std::slice::from_ref(&font));
 
         fs::write(&font, b"a much longer replacement").expect("rewrite temp font");
 
