@@ -32,6 +32,9 @@ pub enum UserEvent {
     PtyData { pane: PaneId, bytes: Vec<u8> },
     /// The child process closed its PTY.
     PtyClosed { pane: PaneId },
+    /// A background pane spawn finished (success or failure). Results are
+    /// carried by a channel in `WindowState`; this event only wakes the UI.
+    PaneSpawnReady,
     /// Event emitted by the VT state machine (title, DA responses, clipboard...).
     Term { pane: PaneId, event: Event },
     /// Executable names discovered in `PATH` for completion.

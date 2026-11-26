@@ -265,6 +265,11 @@ impl Pane {
         })
     }
 
+    /// Begin forwarding PTY output once the pane is part of the workspace.
+    pub fn start_reader(&mut self) {
+        self.session.start_reader();
+    }
+
     pub fn resize(&mut self, grid: GridSize) -> bool {
         if grid == self.grid {
             return false;
@@ -502,6 +507,12 @@ impl Workspace {
 
     pub fn pane(&self, id: PaneId) -> Option<&Pane> {
         self.tabs.iter().find_map(|tab| tab.panes.get(&id))
+    }
+
+    /// Whether a pane id is still referenced by any tab layout, even if its
+    /// PTY has not been spawned yet.
+    pub fn contains_pane(&self, id: PaneId) -> bool {
+        self.tabs.iter().any(|tab| tab.layout.contains(id))
     }
 
     pub fn pane_mut(&mut self, id: PaneId) -> Option<&mut Pane> {

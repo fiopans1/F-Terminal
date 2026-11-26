@@ -96,11 +96,27 @@ impl Default for SavedTab {
     }
 }
 
+/// Last visible grid of a pane. Persisted so the next startup can start the
+/// shell at the right size before the renderer knows the new cell metrics.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct SavedGrid {
+    pub cols: usize,
+    pub lines: usize,
+}
+
+impl SavedGrid {
+    pub fn is_valid(self) -> bool {
+        self.cols >= 2 && self.lines >= 1
+    }
+}
+
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub struct SavedPane {
     pub key: u64,
     pub profile_id: String,
     pub cwd: Option<String>,
+    #[serde(default)]
+    pub grid: Option<SavedGrid>,
 }
 
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
@@ -663,6 +679,10 @@ mod tests {
                     key: 7,
                     profile_id: "windows:pwsh".into(),
                     cwd: Some(r"C:\github\api".into()),
+                    grid: Some(SavedGrid {
+                        cols: size.cols,
+                        lines: size.lines,
+                    }),
                 }],
             }],
             collapsed_tabs: Vec::new(),
@@ -717,11 +737,16 @@ mod tests {
                         key: 1,
                         profile_id: "windows:pwsh".into(),
                         cwd: Some(r"C:\github\api".into()),
+                        grid: Some(SavedGrid {
+                            cols: 120,
+                            lines: 40,
+                        }),
                     },
                     SavedPane {
                         key: 2,
                         profile_id: "windows:wsl:Ubuntu".into(),
                         cwd: Some(r"\\wsl$\Ubuntu\home\me".into()),
+                        grid: None,
                     },
                 ],
             }],

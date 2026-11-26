@@ -86,6 +86,11 @@ pub struct Session {
     master: Box<dyn MasterPty + Send>,
     writer: Box<dyn Write + Send>,
     child: Box<dyn Child + Send + Sync>,
+    /// Kept unread until the pane is inserted into the workspace. This lets a
+    /// pane be built on a worker thread without losing early shell output.
+    reader: Option<Box<dyn Read + Send>>,
+    proxy: EventLoopProxy<UserEvent>,
+    pane: PaneId,
     size: PtySize,
 }
 
@@ -160,7 +165,7 @@ impl Session {
         // EOF when the child exits.
         drop(pair.slave);
 
-        let mut reader = pair
+        let reader = pair
             .master
             .try_clone_reader()
             .context("failed to clone the PTY reader")?;
@@ -169,8 +174,28 @@ impl Session {
             .take_writer()
             .context("failed to take the PTY writer")?;
 
-        std::thread::Builder::new()
-            .name("pty-reader".into())
+        Ok(Self {
+            master: pair.master,
+            writer,
+            child,
+            reader: Some(reader),
+            proxy,
+            pane,
+            size,
+        })
+    }
+
+    /// Start forwarding PTY output to the UI. Panes built on a worker thread
+    /// call this only after they have been inserted into the workspace, so no
+    /// output is dropped or attributed to an unknown pane.
+    pub fn start_reader(&mut self) {
+        let Some(mut reader) = self.reader.take() else {
+            return;
+        };
+        let proxy = self.proxy.clone();
+        let pane = self.pane;
+        let spawned = std::thread::Builder::new()
+            .name(format!("pty-reader-{}", pane.0))
             .spawn(move || {
                 let mut buffer = vec![0u8; 256 * 1024];
                 loop {
@@ -196,15 +221,13 @@ impl Session {
                     }
                 }
                 let _ = proxy.send_event(UserEvent::PtyClosed { pane });
-            })
-            .context("failed to spawn the PTY reader thread")?;
-
-        Ok(Self {
-            master: pair.master,
-            writer,
-            child,
-            size,
-        })
+            });
+        if let Err(error) = spawned {
+            log::warn!(
+                "failed to spawn the PTY reader for pane {}: {error}",
+                pane.0
+            );
+        }
     }
 
     pub fn process_id(&self) -> Option<u32> {

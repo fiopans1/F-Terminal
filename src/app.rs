@@ -1,8 +1,8 @@
-use std::collections::{HashMap, HashSet};
+use std::collections::{HashMap, HashSet, VecDeque};
 use std::io::IsTerminal;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
-use std::sync::mpsc::Sender;
+use std::sync::mpsc::{Receiver, Sender};
 use std::time::{Duration, Instant, SystemTime};
 
 use alacritty_terminal::event::{Event, WindowSize};
@@ -44,24 +44,34 @@ use crate::render::{CellMetrics, Renderer, SharedRenderResources, grid_size_for}
 use crate::review::{self, ReviewDetail, ReviewKind, ReviewSummary};
 use crate::review_window::ReviewWindow;
 use crate::session::{
-    self, SavedDirection, SavedLayout, SavedPane, SavedTab, SavedWindow, ScrollbackSource,
-    SessionState, SessionWriter,
+    self, SavedDirection, SavedGrid, SavedLayout, SavedPane, SavedTab, SavedWindow,
+    ScrollbackSource, SessionState, SessionWriter,
 };
 use crate::shell::{ShellCatalog, TerminalProfile};
 use crate::sidebar::{
     self, LayoutSpec, Sidebar, SidebarHit, SidebarLayout, SidebarMode, SidebarRow, TabSummary,
 };
+use crate::term::GridSize;
 use crate::term::color::{Rgb, Theme, to_linear};
 use crate::term::frame::{Background, Cursor, CursorShapeKind, Frame, Row, Run};
 use crate::term::program_status::{BlockKind, ProgramRecord, ProgramState};
 use crate::ui;
-use crate::workspace::{CloseOutcome, Pane, PaneId, SplitDirection, TabId, Workspace};
+use crate::workspace::{
+    CloseOutcome, Pane, PaneId, PaneRestore, SplitDirection, Tab, TabId, Workspace,
+};
 
 const GIT_STATUS_POLL_INTERVAL: Duration = Duration::from_secs(3);
 const APP_DEVELOPER: &str = "Diego Suárez Ramos";
 const APP_REPOSITORY: &str = env!("CARGO_PKG_REPOSITORY");
 const APP_VERSION: &str = env!("CARGO_PKG_VERSION");
 const TITLE_BAR_HEIGHT: f32 = 36.0;
+/// PTY creation is I/O bound but each shell also starts its own rc scripts.
+/// A small cap keeps restored layouts responsive without spawning a process
+/// storm or starving the renderer.
+const MAX_CONCURRENT_PANE_SPAWNS: usize = 4;
+/// Keystrokes typed into a pane that is still starting are held here instead of
+/// being lost. The cap protects against a runaway paste into a dead pane.
+const MAX_PENDING_INPUT_BYTES: usize = 8 * 1024;
 
 pub struct App {
     proxy: EventLoopProxy<UserEvent>,
@@ -768,6 +778,9 @@ impl ApplicationHandler<UserEvent> for App {
             UserEvent::PtyClosed { pane } => {
                 state.close_pane(pane, event_loop, &self.config);
             }
+            UserEvent::PaneSpawnReady => {
+                state.drain_spawns(&self.config);
+            }
             UserEvent::Term { pane, event } => {
                 state.on_term_event(pane, event, event_loop, &self.config);
             }
@@ -1194,6 +1207,11 @@ struct WindowState {
     diff_generation: u64,
     editor_ratio: f32,
     pending_spawns: HashMap<PaneId, PendingSpawn>,
+    spawner: PaneSpawner,
+    /// Input typed before a pane finishes starting, flushed on insertion.
+    pending_input: HashMap<PaneId, Vec<u8>>,
+    /// Spawn failures shown in the pane placeholder until the user retries.
+    spawn_errors: HashMap<PaneId, String>,
     shells: ShellCatalog,
     focus: Focus,
     completion: complete::Engine,
@@ -1297,6 +1315,241 @@ struct PendingSpawn {
     session_key: u64,
     scrollback: Option<PathBuf>,
     initial_command: Option<String>,
+    /// Grid saved by the previous session. Used to start the shell before the
+    /// renderer is ready; `None` falls back to spawning after layout.
+    grid: Option<GridSize>,
+}
+
+/// Everything a worker thread needs to build one pane without borrowing the
+/// UI state.
+struct SpawnRequest {
+    pane_id: PaneId,
+    grid: GridSize,
+    profile: TerminalProfile,
+    fallback_profile: TerminalProfile,
+    cwd: PathBuf,
+    fallback_cwd: PathBuf,
+    session_key: u64,
+    scrollback: Option<PathBuf>,
+    initial_command: Option<String>,
+    cached_status: Option<GitStatus>,
+    scrollback_lines: usize,
+}
+
+type SpawnOutcome = (PaneId, anyhow::Result<Pane>);
+
+/// Bounded background spawner. Workers send finished panes through a channel;
+/// a cheap `UserEvent::PaneSpawnReady` wakes the UI so it can drain them.
+struct PaneSpawner {
+    proxy: EventLoopProxy<UserEvent>,
+    tx: Sender<SpawnOutcome>,
+    rx: Receiver<SpawnOutcome>,
+    queue: VecDeque<SpawnRequest>,
+    in_flight: HashSet<PaneId>,
+}
+
+impl PaneSpawner {
+    fn new(proxy: EventLoopProxy<UserEvent>) -> Self {
+        let (tx, rx) = std::sync::mpsc::channel();
+        Self {
+            proxy,
+            tx,
+            rx,
+            queue: VecDeque::new(),
+            in_flight: HashSet::new(),
+        }
+    }
+
+    fn is_active(&self, pane: PaneId) -> bool {
+        self.in_flight.contains(&pane) || self.queue.iter().any(|request| request.pane_id == pane)
+    }
+
+    fn schedule(&mut self, request: SpawnRequest, focused: bool) {
+        if self.is_active(request.pane_id) {
+            return;
+        }
+        if focused {
+            self.queue.push_front(request);
+        } else {
+            self.queue.push_back(request);
+        }
+    }
+
+    fn pump(&mut self) {
+        while self.in_flight.len() < MAX_CONCURRENT_PANE_SPAWNS {
+            let Some(request) = self.queue.pop_front() else {
+                break;
+            };
+            let pane_id = request.pane_id;
+            self.in_flight.insert(pane_id);
+            let tx = self.tx.clone();
+            let proxy = self.proxy.clone();
+            let spawned = std::thread::Builder::new()
+                .name(format!("pane-spawn-{}", pane_id.0))
+                .spawn(move || {
+                    let outcome = build_pane(request, proxy.clone());
+                    let _ = tx.send(outcome);
+                    let _ = proxy.send_event(UserEvent::PaneSpawnReady);
+                });
+            if let Err(error) = spawned {
+                self.in_flight.remove(&pane_id);
+                let message = format!("could not start the pane spawn worker: {error}");
+                let _ = self.tx.send((pane_id, Err(anyhow::anyhow!(message))));
+                let _ = self.proxy.send_event(UserEvent::PaneSpawnReady);
+            }
+        }
+    }
+
+    fn drain(&mut self) -> Vec<SpawnOutcome> {
+        let mut outcomes = Vec::new();
+        while let Ok(outcome) = self.rx.try_recv() {
+            outcomes.push(outcome);
+        }
+        for (pane, _) in &outcomes {
+            self.in_flight.remove(pane);
+        }
+        outcomes
+    }
+
+    fn cancel_queued(&mut self, pane: PaneId) {
+        self.queue.retain(|request| request.pane_id != pane);
+    }
+
+    fn cancel_queued_all(&mut self) {
+        self.queue.clear();
+    }
+
+    fn retain_queued(&mut self, mut keep: impl FnMut(PaneId) -> bool) {
+        self.queue.retain(|request| keep(request.pane_id));
+    }
+}
+
+#[allow(clippy::too_many_arguments)]
+fn spawn_request_from_pending(
+    pane_id: PaneId,
+    grid: GridSize,
+    spawn: &PendingSpawn,
+    shells: &ShellCatalog,
+    fallback_profile: &TerminalProfile,
+    fallback_cwd: &Path,
+    cached_status: Option<GitStatus>,
+    scrollback_lines: usize,
+) -> SpawnRequest {
+    let profile = shells
+        .get(&spawn.profile_id)
+        .cloned()
+        .unwrap_or_else(|| fallback_profile.clone());
+    SpawnRequest {
+        pane_id,
+        grid,
+        profile,
+        fallback_profile: fallback_profile.clone(),
+        cwd: spawn.cwd.clone(),
+        fallback_cwd: fallback_cwd.to_path_buf(),
+        session_key: spawn.session_key,
+        scrollback: spawn.scrollback.clone(),
+        initial_command: spawn.initial_command.clone(),
+        cached_status,
+        scrollback_lines,
+    }
+}
+
+/// Start shells for the active tab before the renderer exists, using the grid
+/// saved by the previous session. Panes without a saved grid are spawned by
+/// `sync_layout` once the real layout is known.
+fn schedule_early_spawns(
+    spawner: &mut PaneSpawner,
+    workspace: &Workspace,
+    pending: &HashMap<PaneId, PendingSpawn>,
+    shells: &ShellCatalog,
+    config: &Config,
+) {
+    let Some(tab) = workspace.active_tab() else {
+        return;
+    };
+    let focused = tab.focused;
+    let fallback_profile = shells.default_profile().clone();
+    let fallback_cwd = default_directory();
+    let mut requests = Vec::new();
+    for pane_id in tab.leaves() {
+        if workspace.pane(pane_id).is_some() {
+            continue;
+        }
+        let Some(spawn) = pending.get(&pane_id) else {
+            continue;
+        };
+        let Some(grid) = spawn.grid else {
+            continue;
+        };
+        requests.push(spawn_request_from_pending(
+            pane_id,
+            grid,
+            spawn,
+            shells,
+            &fallback_profile,
+            &fallback_cwd,
+            None,
+            config.scrollback_lines,
+        ));
+    }
+    requests.sort_by_key(|request| (request.pane_id != focused, request.pane_id.0));
+    for request in requests {
+        let is_focused = request.pane_id == focused;
+        spawner.schedule(request, is_focused);
+    }
+    spawner.pump();
+}
+
+fn build_pane(request: SpawnRequest, proxy: EventLoopProxy<UserEvent>) -> SpawnOutcome {
+    let pane_id = request.pane_id;
+    let scrollback = request
+        .scrollback
+        .as_deref()
+        .and_then(session::read_scrollback);
+    let restore = PaneRestore {
+        session_key: request.session_key,
+        scrollback: scrollback.as_deref(),
+    };
+    let result = Pane::new(
+        pane_id,
+        request.grid,
+        proxy.clone(),
+        &request.profile,
+        request.cwd.clone(),
+        restore,
+        request.scrollback_lines,
+    )
+    .or_else(|error| {
+        log::warn!(
+            "failed to spawn pane {} with {} in {}: {error:#}; retrying with defaults",
+            pane_id.0,
+            request.profile.name,
+            request.cwd.display()
+        );
+        Pane::new(
+            pane_id,
+            request.grid,
+            proxy,
+            &request.fallback_profile,
+            request.fallback_cwd,
+            restore,
+            request.scrollback_lines,
+        )
+        .with_context(|| format!("failed to spawn fallback shell for pane {}", pane_id.0))
+    });
+
+    match result {
+        Ok(mut pane) => {
+            if pane.cwd.as_deref() == Some(request.cwd.as_path()) {
+                pane.git_status = request.cached_status;
+            }
+            if let Some(command) = request.initial_command {
+                pane.session.write(format!("{command}\r").as_bytes());
+            }
+            (pane_id, Ok(pane))
+        }
+        Err(error) => (pane_id, Err(error)),
+    }
 }
 
 struct RestoredWorkspace {
@@ -1357,6 +1610,13 @@ fn restore_workspace(
                         session_key: saved.key,
                         scrollback,
                         initial_command: None,
+                        grid: saved
+                            .grid
+                            .filter(|grid| grid.is_valid())
+                            .map(|grid| GridSize {
+                                cols: grid.cols,
+                                lines: grid.lines,
+                            }),
                     },
                 );
                 next_key = next_key.max(saved.key.saturating_add(1));
@@ -1383,6 +1643,7 @@ fn restore_workspace(
                 session_key: next_key,
                 scrollback: None,
                 initial_command: None,
+                grid: None,
             },
         );
         next_key += 1;
@@ -1393,30 +1654,6 @@ fn restore_workspace(
         next_key,
         collapsed,
     }
-}
-
-fn read_scrollbacks(paths: Vec<(PaneId, PathBuf)>) -> HashMap<PaneId, Vec<u8>> {
-    if paths.len() == 1 {
-        let (pane, path) = paths.into_iter().next().unwrap();
-        return session::read_scrollback(&path)
-            .map(|bytes| (pane, bytes))
-            .into_iter()
-            .collect();
-    }
-
-    std::thread::scope(|scope| {
-        let handles: Vec<_> = paths
-            .into_iter()
-            .map(|(pane, path)| scope.spawn(move || (pane, session::read_scrollback(&path))))
-            .collect();
-        handles
-            .into_iter()
-            .filter_map(|handle| {
-                let (pane, bytes) = handle.join().ok()?;
-                bytes.map(|bytes| (pane, bytes))
-            })
-            .collect()
-    })
 }
 
 fn convert_saved_layout(layout: &SavedLayout) -> crate::workspace::LayoutSpec {
@@ -1523,9 +1760,6 @@ impl WindowState {
             window.set_maximized(true);
         }
 
-        let renderer = pollster::block_on(Renderer::new(window.clone(), event_loop, config, None))?;
-        log::info!("renderer ready in {:?}", startup.elapsed());
-
         let working_directory = default_directory();
         log::info!("working directory: {}", working_directory.display());
         let shells = ShellCatalog::detect(config.shell.as_deref());
@@ -1560,6 +1794,14 @@ impl WindowState {
             .and_then(|id| pending_spawns.get(&id))
             .map(|spawn| spawn.cwd.clone())
             .unwrap_or_else(|| working_directory.clone());
+
+        // Start shells for panes whose previous grid is known while the GPU
+        // and font system initialise. They do not block the first frame.
+        let mut spawner = PaneSpawner::new(proxy.clone());
+        schedule_early_spawns(&mut spawner, &workspace, &pending_spawns, &shells, config);
+
+        let renderer = pollster::block_on(Renderer::new(window.clone(), event_loop, config, None))?;
+        log::info!("renderer ready in {:?}", startup.elapsed());
 
         let highlight_tx = highlight::spawn_worker(proxy.clone());
         let agent_watch_tx = if config.agents.enabled {
@@ -1652,6 +1894,9 @@ impl WindowState {
             diff_generation: 0,
             editor_ratio: 0.42,
             pending_spawns,
+            spawner,
+            pending_input: HashMap::new(),
+            spawn_errors: HashMap::new(),
             shells,
             focus: Focus::Terminal,
             completion,
@@ -1673,6 +1918,9 @@ impl WindowState {
             log::warn!("could not restore the previous session: {error:#}; starting fresh");
             state.workspace = Workspace::new();
             state.pending_spawns.clear();
+            state.pending_input.clear();
+            state.spawn_errors.clear();
+            state.spawner.cancel_queued_all();
             state.saved_scrollback.clear();
             state.sidebar.collapsed_tabs.clear();
             state.explorer = FileExplorer::empty(working_directory.clone());
@@ -1686,10 +1934,12 @@ impl WindowState {
                     session_key,
                     scrollback: None,
                     initial_command: None,
+                    grid: None,
                 },
             );
             state.sync_layout(config)?;
         }
+        state.drain_spawns(config);
         state.update_window_title();
 
         // Paint once while the window is still hidden so Windows never shows
@@ -1829,10 +2079,12 @@ impl WindowState {
                     self.after_editor_change(before);
                     self.window.request_redraw();
                 } else if self.focus == Focus::Terminal
-                    && let Some(pane) = self.focused_pane_mut()
+                    && let Some(pane_id) = self.workspace.focused_pane()
                 {
-                    pane.session.write(text.as_bytes());
-                    pane.suggestion_armed = true;
+                    self.write_pane_input(pane_id, text.as_bytes());
+                    if let Some(pane) = self.workspace.pane_mut(pane_id) {
+                        pane.suggestion_armed = true;
+                    }
                 }
             }
             WindowEvent::Ime(Ime::Preedit(_text, _cursor)) => {
@@ -1956,6 +2208,7 @@ impl WindowState {
             };
             return Ok(());
         };
+        let focused = tab.focused;
 
         let gap = (2.0 * scale).round().max(1.0);
         let padding = self.renderer.physical(config.padding);
@@ -2044,25 +2297,9 @@ impl WindowState {
             .map(|pane| (pane.id, pane.content))
             .collect();
 
-        // Read the saved history for the panes that are about to spawn in
-        // parallel. Inactive tabs are not touched until they are selected.
-        let mut scrollbacks = HashMap::new();
-        let mut pending_scrollbacks = Vec::new();
-        for (pane_id, _) in &pane_specs {
-            if self.workspace.pane(*pane_id).is_some() {
-                continue;
-            }
-            if let Some(spawn) = self.pending_spawns.get(pane_id)
-                && let Some(path) = &spawn.scrollback
-            {
-                pending_scrollbacks.push((*pane_id, path.clone()));
-            }
-        }
-        if !pending_scrollbacks.is_empty() {
-            scrollbacks = read_scrollbacks(pending_scrollbacks);
-        }
-
-        let mut spawned_panes = Vec::new();
+        let fallback_profile = self.shells.default_profile().clone();
+        let fallback_cwd = default_directory();
+        let mut requests = Vec::new();
         for (pane_id, content) in &pane_specs {
             let grid = grid_size_for(content.width, content.height, metrics);
             if let Some(pane) = self.workspace.pane_mut(*pane_id) {
@@ -2077,80 +2314,80 @@ impl WindowState {
                         search.dirty = true;
                     }
                 }
-            } else {
-                let spawn = match self.pending_spawns.remove(pane_id) {
-                    Some(spawn) => spawn,
-                    None => {
-                        let session_key = self.alloc_session_key();
-                        PendingSpawn {
-                            cwd: default_directory(),
-                            profile_id: self.shells.default_id.clone(),
-                            session_key,
-                            scrollback: None,
-                            initial_command: None,
-                        }
-                    }
-                };
-                let profile = self
-                    .shells
-                    .get(&spawn.profile_id)
-                    .cloned()
-                    .unwrap_or_else(|| self.shells.default_profile().clone());
-                let restore = crate::workspace::PaneRestore {
-                    session_key: spawn.session_key,
-                    scrollback: scrollbacks.get(pane_id).map(Vec::as_slice),
-                };
-                // Reuse the status of a sibling in the same directory so the
-                // bubbles appear immediately; a fresh request runs below.
-                let cached_status = self
-                    .workspace
-                    .tabs
-                    .iter()
-                    .flat_map(|tab| tab.panes.values())
-                    .find(|pane| pane.cwd.as_deref() == Some(spawn.cwd.as_path()))
-                    .and_then(|pane| pane.git_status.clone());
-                let mut pane = match Pane::new(
-                    *pane_id,
-                    grid,
-                    self.proxy.clone(),
-                    &profile,
-                    spawn.cwd.clone(),
-                    restore,
-                    config.scrollback_lines,
-                ) {
-                    Ok(pane) => pane,
-                    Err(error) => {
-                        log::warn!(
-                            "failed to spawn pane {} with {} in {}: {error:#}; retrying with defaults",
-                            pane_id.0,
-                            profile.name,
-                            spawn.cwd.display()
-                        );
-                        let fallback = self.shells.default_profile().clone();
-                        Pane::new(
-                            *pane_id,
-                            grid,
-                            self.proxy.clone(),
-                            &fallback,
-                            default_directory(),
-                            restore,
-                            config.scrollback_lines,
-                        )
-                        .with_context(|| {
-                            format!("failed to spawn fallback shell for pane {}", pane_id.0)
-                        })?
-                    }
-                };
-                if pane.cwd.as_deref() == Some(spawn.cwd.as_path()) {
-                    pane.git_status = cached_status;
-                }
-                if let Some(command) = spawn.initial_command {
-                    pane.session.write(format!("{command}\r").as_bytes());
-                }
-                self.workspace.insert_pane(pane);
-                spawned_panes.push(*pane_id);
+                continue;
             }
+            if self.spawner.is_active(*pane_id) {
+                continue;
+            }
+            if !self.pending_spawns.contains_key(pane_id) {
+                let session_key = self.alloc_session_key();
+                self.pending_spawns.insert(
+                    *pane_id,
+                    PendingSpawn {
+                        cwd: fallback_cwd.clone(),
+                        profile_id: self.shells.default_id.clone(),
+                        session_key,
+                        scrollback: None,
+                        initial_command: None,
+                        grid: None,
+                    },
+                );
+            }
+            let spawn = self
+                .pending_spawns
+                .get(pane_id)
+                .expect("pending spawn inserted above");
+            // Reuse the status of a sibling in the same directory so the
+            // bubbles appear immediately; a fresh request runs on insert.
+            let cached_status = self
+                .workspace
+                .tabs
+                .iter()
+                .flat_map(|tab| tab.panes.values())
+                .find(|pane| pane.cwd.as_deref() == Some(spawn.cwd.as_path()))
+                .and_then(|pane| pane.git_status.clone());
+            requests.push(spawn_request_from_pending(
+                *pane_id,
+                grid,
+                spawn,
+                &self.shells,
+                &fallback_profile,
+                &fallback_cwd,
+                cached_status,
+                config.scrollback_lines,
+            ));
         }
+
+        // Pending work belongs to the active tab; spawning panes for a tab the
+        // user already left would waste processes. In-flight spawns finish and
+        // are inserted when ready.
+        let active: HashSet<PaneId> = self
+            .workspace
+            .active_tab()
+            .map(|tab| tab.leaves().into_iter().collect())
+            .unwrap_or_default();
+        self.spawner
+            .retain_queued(|pane_id| active.contains(&pane_id));
+
+        requests.sort_by_key(|request| (request.pane_id != focused, request.pane_id.0));
+        for request in requests {
+            let is_focused = request.pane_id == focused;
+            self.spawner.schedule(request, is_focused);
+        }
+        self.spawner.pump();
+
+        let live: HashSet<PaneId> = self
+            .workspace
+            .tabs
+            .iter()
+            .flat_map(|tab| tab.leaves())
+            .collect();
+        self.pending_spawns
+            .retain(|pane_id, _| live.contains(pane_id));
+        self.spawn_errors
+            .retain(|pane_id, _| live.contains(pane_id));
+        self.pending_input
+            .retain(|pane_id, _| live.contains(pane_id));
 
         self.view = ViewLayout {
             sidebar: sidebar_layout,
@@ -2160,13 +2397,105 @@ impl WindowState {
             editor: editor_layout,
         };
 
-        for pane_id in spawned_panes {
-            self.request_git_status(pane_id);
-        }
-
         self.apply_scrollback_policy(config);
 
         Ok(())
+    }
+
+    /// Insert panes whose background spawn finished and start their readers.
+    /// Returns true when at least one pane was inserted or failed.
+    fn drain_spawns(&mut self, config: &Config) -> bool {
+        let outcomes = self.spawner.drain();
+        if outcomes.is_empty() {
+            return false;
+        }
+        let mut changed = false;
+        for (pane_id, result) in outcomes {
+            if !self.workspace.contains_pane(pane_id) {
+                self.pending_spawns.remove(&pane_id);
+                self.pending_input.remove(&pane_id);
+                self.spawn_errors.remove(&pane_id);
+                changed = true;
+                continue;
+            }
+            match result {
+                Ok(mut pane) => {
+                    if let Some(layout) = self.view.panes.iter().find(|layout| layout.id == pane_id)
+                    {
+                        let grid = grid_size_for(
+                            layout.content.width,
+                            layout.content.height,
+                            self.renderer.cell_metrics(),
+                        );
+                        pane.resize(grid);
+                    }
+                    let inserted = self.workspace.insert_pane(pane);
+                    if inserted {
+                        if let Some(pane) = self.workspace.pane_mut(pane_id) {
+                            pane.start_reader();
+                            if let Some(input) = self.pending_input.remove(&pane_id) {
+                                pane.session.write(&input);
+                            }
+                        }
+                        self.pending_spawns.remove(&pane_id);
+                        self.spawn_errors.remove(&pane_id);
+                        self.dirty_panes.insert(pane_id);
+                        self.request_git_status(pane_id);
+                        changed = true;
+                    }
+                }
+                Err(error) => {
+                    log::warn!("pane {} failed to start: {error:#}", pane_id.0);
+                    self.spawn_errors.insert(
+                        pane_id,
+                        "the shell could not be started; press Enter to retry".to_owned(),
+                    );
+                    changed = true;
+                }
+            }
+        }
+        self.spawner.pump();
+        if changed {
+            self.apply_scrollback_policy(config);
+            self.window.request_redraw();
+        }
+        changed
+    }
+
+    /// Write user input to a pane, or buffer it while the pane starts. Mouse
+    /// reports and terminal-generated replies are not buffered because they
+    /// are tied to a terminal state that does not exist yet.
+    fn write_pane_input(&mut self, pane_id: PaneId, bytes: &[u8]) {
+        if let Some(pane) = self.workspace.pane_mut(pane_id) {
+            pane.session.write(bytes);
+            return;
+        }
+        if !self.workspace.contains_pane(pane_id) || !self.spawner.is_active(pane_id) {
+            return;
+        }
+        let buffer = self.pending_input.entry(pane_id).or_default();
+        let room = MAX_PENDING_INPUT_BYTES.saturating_sub(buffer.len());
+        if room == 0 {
+            return;
+        }
+        let copy = room.min(bytes.len());
+        buffer.extend_from_slice(&bytes[..copy]);
+        if copy < bytes.len() {
+            log::debug!(
+                "pending input for pane {} truncated at {} bytes",
+                pane_id.0,
+                MAX_PENDING_INPUT_BYTES
+            );
+        }
+    }
+
+    fn retry_failed_pane(&mut self, pane_id: PaneId, config: &Config) -> bool {
+        if self.workspace.pane(pane_id).is_some() || !self.spawn_errors.contains_key(&pane_id) {
+            return false;
+        }
+        self.spawn_errors.remove(&pane_id);
+        self.relayout(config);
+        true
     }
 
     fn apply_scrollback_policy(&mut self, config: &Config) {
@@ -2574,6 +2903,7 @@ impl WindowState {
                 session_key,
                 scrollback: None,
                 initial_command: None,
+                grid: None,
             },
         );
         self.sidebar.profile_menu = false;
@@ -2620,6 +2950,7 @@ impl WindowState {
                 session_key,
                 scrollback: None,
                 initial_command: None,
+                grid: None,
             },
         );
         self.focus = Focus::Terminal;
@@ -2642,6 +2973,20 @@ impl WindowState {
         }
     }
 
+    fn forget_pane_state(&mut self, pane: PaneId) {
+        self.pending_spawns.remove(&pane);
+        self.pending_input.remove(&pane);
+        self.spawn_errors.remove(&pane);
+        self.spawner.cancel_queued(pane);
+        self.saved_scrollback.remove(&pane);
+        self.scroll_accumulators.remove(&pane);
+        self.git_in_flight.remove(&pane);
+        self.dirty_panes.remove(&pane);
+        self.frame_cache.remove(&pane);
+        self.frame_dominant.remove(&pane);
+        self.prompt_trims.remove(&pane);
+    }
+
     fn close_pane(&mut self, pane: PaneId, event_loop: &ActiveEventLoop, config: &Config) {
         if self
             .search
@@ -2658,10 +3003,7 @@ impl WindowState {
                 event_loop.exit();
             }
             CloseOutcome::PaneClosed | CloseOutcome::TabClosed => {
-                self.pending_spawns.remove(&pane);
-                self.saved_scrollback.remove(&pane);
-                self.scroll_accumulators.remove(&pane);
-                self.git_in_flight.remove(&pane);
+                self.forget_pane_state(pane);
                 self.selecting = None;
                 self.sidebar.hovered = None;
                 self.agents_dirty = true;
@@ -2674,6 +3016,13 @@ impl WindowState {
     fn close_tab(&mut self, tab: TabId, event_loop: &ActiveEventLoop, config: &Config) {
         self.close_search();
         self.clear_link_hover();
+        let leaves = self
+            .workspace
+            .tabs
+            .iter()
+            .find(|item| item.id == tab)
+            .map(Tab::leaves)
+            .unwrap_or_default();
         match self.workspace.close_tab(tab) {
             CloseOutcome::NotFound => {}
             CloseOutcome::WorkspaceEmpty => {
@@ -2681,6 +3030,9 @@ impl WindowState {
                 event_loop.exit();
             }
             CloseOutcome::TabClosed | CloseOutcome::PaneClosed => {
+                for pane in leaves {
+                    self.forget_pane_state(pane);
+                }
                 self.selecting = None;
                 self.sidebar.hovered = None;
                 self.agents_dirty = true;
@@ -2989,10 +3341,19 @@ impl WindowState {
     }
 
     pub(crate) fn focused_cwd(&self) -> PathBuf {
-        self.workspace
-            .focused_pane()
-            .and_then(|id| self.workspace.pane(id))
+        let Some(pane_id) = self.workspace.focused_pane() else {
+            return default_directory();
+        };
+        if let Some(cwd) = self
+            .workspace
+            .pane(pane_id)
             .and_then(|pane| pane.cwd.clone())
+        {
+            return cwd;
+        }
+        self.pending_spawns
+            .get(&pane_id)
+            .map(|spawn| spawn.cwd.clone())
             .unwrap_or_else(default_directory)
     }
 
@@ -3987,10 +4348,10 @@ impl WindowState {
     }
 
     fn send_agent_input(&mut self, pane_id: PaneId, bytes: &[u8]) -> bool {
-        let Some(pane) = self.workspace.pane_mut(pane_id) else {
+        if self.workspace.pane(pane_id).is_none() && !self.spawner.is_active(pane_id) {
             return false;
-        };
-        pane.session.write(bytes);
+        }
+        self.write_pane_input(pane_id, bytes);
         self.agents_dirty = true;
         self.agent_preview_dirty = true;
         true
@@ -4017,6 +4378,7 @@ impl WindowState {
                 session_key,
                 scrollback: None,
                 initial_command: Some(command),
+                grid: None,
             },
         );
         self.sidebar.profile_menu = false;
@@ -4947,8 +5309,8 @@ impl WindowState {
     }
 
     fn clear_focused(&mut self) {
-        if let Some(pane) = self.focused_pane_mut() {
-            pane.session.write(b"\x0c");
+        if let Some(pane_id) = self.workspace.focused_pane() {
+            self.write_pane_input(pane_id, b"\x0c");
         }
     }
 
@@ -4991,20 +5353,26 @@ impl WindowState {
         }
 
         let text = text.replace("\x1b[201~", "");
-        let Some(pane) = self.focused_pane_mut() else {
+        let Some(pane_id) = self.workspace.focused_pane() else {
             return;
         };
-
-        if pane.terminal.mode().contains(TermMode::BRACKETED_PASTE) {
+        let bytes = if self
+            .workspace
+            .pane(pane_id)
+            .is_some_and(|pane| pane.terminal.mode().contains(TermMode::BRACKETED_PASTE))
+        {
             let mut bytes = Vec::with_capacity(text.len() + 12);
             bytes.extend_from_slice(b"\x1b[200~");
             bytes.extend_from_slice(text.as_bytes());
             bytes.extend_from_slice(b"\x1b[201~");
-            pane.session.write(&bytes);
+            bytes
         } else {
-            pane.session.write(text.as_bytes());
+            text.as_bytes().to_vec()
+        };
+        self.write_pane_input(pane_id, &bytes);
+        if let Some(pane) = self.workspace.pane_mut(pane_id) {
+            pane.suggestion_armed = true;
         }
-        pane.suggestion_armed = true;
     }
 
     fn focus_direction(&mut self, direction: FocusDirection) {
@@ -5323,6 +5691,10 @@ impl WindowState {
                             .cwd
                             .as_ref()
                             .map(|cwd| cwd.to_string_lossy().into_owned()),
+                        grid: Some(SavedGrid {
+                            cols: pane.grid.cols,
+                            lines: pane.grid.lines,
+                        }),
                     });
                 } else {
                     let spawn = self.pending_spawns.get(pane_id)?;
@@ -5330,6 +5702,10 @@ impl WindowState {
                         key: spawn.session_key,
                         profile_id: spawn.profile_id.clone(),
                         cwd: Some(spawn.cwd.to_string_lossy().into_owned()),
+                        grid: spawn.grid.map(|grid| SavedGrid {
+                            cols: grid.cols,
+                            lines: grid.lines,
+                        }),
                     });
                 }
             }
@@ -5864,6 +6240,13 @@ impl WindowState {
             return;
         }
 
+        if matches!(event.logical_key, Key::Named(NamedKey::Enter))
+            && let Some(pane_id) = self.workspace.focused_pane()
+            && self.retry_failed_pane(pane_id, config)
+        {
+            return;
+        }
+
         if self.handle_completion_key(&event, config) {
             return;
         }
@@ -5925,11 +6308,11 @@ impl WindowState {
                     pane.terminal.scroll(Scroll::Bottom);
                     scrolled_back = true;
                 }
-                pane.session.write(&bytes);
                 if !disarm {
                     pane.suggestion_armed = true;
                 }
             }
+            self.write_pane_input(pane_id, &bytes);
             if scrolled_back {
                 self.dirty_panes.insert(pane_id);
                 self.invalidate_pane_frame(pane_id);
@@ -6429,8 +6812,8 @@ impl WindowState {
     }
 
     fn write_focused(&mut self, bytes: &[u8]) {
-        if let Some(pane) = self.focused_pane_mut() {
-            pane.session.write(bytes);
+        if let Some(pane_id) = self.workspace.focused_pane() {
+            self.write_pane_input(pane_id, bytes);
         }
     }
 
@@ -7652,20 +8035,49 @@ impl WindowState {
         }
 
         // A fresh PTY can take a few hundred milliseconds to print its first
-        // prompt on Windows. Show what is happening instead of a blank pane.
+        // prompt. Panes that are still being spawned on a worker thread get a
+        // placeholder so the first frame never waits for a shell.
         for pane_layout in &self.view.panes {
-            let Some(pane) = self.workspace.pane(pane_layout.id) else {
-                continue;
-            };
-            if pane.has_output {
-                continue;
-            }
+            let pane_id = pane_layout.id;
             let profile = self
-                .shells
-                .get(&pane.profile_id)
+                .workspace
+                .pane(pane_id)
+                .map(|pane| pane.profile_id.clone())
+                .or_else(|| {
+                    self.pending_spawns
+                        .get(&pane_id)
+                        .map(|spawn| spawn.profile_id.clone())
+                });
+            let profile = profile
+                .as_deref()
+                .and_then(|id| self.shells.get(id))
                 .map(|profile| profile.name.as_str())
                 .unwrap_or("shell");
-            let text = format!("Starting {profile}…");
+            let (text, color) = match self.workspace.pane(pane_id) {
+                Some(pane) => {
+                    if pane.has_output {
+                        continue;
+                    }
+                    (format!("Starting {profile}…"), theme.sidebar_text_dim)
+                }
+                None => {
+                    quads.push(Quad::new(
+                        pane_layout.outer.x,
+                        pane_layout.outer.y,
+                        pane_layout.outer.width,
+                        pane_layout.outer.height,
+                        to_linear(theme.background, 1.0),
+                    ));
+                    if self.spawn_errors.contains_key(&pane_id) {
+                        (
+                            format!("Failed to start {profile} — press Enter to retry"),
+                            theme.accent,
+                        )
+                    } else {
+                        (format!("Starting {profile}…"), theme.sidebar_text_dim)
+                    }
+                }
+            };
             let font = (ui_font_size * 0.95).max(11.0);
             labels.push(Label {
                 text,
@@ -7673,7 +8085,7 @@ impl WindowState {
                 y: pane_layout.content.y + (pane_layout.content.height - font * 1.35) * 0.5,
                 width: (pane_layout.content.width - 32.0 * scale).max(1.0),
                 font_size: font,
-                color: theme.sidebar_text_dim,
+                color,
                 bold: false,
             });
         }
@@ -10905,40 +11317,6 @@ mod tests {
     }
 
     #[test]
-    fn reads_scrollbacks_in_parallel() {
-        let dir = std::env::temp_dir().join(format!(
-            "f-terminal-parallel-scrollback-{}",
-            std::process::id()
-        ));
-        let _ = std::fs::remove_dir_all(&dir);
-        std::fs::create_dir_all(&dir).unwrap();
-        let first = dir.join("first.ansi");
-        let second = dir.join("second.ansi");
-        std::fs::write(
-            &first,
-            format!("{}first history\r\n", session::SCROLLBACK_MAGIC),
-        )
-        .unwrap();
-        std::fs::write(
-            &second,
-            format!("{}second history\r\n", session::SCROLLBACK_MAGIC),
-        )
-        .unwrap();
-
-        let scrollbacks = read_scrollbacks(vec![(PaneId(1), first), (PaneId(2), second)]);
-        assert_eq!(
-            scrollbacks.get(&PaneId(1)).map(|bytes| bytes.as_slice()),
-            Some(b"first history\r\n".as_slice())
-        );
-        assert_eq!(
-            scrollbacks.get(&PaneId(2)).map(|bytes| bytes.as_slice()),
-            Some(b"second history\r\n".as_slice())
-        );
-
-        std::fs::remove_dir_all(&dir).ok();
-    }
-
-    #[test]
     fn restores_tabs_panes_and_session_keys() {
         let shells = ShellCatalog {
             profiles: vec![TerminalProfile {
@@ -10974,11 +11352,13 @@ mod tests {
                             key: 1,
                             profile_id: "test".into(),
                             cwd: Some(cwd.clone()),
+                            grid: None,
                         },
                         SavedPane {
                             key: 2,
                             profile_id: "missing".into(),
                             cwd: Some(cwd.clone()),
+                            grid: None,
                         },
                     ],
                 },
@@ -10992,6 +11372,7 @@ mod tests {
                         key: 3,
                         profile_id: "test".into(),
                         cwd: Some(cwd),
+                        grid: None,
                     }],
                 },
             ],
