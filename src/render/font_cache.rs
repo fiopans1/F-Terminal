@@ -21,7 +21,7 @@ use serde::{Deserialize, Serialize};
 use crate::config;
 
 /// Bump when the on-disk shape or reconstruction rules change.
-const CACHE_VERSION: u32 = 1;
+const CACHE_VERSION: u32 = 2;
 const CACHE_FILE_NAME: &str = "font_index.json";
 /// Anything bigger than this is ignored instead of being parsed.
 const MAX_CACHE_BYTES: u64 = 8 * 1024 * 1024;
@@ -39,6 +39,32 @@ struct FontIndex {
     built_at_secs: u64,
     faces: Vec<CachedFace>,
     dirs: Vec<CachedDir>,
+    #[serde(default)]
+    generic: GenericFamilies,
+}
+
+/// Fontconfig can remap the generic CSS families (for example, the user's
+/// preferred monospace font). Preserve those mappings across warm starts.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+struct GenericFamilies {
+    serif: String,
+    sans_serif: String,
+    cursive: String,
+    fantasy: String,
+    monospace: String,
+}
+
+impl GenericFamilies {
+    fn capture(database: &fontdb::Database) -> Self {
+        let name = |family| database.family_name(&family).to_owned();
+        Self {
+            serif: name(fontdb::Family::Serif),
+            sans_serif: name(fontdb::Family::SansSerif),
+            cursive: name(fontdb::Family::Cursive),
+            fantasy: name(fontdb::Family::Fantasy),
+            monospace: name(fontdb::Family::Monospace),
+        }
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -223,6 +249,62 @@ fn current_platform() -> String {
     format!("{}-{}", std::env::consts::OS, std::env::consts::ARCH)
 }
 
+/// Common font roots, tracked even when empty so adding a font directory
+/// invalidates a warm cache. `fontdb` does not expose the roots it scanned.
+fn known_font_dirs() -> Vec<PathBuf> {
+    let mut dirs = Vec::new();
+    let home = std::env::var_os("HOME").map(PathBuf::from);
+
+    #[cfg(target_os = "macos")]
+    {
+        dirs.push(PathBuf::from("/Library/Fonts"));
+        dirs.push(PathBuf::from("/System/Library/Fonts"));
+        dirs.push(PathBuf::from("/System/Library/AssetsV2"));
+        dirs.push(PathBuf::from("/Network/Library/Fonts"));
+        if let Some(home) = &home {
+            dirs.push(home.join("Library/Fonts"));
+        }
+    }
+
+    #[cfg(all(unix, not(target_os = "macos")))]
+    {
+        dirs.push(PathBuf::from("/usr/share/fonts"));
+        dirs.push(PathBuf::from("/usr/local/share/fonts"));
+        if let Some(home) = &home {
+            dirs.push(home.join(".fonts"));
+            dirs.push(home.join(".local/share/fonts"));
+        }
+        if let Some(data) = std::env::var_os("XDG_DATA_HOME") {
+            dirs.push(PathBuf::from(data).join("fonts"));
+        }
+    }
+
+    #[cfg(windows)]
+    {
+        if let Some(root) = std::env::var_os("SYSTEMROOT") {
+            dirs.push(PathBuf::from(root).join("Fonts"));
+        }
+        if let Some(local) = std::env::var_os("LOCALAPPDATA") {
+            dirs.push(
+                PathBuf::from(local)
+                    .join("Microsoft")
+                    .join("Windows")
+                    .join("Fonts"),
+            );
+        }
+        if let Some(roaming) = std::env::var_os("APPDATA") {
+            dirs.push(
+                PathBuf::from(roaming)
+                    .join("Microsoft")
+                    .join("Windows")
+                    .join("Fonts"),
+            );
+        }
+    }
+
+    dirs
+}
+
 fn read_index(path: &Path) -> Option<FontIndex> {
     let metadata = match fs::metadata(path) {
         Ok(metadata) => metadata,
@@ -338,10 +420,25 @@ impl FontIndex {
             return None;
         }
 
+        for path in known_font_dirs() {
+            dirs.insert(path);
+        }
         let mut cached_dirs = Vec::with_capacity(dirs.len());
         for path in dirs {
-            let metadata = match fs::metadata(&path) {
-                Ok(metadata) => metadata,
+            match fs::metadata(&path) {
+                Ok(metadata) if metadata.is_dir() => {
+                    let Some(mtime_ns) = file_mtime_ns(&metadata) else {
+                        log::debug!("font index cache disabled: no mtime for {}", path.display());
+                        return None;
+                    };
+                    cached_dirs.push(CachedDir { path, mtime_ns });
+                }
+                Ok(_) => continue,
+                Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+                    // Remember that the directory was absent so creating it
+                    // later invalidates the cache and picks up new fonts.
+                    cached_dirs.push(CachedDir { path, mtime_ns: 0 });
+                }
                 Err(error) => {
                     log::debug!(
                         "font index cache disabled: cannot stat {}: {error}",
@@ -349,12 +446,7 @@ impl FontIndex {
                     );
                     return None;
                 }
-            };
-            let Some(mtime_ns) = file_mtime_ns(&metadata) else {
-                log::debug!("font index cache disabled: no mtime for {}", path.display());
-                return None;
-            };
-            cached_dirs.push(CachedDir { path, mtime_ns });
+            }
         }
 
         Some(Self {
@@ -364,6 +456,7 @@ impl FontIndex {
             built_at_secs: unix_secs(SystemTime::now())?,
             faces,
             dirs: cached_dirs,
+            generic: GenericFamilies::capture(database),
         })
     }
 
@@ -392,7 +485,9 @@ impl FontIndex {
             return Err("cache contains no faces".to_owned());
         }
 
-        let built_at = UNIX_EPOCH + Duration::from_secs(self.built_at_secs);
+        let Some(built_at) = UNIX_EPOCH.checked_add(Duration::from_secs(self.built_at_secs)) else {
+            return Err("cache timestamp is out of range".to_owned());
+        };
         if let Ok(age) = now.duration_since(built_at) {
             if age > MAX_AGE {
                 return Err(format!(
@@ -438,15 +533,26 @@ impl FontIndex {
         }
 
         for dir in &self.dirs {
-            let metadata = fs::metadata(&dir.path)
-                .map_err(|error| format!("cannot stat {}: {error}", dir.path.display()))?;
-            if !metadata.is_dir() {
-                return Err(format!("{} is no longer a directory", dir.path.display()));
-            }
-            let mtime_ns = file_mtime_ns(&metadata)
-                .ok_or_else(|| format!("no mtime for {}", dir.path.display()))?;
-            if mtime_ns != dir.mtime_ns {
-                return Err(format!("contents of {} changed", dir.path.display()));
+            match fs::metadata(&dir.path) {
+                Ok(metadata) if metadata.is_dir() => {
+                    if dir.mtime_ns == 0 {
+                        return Err(format!("font directory {} appeared", dir.path.display()));
+                    }
+                    let mtime_ns = file_mtime_ns(&metadata)
+                        .ok_or_else(|| format!("no mtime for {}", dir.path.display()))?;
+                    if mtime_ns != dir.mtime_ns {
+                        return Err(format!("contents of {} changed", dir.path.display()));
+                    }
+                }
+                Err(error) if error.kind() == std::io::ErrorKind::NotFound && dir.mtime_ns == 0 => {
+                    // It was absent when the index was built and still is.
+                }
+                Err(error) => {
+                    return Err(format!("cannot stat {}: {error}", dir.path.display()));
+                }
+                Ok(_) => {
+                    return Err(format!("{} is no longer a directory", dir.path.display()));
+                }
             }
         }
 
@@ -473,10 +579,30 @@ impl FontIndex {
             });
         }
 
-        // Match what cosmic-text does after a regular system scan.
-        database.set_monospace_family("Noto Sans Mono");
-        database.set_sans_serif_family("Open Sans");
-        database.set_serif_family("DejaVu Serif");
+        // Match what cosmic-text does after a regular system scan, preserving
+        // any fontconfig aliases captured on the original scan.
+        let generic = self.generic;
+        database.set_monospace_family(if generic.monospace.is_empty() {
+            "Noto Sans Mono".to_owned()
+        } else {
+            generic.monospace
+        });
+        database.set_sans_serif_family(if generic.sans_serif.is_empty() {
+            "Open Sans".to_owned()
+        } else {
+            generic.sans_serif
+        });
+        database.set_serif_family(if generic.serif.is_empty() {
+            "DejaVu Serif".to_owned()
+        } else {
+            generic.serif
+        });
+        if !generic.cursive.is_empty() {
+            database.set_cursive_family(generic.cursive);
+        }
+        if !generic.fantasy.is_empty() {
+            database.set_fantasy_family(generic.fantasy);
+        }
         database
     }
 }
@@ -637,6 +763,7 @@ mod tests {
             built_at_secs: unix_secs(SystemTime::now()).expect("clock after epoch"),
             faces,
             dirs,
+            generic: GenericFamilies::default(),
         }
     }
 
@@ -665,6 +792,35 @@ mod tests {
         let index = sample_index(&[font]);
 
         assert_eq!(index.validate(SystemTime::now()), Ok(()));
+    }
+
+    #[test]
+    fn generic_families_are_preserved() {
+        let temp = TempDir::new();
+        let font = temp.write("generic.ttf", b"fake font");
+        let mut index = sample_index(&[font]);
+        index.generic.monospace = "Test Mono".to_owned();
+        index.generic.sans_serif = "Test Sans UI".to_owned();
+
+        let database = index.into_database();
+        assert_eq!(
+            database.family_name(&fontdb::Family::Monospace),
+            "Test Mono"
+        );
+        assert_eq!(
+            database.family_name(&fontdb::Family::SansSerif),
+            "Test Sans UI"
+        );
+    }
+
+    #[test]
+    fn extreme_build_time_is_rejected() {
+        let temp = TempDir::new();
+        let font = temp.write("future.ttf", b"fake font");
+        let mut index = sample_index(&[font]);
+        index.built_at_secs = u64::MAX;
+
+        assert!(index.validate(SystemTime::now()).is_err());
     }
 
     #[test]

@@ -86,6 +86,7 @@ pub fn grid_size_for(width: f32, height: f32, metrics: CellMetrics) -> GridSize 
         cols: (width.max(1.0) / metrics.width).floor().max(2.0) as usize,
         lines: (height.max(1.0) / metrics.height).floor().max(1.0) as usize,
     }
+    .clamped()
 }
 
 /// GPU objects that can be shared by every window.

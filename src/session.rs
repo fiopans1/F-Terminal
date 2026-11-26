@@ -106,7 +106,8 @@ pub struct SavedGrid {
 
 impl SavedGrid {
     pub fn is_valid(self) -> bool {
-        self.cols >= 2 && self.lines >= 1
+        (2..=GridSize::MAX_COLS).contains(&self.cols)
+            && (1..=GridSize::MAX_LINES).contains(&self.lines)
     }
 }
 
@@ -117,6 +118,10 @@ pub struct SavedPane {
     pub cwd: Option<String>,
     #[serde(default)]
     pub grid: Option<SavedGrid>,
+    /// Command to run after restoring a pane that was still starting when the
+    /// session was saved (for example, an agent launch).
+    #[serde(default)]
+    pub initial_command: Option<String>,
 }
 
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
@@ -692,6 +697,7 @@ mod tests {
                         cols: size.cols,
                         lines: size.lines,
                     }),
+                    initial_command: Some("opencode".to_owned()),
                 }],
             }],
             collapsed_tabs: Vec::new(),
@@ -750,12 +756,14 @@ mod tests {
                             cols: 120,
                             lines: 40,
                         }),
+                        initial_command: None,
                     },
                     SavedPane {
                         key: 2,
                         profile_id: "windows:wsl:Ubuntu".into(),
                         cwd: Some(r"\\wsl$\Ubuntu\home\me".into()),
                         grid: None,
+                        initial_command: None,
                     },
                 ],
             }],
@@ -795,6 +803,20 @@ mod tests {
         );
         assert!(!SavedGrid { cols: 0, lines: 24 }.is_valid());
         assert!(!SavedGrid { cols: 80, lines: 0 }.is_valid());
+        assert!(
+            !SavedGrid {
+                cols: GridSize::MAX_COLS + 1,
+                lines: 24
+            }
+            .is_valid()
+        );
+        assert!(
+            !SavedGrid {
+                cols: 80,
+                lines: GridSize::MAX_LINES + 1
+            }
+            .is_valid()
+        );
     }
 
     #[test]

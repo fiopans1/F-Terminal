@@ -236,6 +236,7 @@ impl Pane {
         restore: PaneRestore<'_>,
         scrollback_lines: usize,
     ) -> Result<Self> {
+        let grid = grid.clamped();
         // Start the shell before building the terminal or replaying history.
         // The reader is deferred until insertion, so the shell can run its rc
         // scripts while this worker prepares the terminal and scrollback.
@@ -270,8 +271,8 @@ impl Pane {
     }
 
     /// Begin forwarding PTY output once the pane is part of the workspace.
-    pub fn start_reader(&mut self) {
-        self.session.start_reader();
+    pub fn start_reader(&mut self) -> bool {
+        self.session.start_reader()
     }
 
     pub fn resize(&mut self, grid: GridSize) -> bool {

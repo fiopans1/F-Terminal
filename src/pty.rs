@@ -8,6 +8,7 @@ use winit::event_loop::EventLoopProxy;
 
 use crate::event::UserEvent;
 use crate::shell::{CwdMode, TerminalProfile, wsl_directory};
+use crate::term::GridSize;
 use crate::workspace::PaneId;
 
 /// PowerShell does not keep its process current directory in sync with
@@ -105,8 +106,8 @@ impl Session {
     ) -> Result<Self> {
         let pty_system = native_pty_system();
         let size = PtySize {
-            rows: rows.max(1) as u16,
-            cols: cols.max(2) as u16,
+            rows: rows.clamp(1, GridSize::MAX_LINES) as u16,
+            cols: cols.clamp(2, GridSize::MAX_COLS) as u16,
             pixel_width: 0,
             pixel_height: 0,
         };
@@ -188,9 +189,9 @@ impl Session {
     /// Start forwarding PTY output to the UI. Panes built on a worker thread
     /// call this only after they have been inserted into the workspace, so no
     /// output is dropped or attributed to an unknown pane.
-    pub fn start_reader(&mut self) {
+    pub fn start_reader(&mut self) -> bool {
         let Some(mut reader) = self.reader.take() else {
-            return;
+            return true;
         };
         let proxy = self.proxy.clone();
         let pane = self.pane;
@@ -224,11 +225,15 @@ impl Session {
                 }
                 let _ = proxy.send_event(UserEvent::PtyClosed { pane });
             });
-        if let Err(error) = spawned {
-            log::warn!(
-                "failed to spawn the PTY reader for pane {}: {error}",
-                pane.0
-            );
+        match spawned {
+            Ok(_) => true,
+            Err(error) => {
+                log::warn!(
+                    "failed to spawn the PTY reader for pane {}: {error}",
+                    pane.0
+                );
+                false
+            }
         }
     }
 
@@ -244,8 +249,8 @@ impl Session {
 
     pub fn resize(&mut self, rows: usize, cols: usize) {
         let size = PtySize {
-            rows: rows.max(1) as u16,
-            cols: cols.max(2) as u16,
+            rows: rows.clamp(1, GridSize::MAX_LINES) as u16,
+            cols: cols.clamp(2, GridSize::MAX_COLS) as u16,
             pixel_width: 0,
             pixel_height: 0,
         };

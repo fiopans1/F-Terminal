@@ -49,6 +49,20 @@ pub struct GridSize {
     pub lines: usize,
 }
 
+impl GridSize {
+    /// PTYs use 16-bit dimensions. Keep malformed session data or absurd
+    /// window sizes from allocating gigantic terminal grids.
+    pub const MAX_COLS: usize = 4096;
+    pub const MAX_LINES: usize = 4096;
+
+    pub fn clamped(self) -> Self {
+        Self {
+            cols: self.cols.clamp(2, Self::MAX_COLS),
+            lines: self.lines.clamp(1, Self::MAX_LINES),
+        }
+    }
+}
+
 /// The visible row that contains the cursor, plus one character per column.
 /// Wide-character spacers are represented by spaces so the column index can be
 /// used as a character index.
