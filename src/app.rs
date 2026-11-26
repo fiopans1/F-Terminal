@@ -74,6 +74,10 @@ const MAX_CONCURRENT_PANE_SPAWNS: usize = 4;
 /// Keystrokes typed into a pane that is still starting are held here instead of
 /// being lost. The cap protects against a runaway paste into a dead pane.
 const MAX_PENDING_INPUT_BYTES: usize = 8 * 1024;
+/// If a shell produces no output at all, deliver queued input after this long
+/// instead of waiting forever. Interactive shells normally flush on the first
+/// prompt well before this.
+const PENDING_INPUT_TIMEOUT: Duration = Duration::from_millis(1500);
 
 pub struct App {
     proxy: EventLoopProxy<UserEvent>,
@@ -2662,7 +2666,14 @@ impl WindowState {
                 chunk
             }
             PendingInputChunk::Paste(mut text) => {
-                truncate_utf8(&mut text, room);
+                if text.len() > room {
+                    log::debug!(
+                        "truncating a paste for pane {} to {} bytes",
+                        pane_id.0,
+                        room
+                    );
+                    truncate_utf8(&mut text, room);
+                }
                 if text.is_empty() {
                     return;
                 }
@@ -2768,7 +2779,7 @@ impl WindowState {
             .pending_input_since
             .iter()
             .filter(|(pane, since)| {
-                now.duration_since(**since) >= Duration::from_millis(500)
+                now.duration_since(**since) >= PENDING_INPUT_TIMEOUT
                     && self.workspace.pane(**pane).is_some()
             })
             .map(|(pane, _)| *pane)
