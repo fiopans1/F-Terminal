@@ -1,5 +1,5 @@
 use std::collections::{HashMap, HashSet};
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::time::Instant;
 
 use anyhow::{Context, Result};
@@ -196,7 +196,7 @@ impl LayoutNode {
 #[derive(Clone, Copy)]
 pub struct PaneRestore<'a> {
     pub session_key: u64,
-    pub scrollback: Option<&'a [u8]>,
+    pub scrollback: Option<&'a Path>,
 }
 
 /// One PTY-backed terminal inside a tab.
@@ -238,13 +238,18 @@ impl Pane {
     ) -> Result<Self> {
         let mut terminal =
             Terminal::new(grid, EventProxy::new(id, proxy.clone()), scrollback_lines);
-        let mut restored = false;
-        if let Some(bytes) = restore.scrollback {
-            terminal.restore_scrollback(bytes);
-            restored = true;
-        }
+        // Start the shell before replaying saved history. The reader is
+        // deferred until insertion, so the shell can run its rc scripts while
+        // this worker parses the scrollback.
         let session = Session::spawn(id, grid.lines, grid.cols, proxy, profile, &cwd)
             .with_context(|| format!("failed to spawn shell for pane {}", id.0))?;
+        let mut restored = false;
+        if let Some(path) = restore.scrollback
+            && let Some(bytes) = crate::session::read_scrollback(path)
+        {
+            terminal.restore_scrollback(&bytes);
+            restored = true;
+        }
 
         Ok(Self {
             id,

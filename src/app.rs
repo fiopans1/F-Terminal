@@ -1508,13 +1508,9 @@ fn schedule_early_spawns(
 
 fn build_pane(request: SpawnRequest, proxy: EventLoopProxy<UserEvent>) -> SpawnOutcome {
     let pane_id = request.pane_id;
-    let scrollback = request
-        .scrollback
-        .as_deref()
-        .and_then(session::read_scrollback);
     let restore = PaneRestore {
         session_key: request.session_key,
-        scrollback: scrollback.as_deref(),
+        scrollback: request.scrollback.as_deref(),
     };
     let result = Pane::new(
         pane_id,
