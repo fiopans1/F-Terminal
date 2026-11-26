@@ -100,6 +100,19 @@ usa [Versionado Semántico](https://semver.org/lang/es/).
 
 ### Changed
 
+- El arranque ya no espera a los shells: los panes se construyen en segundo
+  plano (con un máximo de cuatro a la vez), la ventana pinta placeholders
+  inmediatamente y el PTY empieza a leerse al insertar el pane, sin perder
+  salida temprana. Las pulsaciones escritas durante ese intervalo se guardan y
+  se envían al shell en cuanto está listo.
+- Al restaurar la sesión, los panes de la pestaña activa se prearrancan con el
+  grid guardado mientras se inicializan la GPU y las fuentes; si el grid real
+  cambia, se redimensionan antes de empezar a leer. Cambiar a una pestaña
+  restaurada o crear un split ya no bloquea la UI.
+- El índice de fuentes del sistema se guarda en caché (solo metadatos, con
+  validación por tamaño/mtime y vuelta al escaneo completo ante cualquier
+  problema), lo que reduce el arranque en caliente sin cambiar la tipografía ni
+  el fallback.
 - La interfaz está ahora íntegramente en inglés: menús, sidebar, ventanas Git,
   Code Review y Agentes, estados, atajos y mensajes de estado.
 - Las ventanas Git, Code Review y Agentes ya no dibujan una “×” de cierre

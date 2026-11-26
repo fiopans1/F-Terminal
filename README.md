@@ -371,7 +371,11 @@ primer arranque con una plantilla comentada y permisos `600` en Unix.
 | Linux con `XDG_CONFIG_HOME` | `$XDG_CONFIG_HOME/f-terminal/config.toml` |
 | Windows | `%APPDATA%\f-terminal\config.toml` |
 
-La variable `F_TERMINAL_CONFIG` permite usar otra ruta.
+La variable `F_TERMINAL_CONFIG` permite usar otra ruta. El índice de fuentes se
+guarda en el directorio de caché del sistema (`~/Library/Caches/f-terminal` en
+macOS, `$XDG_CACHE_HOME/f-terminal` o `~/.cache/f-terminal` en Linux,
+`%LOCALAPPDATA%\f-terminal\cache` en Windows); `F_TERMINAL_CACHE_DIR` permite
+cambiarlo.
 
 `Cmd+Shift+P` / `Ctrl+Shift+P` abre el `config.toml` en el editor integrado. Los
 cambios se aplican en caliente en cuanto se guarda el fichero: tema, tamaños de
@@ -720,8 +724,15 @@ el directorio guardado. El historial de comandos sigue viviendo en el shell.
 El guardado es automático y no bloquea la UI: los metadatos se escriben como
 mucho cada 2 segundos y el scrollback se exporta en un barrido repartido entre
 frames (un pane por tick) cada 30 segundos, además de un guardado final al
-cerrar. La serialización y la escritura se hacen en un hilo aparte. Al abrir una
-pestaña, el historial de sus panes se lee en paralelo.
+cerrar. La serialización y la escritura se hacen en un hilo aparte.
+
+La restauración tampoco bloquea: los panes de la pestaña activa se prearrancan
+con el último grid guardado mientras se inicializan la GPU y las fuentes, y el
+resto se crea en segundo plano al abrir su pestaña. La ventana muestra un
+placeholder hasta que cada shell está listo; las teclas pulsadas mientras tanto
+se conservan. El índice de fuentes se cachea en el directorio de caché del
+sistema para que los arranques en caliente no tengan que analizar todas las
+fuentes instaladas.
 Los datos viven junto a la configuración:
 
 | Plataforma | Ruta |

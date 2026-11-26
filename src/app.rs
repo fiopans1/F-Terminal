@@ -1739,10 +1739,13 @@ impl WindowState {
             .as_ref()
             .and_then(|session| session.window.as_ref());
 
+        let icon_started = Instant::now();
+        let icon = window_icon();
+        log::debug!("window icon decoded in {:?}", icon_started.elapsed());
         let mut attributes = Window::default_attributes()
             .with_title("F-Terminal")
             .with_decorations(cfg!(target_os = "macos"))
-            .with_window_icon(window_icon())
+            .with_window_icon(icon)
             .with_inner_size(LogicalSize::new(1100.0, 700.0))
             .with_min_inner_size(LogicalSize::new(520.0, 260.0))
             .with_theme(Some(WindowTheme::Dark))
@@ -1758,14 +1761,6 @@ impl WindowState {
                 attributes = attributes.with_position(PhysicalPosition::new(x, y));
             }
         }
-        let window_started = Instant::now();
-        let window = Arc::new(event_loop.create_window(attributes)?);
-        window.set_ime_allowed(true);
-        if saved_window.is_some_and(|saved| saved.maximized) {
-            window.set_maximized(true);
-        }
-        log::debug!("window created in {:?}", window_started.elapsed());
-
         let working_directory = default_directory();
         log::info!("working directory: {}", working_directory.display());
         let shells_started = Instant::now();
@@ -1815,6 +1810,14 @@ impl WindowState {
             "scheduled {early} early pane spawn(s) in {:?}",
             early_started.elapsed()
         );
+
+        let window_started = Instant::now();
+        let window = Arc::new(event_loop.create_window(attributes)?);
+        window.set_ime_allowed(true);
+        if saved_window.is_some_and(|saved| saved.maximized) {
+            window.set_maximized(true);
+        }
+        log::debug!("window created in {:?}", window_started.elapsed());
 
         let render_started = Instant::now();
         let renderer = pollster::block_on(Renderer::new(window.clone(), event_loop, config, None))?;
