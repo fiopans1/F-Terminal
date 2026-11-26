@@ -768,6 +768,23 @@ mod tests {
     }
 
     #[test]
+    fn current_scrollback_files_are_returned_without_a_copy() {
+        let dir =
+            std::env::temp_dir().join(format!("f-terminal-read-scrollback-{}", std::process::id()));
+        let _ = fs::remove_dir_all(&dir);
+        fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("history.ansi");
+        let mut bytes = String::from(SCROLLBACK_MAGIC);
+        bytes.push_str("hello\r\n");
+        fs::write(&path, &bytes).unwrap();
+
+        let read = read_scrollback(&path).expect("current scrollback");
+        assert_eq!(read, bytes.as_bytes());
+
+        fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
     fn saved_grids_reject_impossible_sizes() {
         assert!(
             SavedGrid {
