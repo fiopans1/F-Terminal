@@ -50,8 +50,11 @@ Actions:
 
 Inside each session:
 
-- `Cmd+D` / `Ctrl+Shift+D`: split right.
-- `Cmd+Shift+S` / `Ctrl+Shift+S`: split down.
+- `Cmd+Shift+arrows` / `Ctrl+Shift+arrows`: split left, right, up or down.
+- `Ctrl+Shift+W` closes the focused pane (the session if it is the last one);
+  `Ctrl+Shift+X` closes the whole session, even with the editor open and with
+  no confirmation. On macOS: `Cmd+W`, and `Cmd+Shift+X` or `Cmd+Shift+W` for
+  the whole session.
 - New panes appear as children in the tree and expand the session.
 - Dividers are dragged with the mouse.
 - The focused pane shows an accent border.

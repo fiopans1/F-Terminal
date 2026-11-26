@@ -8,8 +8,9 @@
 |---|---|
 | New terminal (default profile) | `Cmd+T` |
 | Choose shell profile | `Cmd+Shift+N` |
-| Close pane / terminal | `Cmd+W` / `Cmd+Shift+W` |
-| Split right / down | `Cmd+D` / `Cmd+Shift+S` |
+| Close pane (session if it is the last one) | `Cmd+W` |
+| Close the whole session (all panes) | `Cmd+Shift+X` (or `Cmd+Shift+W`) |
+| Split (left/right/up/down) | `Cmd+Shift+←/→/↑/↓` |
 | Switch terminal | `Cmd+Shift+[` / `]`, `Cmd+1..9`, `Ctrl+Tab` |
 | Rename active session | `F2` |
 | Move focus between panes | `Cmd+Alt+arrows`, <kbd>Cmd+&#96;</kbd> |
@@ -34,8 +35,9 @@
 |---|---|
 | New terminal (default profile) | `Ctrl+Shift+T` |
 | Choose shell profile | `Ctrl+Shift+N` |
-| Close pane | `Ctrl+Shift+W` |
-| Split right / down | `Ctrl+Shift+D` / `Ctrl+Shift+S` |
+| Close focused pane (session if it is the last one) | `Ctrl+Shift+W` |
+| Close the whole session (all panes) | `Ctrl+Shift+X` |
+| Split (left/right/up/down) | `Ctrl+Shift+←/→/↑/↓` |
 | Switch terminal | `Ctrl+Tab`, `Ctrl+Shift+Tab`, `Ctrl+Shift+[ / ]` |
 | Rename active session | `F2` |
 | Move focus between panes | `Ctrl+Alt+arrows`, <kbd>Ctrl+Shift+&#96;</kbd> |

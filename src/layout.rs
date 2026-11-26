@@ -164,7 +164,9 @@ fn split_rect(area: Rect, direction: SplitDirection, ratio: f32, gap: f32) -> (R
     let ratio = ratio.clamp(0.05, 0.95);
 
     match direction {
-        SplitDirection::Right => {
+        // `first` is always the leading child, so left and right share the
+        // same geometry: left/top first, right/bottom second.
+        SplitDirection::Left | SplitDirection::Right => {
             let usable = (area.width - gap).max(1.0);
             let first_width = (usable * ratio).clamp(1.0, usable - 1.0);
             let second_width = (usable - first_width).max(1.0);
@@ -180,7 +182,7 @@ fn split_rect(area: Rect, direction: SplitDirection, ratio: f32, gap: f32) -> (R
                 Rect::new(area.x + first_width, area.y, gap, area.height),
             )
         }
-        SplitDirection::Down => {
+        SplitDirection::Up | SplitDirection::Down => {
             let usable = (area.height - gap).max(1.0);
             let first_height = (usable * ratio).clamp(1.0, usable - 1.0);
             let second_height = (usable - first_height).max(1.0);
@@ -273,5 +275,34 @@ mod tests {
         assert_eq!(layout.panes[0].outer.height, 24.5);
         assert_eq!(layout.panes[1].outer.y, 26.5);
         assert_eq!(layout.dividers[0].line.height, 2.0);
+    }
+
+    #[test]
+    fn splits_left_and_up_use_the_first_child_as_the_leading_pane() {
+        for direction in [SplitDirection::Left, SplitDirection::Up] {
+            let horizontal = matches!(direction, SplitDirection::Left);
+            let tree = LayoutNode::Split(Box::new(crate::workspace::SplitNode {
+                id: 1,
+                direction,
+                ratio: 0.5,
+                first: Box::new(LayoutNode::Leaf(PaneId(2))),
+                second: Box::new(LayoutNode::Leaf(PaneId(1))),
+            }));
+
+            let layout =
+                compute_layout(&tree, Rect::new(0.0, 0.0, 80.0, 100.0), 2.0, 0.0, 0.0, 0.0);
+
+            assert_eq!(layout.panes[0].id, PaneId(2));
+            assert_eq!(layout.panes[1].id, PaneId(1));
+            if horizontal {
+                assert_eq!(layout.panes[0].outer.x, 0.0);
+                assert_eq!(layout.panes[1].outer.x, 41.0);
+                assert_eq!(layout.dividers[0].line.width, 2.0);
+            } else {
+                assert_eq!(layout.panes[0].outer.y, 0.0);
+                assert_eq!(layout.panes[1].outer.y, 51.0);
+                assert_eq!(layout.dividers[0].line.height, 2.0);
+            }
+        }
     }
 }

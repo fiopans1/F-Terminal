@@ -8,6 +8,10 @@ usa [Versionado Semántico](https://semver.org/lang/es/).
 
 ### Added
 
+- `Ctrl+Shift+X` / `Cmd+Shift+X` cierra la sesión completa (todos sus panes),
+  incluso con el editor enfocado y sin diálogo de confirmación; `Ctrl+Shift+W`
+  cierra el pane enfocado y, si es el último, la sesión. En macOS
+  `Cmd+Shift+W` sigue funcionando como alias.
 - Búsqueda en el scrollback del pane enfocado con `Cmd+Shift+F` (macOS) o
   `Ctrl+Shift+F` (Linux/Windows): texto literal con *smart case*, resaltado de
   todas las coincidencias, contador, navegación con `Enter`/`Shift+Enter` y
@@ -77,9 +81,9 @@ usa [Versionado Semántico](https://semver.org/lang/es/).
   mantiene la navegación manual hasta que cambie el cwd del pane.
 - Nueva sección `[agents]` en `config.toml` (`enabled`, `show_external`,
   `poll_interval_ms`).
-- `Cmd+Shift+S` / `Ctrl+Shift+S` divide el pane activo hacia abajo; `Cmd+Shift+P`
-  / `Ctrl+Shift+P` abre `config.toml` en el editor integrado y el elemento de
-  menú «Abrir configuración…» hace lo mismo.
+- `Cmd+Shift+←/→/↑/↓` / `Ctrl+Shift+←/→/↑/↓` crea splits en la dirección
+  indicada; `Cmd+Shift+P` / `Ctrl+Shift+P` abre `config.toml` en el editor
+  integrado y el elemento de menú «Abrir configuración…» hace lo mismo.
 - Temas: Foundry, Catppuccin Mocha, Dracula, Nord, Gruvbox Dark, One Dark,
   Solarized Dark, GitHub Dark y Kanagawa, además de Tokyo Night.
 - `padding_left` añade un margen izquierdo configurable al texto del terminal
@@ -102,6 +106,11 @@ usa [Versionado Semántico](https://semver.org/lang/es/).
 
 ### Changed
 
+- Los splits se crean ahora con las flechas en las cuatro direcciones:
+  `Cmd+Shift+←/→/↑/↓` en macOS y `Ctrl+Shift+←/→/↑/↓` en Linux/Windows. Se
+  eliminan `Cmd+D`, `Cmd+Shift+D/S` y `Ctrl+Shift+D/S`, que chocaban con
+  atajos globales como el guardado de repetición instantánea de AMD Adrenalin
+  en Windows.
 - El arranque ya no espera a los shells: los panes se construyen en segundo
   plano (con un máximo de cuatro a la vez), la ventana pinta placeholders
   inmediatamente y el PTY empieza a leerse al insertar el pane, sin perder
@@ -122,8 +131,8 @@ usa [Versionado Semántico](https://semver.org/lang/es/).
 - El terminal y la UI usan shaping avanzado con fallback para emojis, símbolos
   y otros caracteres que no están en la fuente principal.
 - `Ctrl+Shift+F` / `Cmd+Shift+F` abre la búsqueda en el scrollback; la sidebar
-  cambia entre Sesiones y Archivos con `Ctrl+Shift+E` / `Cmd+Shift+E`. El split
-  inferior usa `Cmd+Shift+S` / `Ctrl+Shift+S` en macOS y Linux/Windows.
+  cambia entre Sesiones y Archivos con `Ctrl+Shift+E` / `Cmd+Shift+E`. Los
+  splits usan `Cmd+Shift+flechas` / `Ctrl+Shift+flechas`.
 - Se eliminó la firma Authenticode del instalador de Windows: las releases se
   publican sin firmar y ya no hace falta configurar ningún certificado ni
   secreto de firma.

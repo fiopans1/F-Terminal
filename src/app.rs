@@ -1750,7 +1750,9 @@ fn convert_saved_layout(layout: &SavedLayout) -> crate::workspace::LayoutSpec {
             second,
         } => LayoutSpec::Split {
             direction: match direction {
+                SavedDirection::Left => SplitDirection::Left,
                 SavedDirection::Right => SplitDirection::Right,
+                SavedDirection::Up => SplitDirection::Up,
                 SavedDirection::Down => SplitDirection::Down,
             },
             ratio: *ratio,
@@ -1772,7 +1774,9 @@ fn saved_layout(
         }),
         LayoutNode::Split(split) => Some(SavedLayout::Split {
             direction: match split.direction {
+                SplitDirection::Left => SavedDirection::Left,
                 SplitDirection::Right => SavedDirection::Right,
+                SplitDirection::Up => SavedDirection::Up,
                 SplitDirection::Down => SavedDirection::Down,
             },
             ratio: split.ratio,
@@ -5500,7 +5504,6 @@ impl WindowState {
 
         if command {
             match code {
-                KeyCode::KeyS if self.modifiers.shift_key() => return false,
                 KeyCode::KeyS => {
                     self.save_editor();
                     return true;
@@ -5512,6 +5515,18 @@ impl WindowState {
                 KeyCode::KeyW => {
                     self.close_editor(config);
                     return true;
+                }
+                // Closing the whole session is intentional even while editing.
+                // The editor keeps its buffer if other sessions remain.
+                KeyCode::KeyX if self.modifiers.shift_key() => return false,
+                // Split shortcuts stay global even while editing.
+                KeyCode::ArrowLeft
+                | KeyCode::ArrowRight
+                | KeyCode::ArrowUp
+                | KeyCode::ArrowDown
+                    if self.modifiers.shift_key() =>
+                {
+                    return false;
                 }
                 // No selection/undo yet; keep these away from the terminal.
                 KeyCode::KeyC
@@ -5525,7 +5540,6 @@ impl WindowState {
                 // Let global shortcuts (new tab, split, sidebar, tabs, quit) run.
                 KeyCode::KeyT
                 | KeyCode::KeyB
-                | KeyCode::KeyD
                 | KeyCode::KeyE
                 | KeyCode::KeyF
                 | KeyCode::KeyO
@@ -7109,7 +7123,19 @@ impl WindowState {
                 });
                 true
             }
-            KeyCode::KeyS if shift => {
+            KeyCode::ArrowLeft if shift && !alt => {
+                self.split_focused(SplitDirection::Left, config);
+                true
+            }
+            KeyCode::ArrowRight if shift && !alt => {
+                self.split_focused(SplitDirection::Right, config);
+                true
+            }
+            KeyCode::ArrowUp if shift && !alt => {
+                self.split_focused(SplitDirection::Up, config);
+                true
+            }
+            KeyCode::ArrowDown if shift && !alt => {
                 self.split_focused(SplitDirection::Down, config);
                 true
             }
@@ -7143,11 +7169,12 @@ impl WindowState {
                 }
                 true
             }
-            KeyCode::KeyD => {
-                if macos && shift {
-                    self.split_focused(SplitDirection::Down, config);
-                } else {
-                    self.split_focused(SplitDirection::Right, config);
+            // `Cmd+Shift+X` / `Ctrl+Shift+X` closes the whole session. On
+            // macOS `Cmd+Shift+W` remains as an alias. `X` does not collide
+            // with Cmd+Shift+Q (system log out) or with AMD Adrenalin.
+            KeyCode::KeyX if shift => {
+                if let Some(tab) = self.workspace.active_tab_id() {
+                    self.close_tab(tab, event_loop, config);
                 }
                 true
             }
@@ -7284,11 +7311,11 @@ impl WindowState {
                     };
 
                     let ratio = match direction {
-                        SplitDirection::Right => {
+                        SplitDirection::Left | SplitDirection::Right => {
                             let usable = (area.width - gap).max(1.0);
                             ((position.x as f32 - area.x) / usable).clamp(0.1, 0.9)
                         }
-                        SplitDirection::Down => {
+                        SplitDirection::Up | SplitDirection::Down => {
                             let usable = (area.height - gap).max(1.0);
                             ((position.y as f32 - area.y) / usable).clamp(0.1, 0.9)
                         }
@@ -7904,13 +7931,13 @@ impl WindowState {
             .dividers
             .iter()
             .find(|divider| match divider.direction {
-                SplitDirection::Right => {
+                SplitDirection::Left | SplitDirection::Right => {
                     x >= divider.line.x - threshold
                         && x <= divider.line.right() + threshold
                         && y >= divider.area.y
                         && y <= divider.area.bottom()
                 }
-                SplitDirection::Down => {
+                SplitDirection::Up | SplitDirection::Down => {
                     y >= divider.line.y - threshold
                         && y <= divider.line.bottom() + threshold
                         && x >= divider.area.x

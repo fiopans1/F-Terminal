@@ -19,9 +19,13 @@ pub struct TabId(pub u64);
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum SplitDirection {
-    /// Side by side (left/right).
+    /// New pane on the left, side by side.
+    Left,
+    /// New pane on the right, side by side.
     Right,
-    /// Stacked (top/bottom).
+    /// New pane above, stacked.
+    Up,
+    /// New pane below, stacked.
     Down,
 }
 
@@ -121,12 +125,19 @@ impl LayoutNode {
         match self {
             Self::Leaf(id) if *id == target => {
                 let old = Self::Leaf(target);
+                let new = Self::Leaf(new_pane);
+                // `first` is always the leading child (left/top) so the layout
+                // engine only needs to know the split axis.
+                let (first, second) = match direction {
+                    SplitDirection::Left | SplitDirection::Up => (new, old),
+                    SplitDirection::Right | SplitDirection::Down => (old, new),
+                };
                 *self = Self::Split(Box::new(SplitNode {
                     id: split_id,
                     direction,
                     ratio: 0.5,
-                    first: Box::new(old),
-                    second: Box::new(Self::Leaf(new_pane)),
+                    first: Box::new(first),
+                    second: Box::new(second),
                 }));
                 true
             }
@@ -819,6 +830,22 @@ mod tests {
     }
 
     #[test]
+    fn splitting_left_or_up_puts_the_new_pane_first() {
+        for direction in [SplitDirection::Left, SplitDirection::Up] {
+            let mut tree = LayoutNode::Leaf(PaneId(1));
+            assert!(tree.split(PaneId(1), PaneId(2), direction, 7));
+            match tree {
+                LayoutNode::Split(split) => {
+                    assert_eq!(split.direction, direction);
+                    assert!(matches!(&*split.first, LayoutNode::Leaf(PaneId(2))));
+                    assert!(matches!(&*split.second, LayoutNode::Leaf(PaneId(1))));
+                }
+                _ => panic!("expected a split"),
+            }
+        }
+    }
+
+    #[test]
     fn removing_a_pane_collapses_the_split() {
         let (remaining, removed) = tree_two_panes().remove(PaneId(2));
         assert!(removed);
@@ -863,6 +890,22 @@ mod tests {
             workspace.close_tab(second_tab),
             CloseOutcome::WorkspaceEmpty
         );
+        assert!(workspace.tabs.is_empty());
+    }
+
+    #[test]
+    fn closing_a_tab_closes_all_of_its_panes() {
+        let mut workspace = Workspace::new();
+        let (tab, _) = workspace.create_terminal();
+        workspace
+            .split_focused(SplitDirection::Right)
+            .expect("first split");
+        workspace
+            .split_focused(SplitDirection::Down)
+            .expect("second split");
+        assert_eq!(workspace.active_tab().unwrap().layout.leaf_count(), 3);
+
+        assert_eq!(workspace.close_tab(tab), CloseOutcome::WorkspaceEmpty);
         assert!(workspace.tabs.is_empty());
     }
 

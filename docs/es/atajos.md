@@ -8,8 +8,9 @@
 |---|---|
 | Nueva terminal (perfil por defecto) | `Cmd+T` |
 | Elegir perfil de shell | `Cmd+Shift+N` |
-| Cerrar pane / terminal | `Cmd+W` / `Cmd+Shift+W` |
-| Split derecha / abajo | `Cmd+D` / `Cmd+Shift+S` |
+| Cerrar pane (la sesión si es el último) | `Cmd+W` |
+| Cerrar la sesión entera (todos los panes) | `Cmd+Shift+X` (o `Cmd+Shift+W`) |
+| Split (izquierda/derecha/arriba/abajo) | `Cmd+Shift+←/→/↑/↓` |
 | Cambiar de terminal | `Cmd+Shift+[` / `]`, `Cmd+1..9`, `Ctrl+Tab` |
 | Renombrar sesión activa | `F2` |
 | Mover foco entre panes | `Cmd+Alt+flechas`, <kbd>Cmd+&#96;</kbd> |
@@ -34,8 +35,9 @@
 |---|---|
 | Nueva terminal (perfil por defecto) | `Ctrl+Shift+T` |
 | Elegir perfil de shell | `Ctrl+Shift+N` |
-| Cerrar pane | `Ctrl+Shift+W` |
-| Split derecha / abajo | `Ctrl+Shift+D` / `Ctrl+Shift+S` |
+| Cerrar pane (la sesión si es el último) | `Ctrl+Shift+W` |
+| Cerrar la sesión entera (todos los panes) | `Ctrl+Shift+X` |
+| Split (izquierda/derecha/arriba/abajo) | `Ctrl+Shift+←/→/↑/↓` |
 | Cambiar de terminal | `Ctrl+Tab`, `Ctrl+Shift+Tab`, `Ctrl+Shift+[ / ]` |
 | Renombrar sesión activa | `F2` |
 | Mover foco entre panes | `Ctrl+Alt+flechas`, <kbd>Ctrl+Shift+&#96;</kbd> |

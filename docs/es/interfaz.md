@@ -50,8 +50,12 @@ Acciones:
 
 Dentro de cada sesión:
 
-- `Cmd+D` / `Ctrl+Shift+D`: split a la derecha.
-- `Cmd+Shift+S` / `Ctrl+Shift+S`: split abajo.
+- `Cmd+Shift+flechas` / `Ctrl+Shift+flechas`: split a la izquierda, derecha,
+  arriba o abajo.
+- `Ctrl+Shift+W` cierra el pane enfocado (la sesión si es el último);
+  `Ctrl+Shift+X` cierra la sesión entera, también con el editor abierto y sin
+  confirmación. En macOS: `Cmd+W`, y `Cmd+Shift+X` o `Cmd+Shift+W` para la
+  sesión completa.
 - Los nuevos panes aparecen como hijos del árbol y expanden la sesión.
 - Los divisores se arrastran con el ratón.
 - El pane enfocado muestra un borde de acento.
