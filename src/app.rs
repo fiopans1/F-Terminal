@@ -40,7 +40,9 @@ use crate::layout::{DividerLayout, PaneLayout, Rect, compute_layout};
 use crate::menu;
 use crate::render::quads::Quad;
 use crate::render::scene::{GhostText, Label, PaneLayer, Scene};
-use crate::render::{CellMetrics, Renderer, SharedRenderResources, grid_size_for};
+use crate::render::{
+    CellMetrics, Renderer, SharedRenderResources, grid_size_for, start_font_worker,
+};
 use crate::review::{self, ReviewDetail, ReviewKind, ReviewSummary};
 use crate::review_window::ReviewWindow;
 use crate::session::{
@@ -1739,6 +1741,16 @@ impl WindowState {
             .as_ref()
             .and_then(|session| session.window.as_ref());
 
+        // The cold font scan is one of the longest startup tasks; start it
+        // before creating the window so it overlaps every other early phase.
+        let font_worker = match start_font_worker(config.font_family.clone()) {
+            Ok(worker) => Some(worker),
+            Err(error) => {
+                log::warn!("failed to start the font worker: {error}");
+                None
+            }
+        };
+
         let icon_started = Instant::now();
         let icon = window_icon();
         log::debug!("window icon decoded in {:?}", icon_started.elapsed());
@@ -1820,7 +1832,13 @@ impl WindowState {
         log::debug!("window created in {:?}", window_started.elapsed());
 
         let render_started = Instant::now();
-        let renderer = pollster::block_on(Renderer::new(window.clone(), event_loop, config, None))?;
+        let renderer = pollster::block_on(Renderer::new_with_font_worker(
+            window.clone(),
+            event_loop,
+            config,
+            None,
+            font_worker,
+        ))?;
         log::info!(
             "renderer ready in {:?} (init {:?})",
             startup.elapsed(),

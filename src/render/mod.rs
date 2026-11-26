@@ -115,12 +115,32 @@ pub struct Renderer {
     trim_atlas: bool,
 }
 
+/// Start loading fonts on a worker thread. Callers can do this before
+/// creating the window so the system font scan overlaps window creation too.
+pub(crate) fn start_font_worker(
+    preferred: Option<String>,
+) -> std::io::Result<std::thread::JoinHandle<text::FontResources>> {
+    std::thread::Builder::new()
+        .name("font-load".into())
+        .spawn(move || text::FontResources::load(preferred.as_deref()))
+}
+
 impl Renderer {
     pub async fn new(
         window: Arc<Window>,
         event_loop: &ActiveEventLoop,
         config: &Config,
         shared: Option<&SharedRenderResources>,
+    ) -> Result<Self> {
+        Self::new_with_font_worker(window, event_loop, config, shared, None).await
+    }
+
+    pub(crate) async fn new_with_font_worker(
+        window: Arc<Window>,
+        event_loop: &ActiveEventLoop,
+        config: &Config,
+        shared: Option<&SharedRenderResources>,
+        preloaded_font_worker: Option<std::thread::JoinHandle<text::FontResources>>,
     ) -> Result<Self> {
         let size = window.inner_size();
         let width = size.width.max(1);
@@ -130,15 +150,17 @@ impl Renderer {
         // Scanning every system font takes hundreds of milliseconds. Run it
         // alongside GPU initialization instead of after it.
         let font_worker = if shared.is_none() {
-            let preferred = config.font_family.clone();
-            match std::thread::Builder::new()
-                .name("font-load".into())
-                .spawn(move || text::FontResources::load(preferred.as_deref()))
-            {
-                Ok(worker) => Some(worker),
-                Err(error) => {
-                    log::warn!("failed to start the font worker: {error}");
-                    None
+            match preloaded_font_worker {
+                Some(worker) => Some(worker),
+                None => {
+                    let preferred = config.font_family.clone();
+                    match start_font_worker(preferred) {
+                        Ok(worker) => Some(worker),
+                        Err(error) => {
+                            log::warn!("failed to start the font worker: {error}");
+                            None
+                        }
+                    }
                 }
             }
         } else {

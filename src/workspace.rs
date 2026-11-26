@@ -236,13 +236,12 @@ impl Pane {
         restore: PaneRestore<'_>,
         scrollback_lines: usize,
     ) -> Result<Self> {
-        let mut terminal =
-            Terminal::new(grid, EventProxy::new(id, proxy.clone()), scrollback_lines);
-        // Start the shell before replaying saved history. The reader is
-        // deferred until insertion, so the shell can run its rc scripts while
-        // this worker parses the scrollback.
-        let session = Session::spawn(id, grid.lines, grid.cols, proxy, profile, &cwd)
+        // Start the shell before building the terminal or replaying history.
+        // The reader is deferred until insertion, so the shell can run its rc
+        // scripts while this worker prepares the terminal and scrollback.
+        let session = Session::spawn(id, grid.lines, grid.cols, proxy.clone(), profile, &cwd)
             .with_context(|| format!("failed to spawn shell for pane {}", id.0))?;
+        let mut terminal = Terminal::new(grid, EventProxy::new(id, proxy), scrollback_lines);
         let mut restored = false;
         if let Some(path) = restore.scrollback
             && let Some(bytes) = crate::session::read_scrollback(path)
