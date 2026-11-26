@@ -28,8 +28,10 @@ usa [Versionado Semántico](https://semver.org/lang/es/).
   el shell.
 - Barra de título propia en Windows y Linux: icono de la aplicación, título de
   la sesión activa, controles de minimizar/maximizar/cerrar, arrastre, doble
-  clic para maximizar y redimensionado desde los bordes. En macOS se mantiene la
-  barra nativa y se dibuja una barra de estado con el icono y **F-Terminal**.
+  clic para maximizar y redimensionado desde los bordes. En macOS, una única
+  barra superior de altura nativa integra los semáforos del sistema, el icono,
+  **F-Terminal** y el botón **?**; Sessions queda como cabecera de la sidebar y
+  la terminal empieza justo debajo de la barra.
 - Botón **?** en la barra de título con un desplegable About: desarrollador,
   versión actual, enlace al repositorio y una fila reservada para el futuro
   botón de actualizaciones. En macOS, About también aparece en el menú nativo.
@@ -137,6 +139,10 @@ usa [Versionado Semántico](https://semver.org/lang/es/).
 
 ### Fixed
 
+- El primer frame revalida la escala de la ventana después de mostrarse, para
+  que macOS no estire un frame a 1x en pantallas Retina durante el arranque.
+- Clippy en Windows: la detección de fuentes ya no declara `HOME` como variable
+  no usada fuera de Unix.
 - Al restaurar la sesión, el scrollback ya no guarda las filas vacías de debajo
   del cursor ni la línea viva del prompt: el prompt reaparece donde estaba en
   lugar de acumular líneas en blanco y saltar al fondo en cada reinicio.

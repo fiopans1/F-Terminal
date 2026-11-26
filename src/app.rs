@@ -16,6 +16,8 @@ use winit::dpi::{LogicalSize, PhysicalPosition, PhysicalSize};
 use winit::event::{ElementState, Ime, MouseButton, MouseScrollDelta, WindowEvent};
 use winit::event_loop::{ActiveEventLoop, ControlFlow, EventLoopProxy};
 use winit::keyboard::{Key, KeyCode, ModifiersState, NamedKey, PhysicalKey};
+#[cfg(target_os = "macos")]
+use winit::platform::macos::WindowAttributesExtMacOS;
 use winit::window::{CursorIcon, Icon, ResizeDirection, Theme as WindowTheme, Window, WindowId};
 
 use crate::agent_window::AgentWindow;
@@ -67,6 +69,20 @@ const APP_DEVELOPER: &str = "Diego Suárez Ramos";
 const APP_REPOSITORY: &str = env!("CARGO_PKG_REPOSITORY");
 const APP_VERSION: &str = env!("CARGO_PKG_VERSION");
 const TITLE_BAR_HEIGHT: f32 = 36.0;
+/// macOS keeps the native titlebar height so the standard traffic lights sit
+/// centred in the bar we draw over the transparent titlebar.
+const MACOS_TITLE_BAR_HEIGHT: f32 = 28.0;
+/// Space reserved for the native traffic lights before the app identity.
+const MACOS_TRAFFIC_LIGHTS_WIDTH: f32 = 72.0;
+
+fn title_bar_height() -> f32 {
+    if cfg!(target_os = "macos") {
+        MACOS_TITLE_BAR_HEIGHT
+    } else {
+        TITLE_BAR_HEIGHT
+    }
+}
+
 /// PTY creation is I/O bound but each shell also starts its own rc scripts.
 /// A small cap keeps restored layouts responsive without spawning a process
 /// storm or starving the renderer.
@@ -983,11 +999,22 @@ fn title_bar_layout(x: f32, width: f32, height: f32, scale: f32) -> TitleBarLayo
     let custom_controls = !cfg!(target_os = "macos");
     let close_width = (46.0 * scale).round().max(28.0);
     let button_width = (40.0 * scale).round().max(26.0);
-    let about_size = (28.0 * scale).round().max(20.0);
+    let about_size = (28.0 * scale)
+        .round()
+        .min((height - 4.0 * scale).max(1.0))
+        .max((18.0 * scale).round());
     let padding = (8.0 * scale).round().max(4.0);
-    let icon_size = (24.0 * scale).round().min(height - 6.0).max(12.0);
+    let icon_size = (24.0 * scale)
+        .round()
+        .min((height - 8.0 * scale).max(1.0))
+        .max((12.0 * scale).round());
+    let leading = if cfg!(target_os = "macos") {
+        (MACOS_TRAFFIC_LIGHTS_WIDTH * scale).round()
+    } else {
+        padding
+    };
 
-    let (close, maximize, minimize, about, drag) = if custom_controls {
+    let (close, maximize, minimize, about) = if custom_controls {
         let close = Rect::new(x + width - close_width, 0.0, close_width, height);
         let maximize = Rect::new(close.x - button_width, 0.0, button_width, height);
         let minimize = Rect::new(maximize.x - button_width, 0.0, button_width, height);
@@ -997,8 +1024,7 @@ fn title_bar_layout(x: f32, width: f32, height: f32, scale: f32) -> TitleBarLayo
             about_size,
             about_size,
         );
-        let drag = Rect::new(x, 0.0, (about.x - x).max(0.0), height);
-        (close, maximize, minimize, about, drag)
+        (close, maximize, minimize, about)
     } else {
         let about = Rect::new(
             x + width - about_size - padding,
@@ -1006,17 +1032,11 @@ fn title_bar_layout(x: f32, width: f32, height: f32, scale: f32) -> TitleBarLayo
             about_size,
             about_size,
         );
-        (
-            Rect::default(),
-            Rect::default(),
-            Rect::default(),
-            about,
-            Rect::default(),
-        )
+        (Rect::default(), Rect::default(), Rect::default(), about)
     };
 
     let icon = Rect::new(
-        x + padding,
+        x + leading,
         ((height - icon_size) / 2.0).max(0.0),
         icon_size,
         icon_size,
@@ -1028,6 +1048,10 @@ fn title_bar_layout(x: f32, width: f32, height: f32, scale: f32) -> TitleBarLayo
         (about.x - title_x - (8.0 * scale).max(4.0)).max(1.0),
         height,
     );
+    // macOS keeps the native traffic lights in the leading area, so dragging
+    // starts after them.
+    let drag_start = if custom_controls { x } else { icon.x };
+    let drag = Rect::new(drag_start, 0.0, (about.x - drag_start).max(0.0), height);
 
     TitleBarLayout {
         rect: Rect::new(x, 0.0, width, height),
@@ -1816,6 +1840,16 @@ impl WindowState {
             .with_min_inner_size(LogicalSize::new(520.0, 260.0))
             .with_theme(Some(WindowTheme::Dark))
             .with_visible(false);
+        #[cfg(target_os = "macos")]
+        {
+            // Keep the native window (traffic lights, resize, shadow and
+            // fullscreen) but hand the titlebar band to the app. The standard
+            // buttons stay visible; only the background and title are hidden.
+            attributes = attributes
+                .with_titlebar_transparent(true)
+                .with_fullsize_content_view(true)
+                .with_title_hidden(true);
+        }
         if let Some(saved) = saved_window {
             if saved.width >= 520.0 && saved.height >= 260.0 {
                 attributes =
@@ -2051,6 +2085,21 @@ impl WindowState {
         state.on_redraw(config);
         log::debug!("hidden first draw took {:?}", hidden_draw.elapsed());
         state.window.set_visible(true);
+        // AppKit can settle the final backing scale only once the window is on
+        // screen. Re-read it before the first visible frame; otherwise the
+        // compositor may stretch a 1x frame across a Retina window and make the
+        // text look soft until the next scale event.
+        let live_scale = state.window.scale_factor();
+        if (state.renderer.scale_factor() - live_scale).abs() > f64::EPSILON {
+            log::debug!(
+                "backing scale settled after showing: {} -> {}",
+                state.renderer.scale_factor(),
+                live_scale
+            );
+            state.renderer.set_scale_factor(live_scale, config);
+            state.renderer.resize(state.window.inner_size());
+            state.relayout(config);
+        }
         let visible_draw = Instant::now();
         state.on_redraw(config);
         log::debug!("visible first draw took {:?}", visible_draw.elapsed());
@@ -2059,7 +2108,7 @@ impl WindowState {
 
         log::info!("first frame in {:?}", startup.elapsed());
         log::info!(
-            "started with {}x{} grid, cell {:.2}x{:.2}px, scale {:.1}",
+            "started with {}x{} grid, cell {:.2}x{:.2}px, scale {:.1} (renderer {:.1})",
             state
                 .workspace
                 .focused_pane()
@@ -2074,7 +2123,8 @@ impl WindowState {
                 .unwrap_or(0),
             state.renderer.cell_metrics().width,
             state.renderer.cell_metrics().height,
-            state.window.scale_factor()
+            state.window.scale_factor(),
+            state.renderer.scale_factor()
         );
 
         Ok(state)
@@ -2273,6 +2323,12 @@ impl WindowState {
         self.sidebar
             .collapsed_tabs
             .retain(|id| self.workspace.tabs.iter().any(|tab| tab.id == *id));
+        let title_height = (title_bar_height() * scale).round().max(1.0);
+        let sidebar_top = if cfg!(target_os = "macos") {
+            title_height
+        } else {
+            0.0
+        };
         let sidebar_layout = sidebar::layout(
             &self.sidebar,
             &summaries,
@@ -2284,6 +2340,7 @@ impl WindowState {
                 width_logical: config.sidebar_width,
                 file_count: self.explorer.rows.len(),
                 profile_count: self.shells.profiles.len(),
+                top_offset: sidebar_top,
             },
         );
         log::debug!(
@@ -2297,10 +2354,18 @@ impl WindowState {
             self.sidebar.scroll = clamped_scroll;
         }
 
-        let title_height = (TITLE_BAR_HEIGHT * scale).round().max(1.0);
+        let full_width_title_bar = cfg!(target_os = "macos");
         let title_bar = title_bar_layout(
-            sidebar_layout.content_x,
-            (width - sidebar_layout.content_x).max(1.0),
+            if full_width_title_bar {
+                0.0
+            } else {
+                sidebar_layout.content_x
+            },
+            if full_width_title_bar {
+                width
+            } else {
+                (width - sidebar_layout.content_x).max(1.0)
+            },
             title_height,
             scale,
         );
@@ -9127,7 +9192,7 @@ impl WindowState {
             labels.push(Label {
                 text: "»".into(),
                 x: layout.rect.x + (layout.rect.width - chevron_size * 0.55) / 2.0,
-                y: layout.padding,
+                y: layout.rect.y + layout.padding,
                 width: layout.rect.width,
                 font_size: chevron_size,
                 color: theme.sidebar_text_dim,
@@ -9638,13 +9703,15 @@ impl WindowState {
             layout.rect.height,
             to_linear(theme.sidebar_background, 1.0),
         ));
-        quads.push(Quad::new(
-            layout.rect.x,
-            layout.rect.y,
-            1.0,
-            layout.rect.height,
-            to_linear(theme.border, 1.0),
-        ));
+        if layout.rect.x > 0.0 {
+            quads.push(Quad::new(
+                layout.rect.x,
+                layout.rect.y,
+                1.0,
+                layout.rect.height,
+                to_linear(theme.border, 1.0),
+            ));
+        }
         quads.push(Quad::new(
             layout.rect.x,
             layout.rect.bottom() - 1.0,
@@ -11672,31 +11739,35 @@ mod tests {
 
     #[test]
     fn title_bar_controls_fit_without_overlaps() {
-        let layout = title_bar_layout(200.0, 900.0, 36.0, 1.0);
+        let height = title_bar_height();
+        let layout = title_bar_layout(200.0, 900.0, height, 1.0);
+        let middle = height / 2.0;
 
         assert!(layout.drag.width >= 0.0);
         assert!(layout.close.right() <= 1100.0);
         assert!(layout.about.right() <= 1100.0);
         assert!(layout.title.right() <= layout.about.x);
         assert_eq!(
-            layout.button_at(layout.about.x + 2.0, 18.0),
+            layout.button_at(layout.about.x + 2.0, middle),
             Some(TitleButton::About)
         );
         if cfg!(target_os = "macos") {
             assert_eq!(layout.close, Rect::default());
             assert_eq!(layout.minimize, Rect::default());
             assert_eq!(layout.maximize, Rect::default());
-            assert!(!layout.is_drag_area(layout.title.x + 2.0, 18.0));
+            assert!(layout.icon.x >= 200.0 + MACOS_TRAFFIC_LIGHTS_WIDTH);
+            assert!(layout.drag.x >= layout.icon.x);
+            assert!(layout.is_drag_area(layout.title.x + 2.0, middle));
         } else {
             assert!(layout.drag.width > 0.0);
             assert!(layout.minimize.right() <= layout.maximize.x);
             assert!(layout.maximize.right() <= layout.close.x);
             assert!(layout.about.right() <= layout.minimize.x);
             assert_eq!(
-                layout.button_at(layout.close.x + 2.0, 18.0),
+                layout.button_at(layout.close.x + 2.0, middle),
                 Some(TitleButton::Close)
             );
-            assert!(layout.is_drag_area(layout.title.x + 2.0, 18.0));
+            assert!(layout.is_drag_area(layout.title.x + 2.0, middle));
         }
     }
 

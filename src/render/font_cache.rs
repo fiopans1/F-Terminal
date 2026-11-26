@@ -253,6 +253,8 @@ fn current_platform() -> String {
 /// invalidates a warm cache. `fontdb` does not expose the roots it scanned.
 fn known_font_dirs() -> Vec<PathBuf> {
     let mut dirs = Vec::new();
+
+    #[cfg(unix)]
     let home = std::env::var_os("HOME").map(PathBuf::from);
 
     #[cfg(target_os = "macos")]

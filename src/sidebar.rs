@@ -150,6 +150,8 @@ pub struct LayoutSpec {
     pub width_logical: f32,
     pub file_count: usize,
     pub profile_count: usize,
+    /// Space reserved above the sidebar for platform window chrome.
+    pub top_offset: f32,
 }
 
 #[derive(Clone, Copy, Debug)]
@@ -182,12 +184,15 @@ pub fn layout(
         width_logical,
         file_count,
         profile_count,
+        top_offset,
     } = spec;
+    let top = top_offset.max(0.0).min((window_height - 1.0).max(0.0));
+    let available_height = (window_height - top).max(0.0);
 
     if !state.visible {
         let padding = (8.0 * scale).round();
         let rail_width = (14.0 * scale).round().max(padding * 2.0 + 4.0);
-        let rail = Rect::new(0.0, 0.0, rail_width, window_height);
+        let rail = Rect::new(0.0, top, rail_width, available_height);
 
         return SidebarLayout {
             rect: rail,
@@ -221,17 +226,17 @@ pub fn layout(
         0.0
     };
 
-    let rect = Rect::new(0.0, 0.0, width, window_height);
-    let header = Rect::new(0.0, 0.0, width, header_height);
+    let rect = Rect::new(0.0, top, width, available_height);
+    let header = Rect::new(0.0, top, width, header_height);
     let mode_button = Rect::new(
         (width - padding - button_size).max(0.0),
-        ((header_height - button_size) / 2.0).max(0.0),
+        ((header_height - button_size) / 2.0).max(0.0) + top,
         button_size,
         button_size,
     );
     let new_button = Rect::new(
         (mode_button.x - 4.0 * scale - button_size).max(0.0),
-        ((header_height - button_size) / 2.0).max(0.0),
+        ((header_height - button_size) / 2.0).max(0.0) + top,
         button_size,
         button_size,
     );
@@ -239,7 +244,7 @@ pub fn layout(
     let profile_button = if state.mode == SidebarMode::Terminals {
         Rect::new(
             (new_button.x - 2.0 * scale - profile_size).max(0.0),
-            ((header_height - profile_size) / 2.0).max(0.0),
+            ((header_height - profile_size) / 2.0).max(0.0) + top,
             profile_size,
             profile_size,
         )
@@ -248,7 +253,7 @@ pub fn layout(
     };
     let collapse_button = Rect::new(
         padding,
-        ((header_height - collapse_size) / 2.0).max(0.0),
+        ((header_height - collapse_size) / 2.0).max(0.0) + top,
         collapse_size,
         collapse_size,
     );
@@ -259,7 +264,7 @@ pub fn layout(
     };
     let header_label = Rect::new(
         collapse_button.right() + 8.0 * scale,
-        0.0,
+        top,
         (header_right - collapse_button.right() - 8.0 * scale - padding).max(1.0),
         header_height,
     );
@@ -267,7 +272,7 @@ pub fn layout(
     let back_button = if state.mode == SidebarMode::Files {
         Rect::new(
             padding,
-            header_height + ((path_height - back_size) / 2.0).max(0.0),
+            top + header_height + ((path_height - back_size) / 2.0).max(0.0),
             back_size,
             back_size,
         )
@@ -281,11 +286,11 @@ pub fn layout(
     };
     let path_rect = Rect::new(
         path_x,
-        header_height,
+        top + header_height,
         (width - path_x - padding).max(1.0),
         path_height,
     );
-    let list_top = header_height + path_height;
+    let list_top = top + header_height + path_height;
     let list = Rect::new(0.0, list_top, width, (window_height - list_top).max(0.0));
 
     let profile_menu = state.profile_menu && state.mode == SidebarMode::Terminals;
@@ -581,6 +586,7 @@ mod tests {
             width_logical: 200.0,
             file_count,
             profile_count: 0,
+            top_offset: 0.0,
         }
     }
 
@@ -705,6 +711,41 @@ mod tests {
 
         assert!(hidden.collapsed);
         assert!(hidden.content_x > 0.0);
+        assert_eq!(
+            hit_test(&hidden, hidden.rect.x + 2.0, hidden.rect.y + 2.0),
+            Some(SidebarHit::ToggleSidebar)
+        );
+    }
+
+    #[test]
+    fn top_offset_keeps_the_sidebar_below_window_chrome() {
+        let state = Sidebar::default();
+        let hidden_state = Sidebar {
+            visible: false,
+            ..Sidebar::default()
+        };
+        let spec = LayoutSpec {
+            top_offset: 28.0,
+            ..spec(0)
+        };
+
+        let visible = layout(&state, &tabs(), Some(TabId(1)), spec);
+        assert_eq!(visible.rect.y, 28.0);
+        assert_eq!(visible.header.y, 28.0);
+        assert_eq!(visible.list.y, 64.0);
+        assert!(visible.collapse_button.y >= visible.header.y);
+        assert_eq!(
+            hit_test(
+                &visible,
+                visible.collapse_button.x + 2.0,
+                visible.collapse_button.y + 2.0
+            ),
+            Some(SidebarHit::ToggleSidebar)
+        );
+
+        let hidden = layout(&hidden_state, &tabs(), Some(TabId(1)), spec);
+        assert_eq!(hidden.rect.y, 28.0);
+        assert_eq!(hidden.reveal_button.y, 28.0);
         assert_eq!(
             hit_test(&hidden, hidden.rect.x + 2.0, hidden.rect.y + 2.0),
             Some(SidebarHit::ToggleSidebar)

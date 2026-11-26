@@ -66,8 +66,10 @@ welcome.
 - Sidebar con sesiones reordenables arrastrando y orden persistido.
 - Barra de título propia en Windows y Linux, con icono, título, botón **?** de
   About y controles de minimizar/maximizar/cerrar; admite arrastre, doble clic
-  para maximizar y redimensionado desde los bordes. En macOS se conserva la
-  barra nativa y se añade una barra de estado con el icono y **F-Terminal**.
+  para maximizar y redimensionado desde los bordes. En macOS se integra una
+  única barra superior de altura nativa con los semáforos del sistema, el icono,
+  **F-Terminal** y el botón **?**; Sessions queda como cabecera de la sidebar y
+  la terminal empieza justo debajo de la barra.
 - El panel About muestra el desarrollador y la versión, enlaza al repositorio y
   reserva una fila para el futuro botón de actualizaciones. En macOS también se
   abre desde el menú nativo de la aplicación.
