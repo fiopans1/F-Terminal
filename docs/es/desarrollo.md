@@ -84,6 +84,7 @@ src/
     quads.rs       Rectángulos/píldoras instanciados
     text.rs        Buffers, glyphon y atlas compartido
     quads.wgsl     Shader de quads con esquinas redondeadas
+  tests/           Tests unitarios, un archivo por módulo
 ```
 
 El empaquetado nativo vive en `scripts/`, los iconos en `assets/` y el
@@ -135,6 +136,12 @@ compartido falla, la ventana secundaria cae a aislado.
 ```bash
 cargo test
 ```
+
+Los tests unitarios viven en `src/tests/<módulo>.rs`. Cada módulo los declara
+con `#[path = "tests/..."] mod tests;`, así que conservan el acceso a `super::*`
+y a las APIs privadas del módulo original. El directorio `tests/` en la raíz
+queda reservado para futuros tests de integración (crate externo, solo API
+pública).
 
 Los tests de `render::text` necesitan un adaptador GPU real. En CI o en
 entornos headless se omiten:

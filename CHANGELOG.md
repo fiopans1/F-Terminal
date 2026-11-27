@@ -111,6 +111,9 @@ usa [Versionado Semántico](https://semver.org/lang/es/).
 
 ### Changed
 
+- Los tests unitarios viven ahora en `src/tests/`, un archivo por módulo, en
+  lugar de estar mezclados con el código de producción. Cada módulo los declara
+  con `#[path]`, así que conservan el acceso a los items privados.
 - Los splits se crean ahora con las flechas en las cuatro direcciones:
   `Cmd+Shift+←/→/↑/↓` en macOS y `Ctrl+Shift+←/→/↑/↓` en Linux/Windows. Se
   eliminan `Cmd+D`, `Cmd+Shift+D/S` y `Ctrl+Shift+D/S`, que chocaban con

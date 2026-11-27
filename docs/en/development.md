@@ -84,6 +84,7 @@ src/
     quads.rs       Instanced rectangles/pills
     text.rs        Buffers, glyphon and shared atlas
     quads.wgsl     Quad shader with rounded corners
+  tests/           Unit tests, one file per module
 ```
 
 Native packaging lives in `scripts/`, icons in `assets/` and the release
@@ -135,6 +136,12 @@ to isolated.
 ```bash
 cargo test
 ```
+
+Unit tests live in `src/tests/<module>.rs`. Each module declares them with
+`#[path = "tests/..."] mod tests;`, so they remain children of the original
+module and keep access to `super::*` and private APIs. The crate-root `tests/`
+directory stays available for future integration tests (external crate, public
+API only).
 
 The `render::text` tests need a real GPU adapter. In CI or headless
 environments they are skipped:
