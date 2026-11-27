@@ -3726,6 +3726,7 @@ fn refresh_scope(action: &GitAction) -> RefreshScope {
         | GitAction::Unstage { .. }
         | GitAction::UnstageAll => RefreshScope::Status,
         GitAction::Discard { .. } => RefreshScope::WorkingDetail,
+        GitAction::RevertFile { .. } => RefreshScope::WorkingDetail,
         GitAction::Commit { .. }
         | GitAction::Checkout { .. }
         | GitAction::CreateBranch { .. }

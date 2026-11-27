@@ -11,15 +11,16 @@ use crate::config::Config;
 use crate::diff_view::build_file_frame;
 use crate::event::UserEvent;
 use crate::forge::{ForgeKind, ForgeTokens};
+use crate::git::ops as git_ops;
 use crate::layout::Rect;
 use crate::render::Renderer;
 use crate::render::quads::Quad;
 use crate::render::scene::{Label, PaneLayer, Scene};
 use crate::review::{
-    self, CodeReview, FileDiff, FileStatus, RemoteChange, ReviewDetail, ReviewSummary,
+    self, CodeReview, FileDiff, FileStatus, RemoteChange, ReviewDetail, ReviewKind, ReviewSummary,
 };
 use crate::term::color::to_linear;
-use crate::ui::{self, Tokens};
+use crate::ui::{self, ButtonKind, ButtonSpec, Tokens};
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum Focus {
@@ -46,6 +47,7 @@ struct Layout {
     diff: Option<Rect>,
     diff_title: Option<Rect>,
     diff_text: Option<Rect>,
+    revert: Option<Rect>,
     content: Rect,
     review_rows: Vec<(usize, Rect)>,
     file_rows: Vec<(usize, Rect)>,
@@ -77,6 +79,10 @@ pub struct ReviewWindow {
     prs_request_id: u64,
     pr_filtered: Vec<usize>,
     pr_search_text: Vec<String>,
+    revert_request_id: u64,
+    reverting: bool,
+    pending_revert: Option<usize>,
+    revert_status: Option<(String, bool)>,
     close_requested: bool,
 }
 
@@ -110,6 +116,10 @@ impl ReviewWindow {
             prs_request_id: 0,
             pr_filtered: Vec::new(),
             pr_search_text: Vec::new(),
+            revert_request_id: 0,
+            reverting: false,
+            pending_revert: None,
+            revert_status: None,
             close_requested: false,
         }
     }
@@ -192,6 +202,8 @@ impl ReviewWindow {
         self.file_offset = 0;
         self.review.scroll_row = 0;
         self.review.scroll_col = 0;
+        self.pending_revert = None;
+        self.revert_status = None;
         self.window.request_redraw();
     }
 
@@ -222,6 +234,39 @@ impl ReviewWindow {
         self.window.request_redraw();
     }
 
+    pub fn apply_revert(
+        &mut self,
+        request_id: u64,
+        path: String,
+        result: std::result::Result<String, String>,
+    ) {
+        if request_id != self.revert_request_id {
+            return;
+        }
+        self.reverting = false;
+        self.pending_revert = None;
+        match result {
+            Ok(message) => {
+                let status = format!("{message} · {path}");
+                if let Some(summary) = self
+                    .review
+                    .detail
+                    .as_ref()
+                    .map(|detail| detail.summary.clone())
+                {
+                    self.start_detail(summary);
+                } else {
+                    self.window.request_redraw();
+                }
+                self.revert_status = Some((status, false));
+            }
+            Err(error) => {
+                self.revert_status = Some((format!("{error} · {path}"), true));
+                self.window.request_redraw();
+            }
+        }
+    }
+
     pub fn apply_pull_requests(
         &mut self,
         request_id: u64,
@@ -243,6 +288,10 @@ impl ReviewWindow {
     }
 
     fn refresh_current(&mut self) {
+        self.revert_request_id = self.revert_request_id.wrapping_add(1);
+        self.reverting = false;
+        self.pending_revert = None;
+        self.revert_status = None;
         match self.mode {
             ListMode::Local => {
                 self.start_list_load();
@@ -394,6 +443,10 @@ impl ReviewWindow {
         self.reviewed.clear();
         self.selected_file = 0;
         self.file_offset = 0;
+        self.revert_request_id = self.revert_request_id.wrapping_add(1);
+        self.reverting = false;
+        self.pending_revert = None;
+        self.revert_status = None;
 
         if mode == ListMode::PullRequests {
             if !self.review.prs_loaded && !self.review.prs_loading {
@@ -412,6 +465,10 @@ impl ReviewWindow {
         self.reviewed.clear();
         self.selected_file = 0;
         self.file_offset = 0;
+        self.revert_request_id = self.revert_request_id.wrapping_add(1);
+        self.reverting = false;
+        self.pending_revert = None;
+        self.revert_status = None;
     }
 
     fn reset_pr_selection(&mut self) {
@@ -461,6 +518,10 @@ impl ReviewWindow {
     fn start_detail(&mut self, summary: ReviewSummary) {
         self.request_id = self.request_id.wrapping_add(1);
         let request_id = self.request_id;
+        self.revert_request_id = self.revert_request_id.wrapping_add(1);
+        self.pending_revert = None;
+        self.reverting = false;
+        self.revert_status = None;
         let (repo, summary) = self.review.start_loading_summary(request_id, summary);
 
         let proxy = self.proxy.clone();
@@ -499,6 +560,66 @@ impl ReviewWindow {
         let path = file.path.clone();
         if !self.reviewed.remove(&path) {
             self.reviewed.insert(path);
+        }
+        self.window.request_redraw();
+    }
+
+    fn working_file(&self) -> Option<&FileDiff> {
+        let detail = self.review.detail.as_ref()?;
+        if !matches!(detail.summary.kind, ReviewKind::Working) {
+            return None;
+        }
+        detail.files.get(self.selected_file)
+    }
+
+    fn request_revert(&mut self) {
+        if self.reverting {
+            return;
+        }
+        let Some(file) = self.working_file().cloned() else {
+            return;
+        };
+        if self.pending_revert == Some(self.selected_file) {
+            self.perform_revert(file);
+        } else {
+            self.pending_revert = Some(self.selected_file);
+            self.revert_status = None;
+            self.window.request_redraw();
+        }
+    }
+
+    fn perform_revert(&mut self, file: FileDiff) {
+        let repo = self.review.repo.clone();
+        let paths = file.revert_paths();
+        let untracked = file.untracked;
+        let path = file.path.clone();
+        self.pending_revert = None;
+        self.reverting = true;
+        self.revert_request_id = self.revert_request_id.wrapping_add(1);
+        let request_id = self.revert_request_id;
+
+        let proxy = self.proxy.clone();
+        let window_id = self.window.id();
+        let event_path = path.clone();
+        let spawned = std::thread::Builder::new()
+            .name("review-revert-file".into())
+            .spawn(move || {
+                let action = git_ops::Action::RevertFile { paths, untracked };
+                let result = git_ops::apply(&repo, &action).map_err(|error| format!("{error:#}"));
+                let _ = proxy.send_event(UserEvent::ReviewFileReverted {
+                    window_id,
+                    request_id,
+                    path: event_path,
+                    result,
+                });
+            });
+
+        if spawned.is_err() {
+            self.reverting = false;
+            self.revert_status = Some(("Could not start the revert".to_owned(), true));
+        } else {
+            let verb = if untracked { "Deleting" } else { "Reverting" };
+            self.revert_status = Some((format!("{verb} {path}…"), false));
         }
         self.window.request_redraw();
     }
@@ -548,12 +669,22 @@ impl ReviewWindow {
         }
 
         if matches!(event.logical_key, Key::Named(NamedKey::Escape)) {
+            if self.pending_revert.take().is_some() {
+                self.window.request_redraw();
+                return;
+            }
             if self.search_focused {
                 self.search_focused = false;
                 self.window.request_redraw();
             } else {
                 self.close_requested = true;
             }
+            return;
+        }
+
+        if self.pending_revert.is_some() && matches!(event.logical_key, Key::Named(NamedKey::Enter))
+        {
+            self.request_revert();
             return;
         }
 
@@ -656,6 +787,7 @@ impl ReviewWindow {
                 _ => {}
             },
             Focus::Files => {
+                let previous_file = self.selected_file;
                 let file_count = self
                     .review
                     .detail
@@ -695,10 +827,17 @@ impl ReviewWindow {
                     Key::Character(character) if character.as_str() == "m" => {
                         self.toggle_reviewed(self.selected_file);
                     }
+                    Key::Named(NamedKey::Delete) | Key::Named(NamedKey::Backspace) => {
+                        self.request_revert();
+                    }
                     Key::Named(NamedKey::Enter) => self.focus = Focus::Diff,
                     _ => {}
                 }
 
+                if self.selected_file != previous_file {
+                    self.pending_revert = None;
+                    self.revert_status = None;
+                }
                 self.review.scroll_row = 0;
                 self.review.scroll_col = 0;
             }
@@ -734,6 +873,9 @@ impl ReviewWindow {
                     }
                     Key::Named(NamedKey::ArrowRight) => {
                         self.review.scroll_col = (self.review.scroll_col + 4).min(4000);
+                    }
+                    Key::Named(NamedKey::Delete) | Key::Named(NamedKey::Backspace) => {
+                        self.request_revert();
                     }
                     _ => {}
                 }
@@ -777,6 +919,7 @@ impl ReviewWindow {
         {
             self.focus = Focus::Reviews;
             self.search_focused = true;
+            self.pending_revert = None;
             self.window.request_redraw();
             return;
         }
@@ -811,9 +954,18 @@ impl ReviewWindow {
                     self.selected_file = *index;
                     self.review.scroll_row = 0;
                     self.review.scroll_col = 0;
+                    self.pending_revert = None;
+                    self.revert_status = None;
                 }
             }
             self.window.request_redraw();
+            return;
+        }
+
+        if let Some(revert) = layout.revert
+            && revert.contains(x, y)
+        {
+            self.request_revert();
             return;
         }
 
@@ -821,6 +973,7 @@ impl ReviewWindow {
             && diff.contains(x, y)
         {
             self.focus = Focus::Diff;
+            self.pending_revert = None;
             self.window.request_redraw();
         }
     }
@@ -1021,6 +1174,15 @@ impl ReviewWindow {
             })
             .unwrap_or((None, None));
 
+        let revert = diff_title
+            .filter(|_| {
+                detail.is_some_and(|detail| matches!(detail.summary.kind, ReviewKind::Working))
+            })
+            .map(|title| {
+                let width = ui::px(86.0, scale).min(title.width);
+                Rect::new(title.right() - width, title.y, width, title.height)
+            });
+
         let pane_title_height = ui::px(32.0, scale);
         let file_area_height = files.map(|rect| rect.height).unwrap_or(body.height);
         let file_visible = (((file_area_height - pane_title_height) / ui::px(38.0, scale).max(1.0))
@@ -1073,6 +1235,7 @@ impl ReviewWindow {
             diff,
             diff_title,
             diff_text,
+            revert,
             content,
             review_rows,
             file_rows,
@@ -1586,15 +1749,56 @@ impl ReviewWindow {
                         file.additions,
                         file.deletions
                     );
+                    let (stats, stats_color) = if let Some((status, is_error)) = &self.revert_status
+                    {
+                        (
+                            format!("{stats}   ·   {status}"),
+                            if *is_error {
+                                theme.diff_remove_text
+                            } else {
+                                theme.diff_add_text
+                            },
+                        )
+                    } else {
+                        (stats, theme.sidebar_text)
+                    };
+                    let stats_width = layout.revert.map_or(title.width, |rect| {
+                        (rect.x - title.x - 8.0 * scale).max(1.0)
+                    });
                     labels.push(Label {
                         text: stats,
                         x: title.x,
-                        y: title.y,
-                        width: title.width,
+                        y: title.y + (title.height - tokens.small * 1.35) / 2.0,
+                        width: stats_width,
                         font_size: tokens.small,
-                        color: theme.sidebar_text,
+                        color: stats_color,
                         bold: true,
                     });
+
+                    if let Some(rect) = layout.revert {
+                        let pending = self.pending_revert == Some(self.selected_file);
+                        let label = if pending {
+                            "Confirm"
+                        } else if file.untracked {
+                            "Delete"
+                        } else {
+                            "Revert"
+                        };
+                        ui::button(
+                            &mut quads,
+                            &mut labels,
+                            ButtonSpec {
+                                rect,
+                                label,
+                                kind: ButtonKind::Danger,
+                                enabled: !self.reverting,
+                                hovered: rect.contains(cursor.0, cursor.1),
+                                focused: false,
+                            },
+                            theme,
+                            tokens,
+                        );
+                    }
 
                     if file.binary {
                         labels.push(Label {
@@ -1774,7 +1978,15 @@ impl ReviewWindow {
         if self.search_focused && self.mode == ListMode::PullRequests {
             return "Type to filter   Enter open   ↑↓ move   Esc exit search";
         }
+        if self.pending_revert.is_some() {
+            return "Revert this file? Click Confirm or press Enter   Esc cancel";
+        }
 
+        let working = self
+            .review
+            .detail
+            .as_ref()
+            .is_some_and(|detail| matches!(detail.summary.kind, ReviewKind::Working));
         match focus {
             Focus::Reviews if self.mode == ListMode::PullRequests => {
                 "↑↓ PR/MR   Enter review   / or Ctrl+F search   R refresh   Tab panel   Esc close"
@@ -1782,7 +1994,13 @@ impl ReviewWindow {
             Focus::Reviews => {
                 "↑↓ review   Enter open   / search PRs   R refresh   Tab panel   Esc close"
             }
+            Focus::Files if working => {
+                "↑↓ file   Space mark   Enter diff   Del revert   Tab panel   Esc close"
+            }
             Focus::Files => "↑↓ file   Space mark   Enter diff   Tab panel   Esc close",
+            Focus::Diff if working => {
+                "↑↓ scroll   ←→ horizontal   PgUp/PgDn   Del revert   Tab panel   Esc close"
+            }
             Focus::Diff => "↑↓ scroll   ←→ horizontal   PgUp/PgDn   Tab panel   Esc close",
         }
     }

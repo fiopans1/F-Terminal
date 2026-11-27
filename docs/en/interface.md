@@ -161,10 +161,12 @@ Details:
   `↑↓`, `Home`/`End` and `Enter`, or click a branch to check it out. `Esc` or a
   click outside closes it.
 - Clicking the changes bubble: opens a split view on the right with the full
-  working tree diff, with per-file headers, line numbers and the
-  addition/deletion colors used by Code Review. `R` reloads, `Esc` or `×`
-  closes it, the wheel/`↑↓`/`PgUp`/`PgDn` scroll and `Shift`+wheel or
-  `←`/`→` scroll horizontally.
+  working tree diff. Each file is a block with its own header, a separator rule
+  and a `⟲ revert` action (`⟲ delete` for untracked files); the first click
+  arms it, the second confirms, and `Esc` cancels. Untracked files are deleted
+  and tracked files return to `HEAD`. `R` reloads, `Esc` or `×` closes it, the
+  wheel/`↑↓`/`PgUp`/`PgDn` scroll and `Shift`+wheel or `←`/`→` scroll
+  horizontally.
 - The terminal panel is painted with the TUI's actual background (including
   opencode's SGR colors), so the footer and leftover space do not show a strip
   of the app color.

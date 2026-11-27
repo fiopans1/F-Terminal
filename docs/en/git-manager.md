@@ -86,7 +86,8 @@ In the **REFS** tab:
 
 ## Git manager limitations
 
-- No rebase, cherry-pick, revert, tag management or force push.
+- No `git revert` (revert commits), rebase, cherry-pick, tag management or
+  force push. The manager's discard action only reverts working-tree changes.
 - Deleting a branch uses `-d`; if it is not merged, Git returns an error.
 - Pull is fast-forward only.
 - Conflicts are shown and can be aborted, but there is no built-in resolution

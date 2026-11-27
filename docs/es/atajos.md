@@ -81,6 +81,7 @@ OpenCode, Claude Code y Codex para insertar un salto de línea en el prompt.
 | Abrir review o PR | `Enter` |
 | Buscar PRs | `/` o `Cmd/Ctrl+F` |
 | Marcar archivo revisado | `Espacio` o `M` |
+| Revertir archivo (solo Cambios locales) | `Supr`/`Backspace` o botón **Revert** |
 | Cambiar de panel | `Tab` |
 | Refrescar | `R` |
 | Salir del buscador | `Esc` |

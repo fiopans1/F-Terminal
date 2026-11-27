@@ -700,6 +700,19 @@ impl ApplicationHandler<UserEvent> for App {
                 }
                 return;
             }
+            UserEvent::ReviewFileReverted {
+                window_id,
+                request_id,
+                path,
+                result,
+            } => {
+                if let Some(review) = &mut self.review
+                    && review.window_id() == window_id
+                {
+                    review.apply_revert(request_id, path, result);
+                }
+                return;
+            }
             UserEvent::PullRequestsLoaded {
                 window_id,
                 request_id,
@@ -842,6 +855,14 @@ impl ApplicationHandler<UserEvent> for App {
             } => {
                 state.on_working_diff_loaded(pane, cwd, generation, result);
             }
+            UserEvent::WorkingDiffReverted {
+                pane,
+                cwd,
+                path,
+                result,
+            } => {
+                state.on_working_diff_reverted(pane, cwd, path, result);
+            }
             UserEvent::CompletionCommands(commands) => {
                 state.on_completion_commands(commands, &self.config);
             }
@@ -863,6 +884,7 @@ impl ApplicationHandler<UserEvent> for App {
             | UserEvent::OpenGitManager { .. }
             | UserEvent::ReviewListLoaded { .. }
             | UserEvent::ReviewLoaded { .. }
+            | UserEvent::ReviewFileReverted { .. }
             | UserEvent::PullRequestsLoaded { .. }
             | UserEvent::GitSnapshotLoaded { .. }
             | UserEvent::GitStatusLoaded { .. }
@@ -1342,6 +1364,9 @@ type Occlusion = (PaneId, usize, usize, usize, usize);
 struct DiffView {
     pane: PaneId,
     cwd: PathBuf,
+    /// Repository root resolved when the diff was loaded. Revert commands run
+    /// from here so paths are always repository-relative.
+    repo: Option<PathBuf>,
     generation: u64,
     loading: bool,
     error: Option<String>,
@@ -1350,6 +1375,10 @@ struct DiffView {
     max_cols: usize,
     scroll_row: usize,
     scroll_col: usize,
+    /// File waiting for a second click/Enter before its changes are reverted.
+    pending_revert: Option<usize>,
+    reverting: bool,
+    status: Option<(String, bool)>,
 }
 
 #[derive(Clone, Debug)]
@@ -4166,6 +4195,7 @@ impl WindowState {
         self.diff_view = Some(DiffView {
             pane: pane_id,
             cwd: cwd.clone(),
+            repo: None,
             generation,
             loading: true,
             error: None,
@@ -4174,6 +4204,9 @@ impl WindowState {
             max_cols: 0,
             scroll_row: 0,
             scroll_col: 0,
+            pending_revert: None,
+            reverting: false,
+            status: None,
         });
         self.focus = Focus::Diff;
         self.mark_editor_changed(true, None);
@@ -4196,8 +4229,11 @@ impl WindowState {
             .name("working-diff".into())
             .spawn(move || {
                 let result = crate::git::repository_root(&thread_cwd)
-                    .and_then(|root| review::load_detail(&root, &summary, &Default::default()))
-                    .map(|detail| {
+                    .and_then(|root| {
+                        review::load_detail(&root, &summary, &Default::default())
+                            .map(|detail| (root, detail))
+                    })
+                    .map(|(repo, detail)| {
                         let rows = build_diff_rows(&detail);
                         let max_cols = rows
                             .iter()
@@ -4205,6 +4241,7 @@ impl WindowState {
                             .max()
                             .unwrap_or(0);
                         crate::event::WorkingDiffPayload {
+                            repo,
                             detail,
                             rows,
                             max_cols,
@@ -4245,10 +4282,12 @@ impl WindowState {
         diff.loading = false;
         match result {
             Ok(payload) => {
+                diff.repo = Some(payload.repo);
                 diff.rows = payload.rows;
                 diff.max_cols = payload.max_cols;
                 diff.scroll_row = 0;
                 diff.scroll_col = 0;
+                diff.pending_revert = None;
                 log::debug!(
                     "working diff loaded: {} file(s), {} row(s)",
                     payload.detail.files.len(),
@@ -4261,11 +4300,118 @@ impl WindowState {
                 diff.rows.clear();
                 diff.max_cols = 0;
                 diff.detail = None;
+                diff.pending_revert = None;
                 log::warn!("failed to load working diff: {error}");
                 diff.error = Some(error);
             }
         }
         self.mark_editor_changed(true, None);
+        self.window.request_redraw();
+    }
+
+    fn on_working_diff_reverted(
+        &mut self,
+        pane_id: PaneId,
+        cwd: PathBuf,
+        path: String,
+        result: Result<String, String>,
+    ) {
+        let (ok, message) = {
+            let Some(diff) = self.diff_view.as_mut() else {
+                return;
+            };
+            if diff.pane != pane_id || diff.cwd != cwd {
+                return;
+            }
+            diff.reverting = false;
+            match result {
+                Ok(message) => {
+                    diff.status = Some((format!("{message} · {path}"), false));
+                    (true, message)
+                }
+                Err(error) => {
+                    diff.status = Some((format!("{error} · {path}"), true));
+                    (false, error)
+                }
+            }
+        };
+        if ok {
+            log::info!("reverted {path}: {message}");
+            self.request_git_status(pane_id);
+            self.reload_diff_view();
+        } else {
+            log::warn!("failed to revert {path}: {message}");
+            self.window.request_redraw();
+        }
+    }
+
+    fn diff_file_at(&self, x: f32, y: f32) -> Option<usize> {
+        let layout = self.view.editor?;
+        if !layout.text.contains(x, y) {
+            return None;
+        }
+        let metrics = self.renderer.cell_metrics();
+        let row = ((y - layout.text.y) / metrics.height).floor().max(0.0) as usize;
+        let diff = self.diff_view.as_ref()?;
+        let row = diff.rows.get(diff.scroll_row + row)?;
+        (row.kind == DiffRowKind::File)
+            .then_some(row.file)
+            .flatten()
+    }
+
+    fn revert_diff_file(&mut self, index: usize) {
+        let Some(diff) = self.diff_view.as_mut() else {
+            return;
+        };
+        if diff.reverting {
+            diff.pending_revert = None;
+            return;
+        }
+        let Some(repo) = diff.repo.clone() else {
+            diff.status = Some(("Repository is not ready yet".to_owned(), true));
+            return;
+        };
+        let Some(file) = diff
+            .detail
+            .as_ref()
+            .and_then(|detail| detail.files.get(index))
+            .cloned()
+        else {
+            diff.pending_revert = None;
+            return;
+        };
+
+        let pane = diff.pane;
+        let cwd = diff.cwd.clone();
+        let paths = file.revert_paths();
+        let untracked = file.untracked;
+        let path = file.path.clone();
+        diff.pending_revert = None;
+        diff.reverting = true;
+        let verb = if untracked { "Deleting" } else { "Reverting" };
+        diff.status = Some((format!("{verb} {path}…"), false));
+        self.diff_frame_cache = None;
+
+        let proxy = self.proxy.clone();
+        let spawned = std::thread::Builder::new()
+            .name("git-revert-file".into())
+            .spawn(move || {
+                let action = git_ops::Action::RevertFile { paths, untracked };
+                let result = git_ops::apply(&repo, &action).map_err(|error| format!("{error:#}"));
+                let _ = proxy.send_event(UserEvent::WorkingDiffReverted {
+                    pane,
+                    cwd,
+                    path,
+                    result,
+                });
+            });
+
+        if spawned.is_err()
+            && let Some(diff) = self.diff_view.as_mut()
+        {
+            diff.reverting = false;
+            diff.status = Some(("Could not start the revert".to_owned(), true));
+        }
         self.window.request_redraw();
     }
 
@@ -4349,6 +4495,24 @@ impl WindowState {
                 return true;
             }
             return false;
+        }
+
+        if let Some(index) = self.diff_view.as_ref().and_then(|diff| diff.pending_revert) {
+            match &event.logical_key {
+                Key::Named(NamedKey::Escape) => {
+                    if let Some(diff) = self.diff_view.as_mut() {
+                        diff.pending_revert = None;
+                    }
+                    self.diff_frame_cache = None;
+                    self.window.request_redraw();
+                    return true;
+                }
+                Key::Named(NamedKey::Enter) => {
+                    self.revert_diff_file(index);
+                    return true;
+                }
+                _ => {}
+            }
         }
 
         let page = self
@@ -7632,6 +7796,18 @@ impl WindowState {
                     }
                 } else if self.diff_view.is_some() {
                     self.focus = Focus::Diff;
+                    if let Some(index) = self.diff_file_at(x, y) {
+                        let pending = self.diff_view.as_ref().and_then(|diff| diff.pending_revert);
+                        if pending == Some(index) {
+                            self.revert_diff_file(index);
+                        } else if let Some(diff) = self.diff_view.as_mut() {
+                            diff.pending_revert = Some(index);
+                            diff.status = None;
+                        }
+                    } else if let Some(diff) = self.diff_view.as_mut() {
+                        diff.pending_revert = None;
+                    }
+                    self.diff_frame_cache = None;
                 } else {
                     self.focus = Focus::Editor;
                     self.set_editor_cursor_from_point(self.cursor_position);
@@ -8420,7 +8596,7 @@ impl WindowState {
                     frame
                 };
                 if !rebuilt {
-                    push_diff_background_quads(diff, layout.text, metrics, theme, &mut quads);
+                    push_diff_row_quads(diff, layout.text, metrics, theme, &mut quads);
                 }
                 (layout.text, frame)
             });
@@ -8752,23 +8928,58 @@ impl WindowState {
 
             let header_font = ui_font_size * 0.88;
             let header_line = header_font * 1.35;
-            let title = if let Some(diff) = &self.diff_view {
-                diff.detail
-                    .as_ref()
-                    .map(|detail| {
-                        format!(
-                            "Local changes · {} files · +{} −{}",
-                            detail.files.len(),
-                            detail.additions,
-                            detail.deletions
-                        )
-                    })
-                    .unwrap_or_else(|| "Local changes".to_owned())
+            let (title, title_color) = if let Some(diff) = &self.diff_view {
+                if let Some(index) = diff.pending_revert {
+                    let file = diff
+                        .detail
+                        .as_ref()
+                        .and_then(|detail| detail.files.get(index));
+                    match file {
+                        Some(file) => {
+                            let verb = if file.untracked {
+                                "Delete untracked"
+                            } else {
+                                "Revert changes in"
+                            };
+                            (
+                                format!("{verb} {}? Click again or press Enter", file.path),
+                                theme.diff_remove_text,
+                            )
+                        }
+                        None => ("Local changes".to_owned(), theme.sidebar_text),
+                    }
+                } else if let Some((status, is_error)) = &diff.status {
+                    (
+                        status.clone(),
+                        if *is_error {
+                            theme.diff_remove_text
+                        } else {
+                            theme.diff_add_text
+                        },
+                    )
+                } else {
+                    let title = diff
+                        .detail
+                        .as_ref()
+                        .map(|detail| {
+                            format!(
+                                "Local changes · {} files · +{} −{}",
+                                detail.files.len(),
+                                detail.additions,
+                                detail.deletions
+                            )
+                        })
+                        .unwrap_or_else(|| "Local changes".to_owned());
+                    (title, theme.sidebar_text)
+                }
             } else {
-                self.editor
-                    .as_ref()
-                    .map(|editor| editor.path.display().to_string())
-                    .unwrap_or_default()
+                (
+                    self.editor
+                        .as_ref()
+                        .map(|editor| editor.path.display().to_string())
+                        .unwrap_or_default(),
+                    theme.sidebar_text,
+                )
             };
             let editor_dirty =
                 self.diff_view.is_none() && self.editor.as_ref().is_some_and(|editor| editor.dirty);
@@ -8781,7 +8992,7 @@ impl WindowState {
                 width: (layout.close.x - layout.header.x - layout.padding * 2.0 - dirty_width)
                     .max(1.0),
                 font_size: header_font,
-                color: theme.sidebar_text,
+                color: title_color,
                 bold: false,
             });
 
@@ -10419,6 +10630,8 @@ fn build_diff_frame(
         };
     }
 
+    push_diff_row_quads(diff, area, metrics, theme, quads);
+
     let start = diff.scroll_row.min(diff.rows.len().saturating_sub(rows));
     for index in 0..rows {
         let mut row = Row::default();
@@ -10429,29 +10642,44 @@ fn build_diff_frame(
                 .skip(diff.scroll_col)
                 .take(cols)
                 .collect();
-            let (background, color) = match diff_row.kind {
-                DiffRowKind::File => (Some(theme.sidebar_active), theme.accent),
-                DiffRowKind::Add => (Some(theme.diff_add_background), theme.diff_add_text),
-                DiffRowKind::Remove => (Some(theme.diff_remove_background), theme.diff_remove_text),
-                DiffRowKind::Context => (None, theme.foreground),
-                DiffRowKind::Hunk => (None, theme.diff_hunk_text),
-                DiffRowKind::Meta => (None, theme.diff_meta_text),
-                DiffRowKind::Separator => (None, theme.background),
+            let color = match diff_row.kind {
+                DiffRowKind::File => {
+                    if diff.pending_revert.is_some() && diff.pending_revert == diff_row.file {
+                        theme.diff_remove_text
+                    } else {
+                        theme.accent
+                    }
+                }
+                DiffRowKind::Add => theme.diff_add_text,
+                DiffRowKind::Remove => theme.diff_remove_text,
+                DiffRowKind::Context => theme.foreground,
+                DiffRowKind::Hunk => theme.diff_hunk_text,
+                DiffRowKind::Meta => theme.diff_meta_text,
+                DiffRowKind::Separator => theme.background,
             };
-            if let Some(background) = background {
-                quads.push(Quad::new(
-                    area.x,
-                    area.y + index as f32 * metrics.height,
-                    area.width,
-                    metrics.height,
-                    to_linear(background, 1.0),
-                ));
-            }
             if !text.is_empty() {
-                row.runs.push(Run {
-                    range: 0..text.len(),
-                    color,
-                });
+                if diff_row.kind == DiffRowKind::File {
+                    if let Some(action) = text.find('⟲') {
+                        row.runs.push(Run {
+                            range: 0..action,
+                            color,
+                        });
+                        row.runs.push(Run {
+                            range: action..text.len(),
+                            color: theme.diff_remove_text,
+                        });
+                    } else {
+                        row.runs.push(Run {
+                            range: 0..text.len(),
+                            color,
+                        });
+                    }
+                } else {
+                    row.runs.push(Run {
+                        range: 0..text.len(),
+                        color,
+                    });
+                }
                 row.text = text;
             }
         }
@@ -10466,9 +10694,9 @@ fn build_diff_frame(
     }
 }
 
-/// Background quads for the visible diff rows. Kept separate from the text
-/// frame so a cached frame still gets its row backgrounds.
-fn push_diff_background_quads(
+/// Backgrounds and rules for the visible diff rows. Kept separate from the
+/// text frame so a cached frame still gets its decorations.
+fn push_diff_row_quads(
     diff: &DiffView,
     area: Rect,
     metrics: CellMetrics,
@@ -10481,23 +10709,78 @@ fn push_diff_background_quads(
         let Some(row) = diff.rows.get(start + index) else {
             continue;
         };
-        let background = match row.kind {
-            DiffRowKind::File => Some(theme.sidebar_active),
-            DiffRowKind::Add => Some(theme.diff_add_background),
-            DiffRowKind::Remove => Some(theme.diff_remove_background),
-            DiffRowKind::Context
-            | DiffRowKind::Hunk
-            | DiffRowKind::Meta
-            | DiffRowKind::Separator => None,
-        };
-        if let Some(background) = background {
-            quads.push(Quad::new(
+        let y = area.y + index as f32 * metrics.height;
+        match row.kind {
+            DiffRowKind::File => {
+                let pending = diff.pending_revert.is_some() && diff.pending_revert == row.file;
+                let background = if pending {
+                    theme.diff_remove_background
+                } else {
+                    theme.sidebar_active
+                };
+                let accent = if pending {
+                    theme.diff_remove_text
+                } else {
+                    theme.accent
+                };
+                quads.push(Quad::new(
+                    area.x,
+                    y,
+                    area.width,
+                    metrics.height,
+                    to_linear(background, 1.0),
+                ));
+                quads.push(Quad::new(
+                    area.x,
+                    y,
+                    area.width,
+                    2.0,
+                    to_linear(accent, 1.0),
+                ));
+                quads.push(Quad::new(
+                    area.x,
+                    y,
+                    3.0,
+                    metrics.height,
+                    to_linear(accent, 1.0),
+                ));
+                quads.push(Quad::new(
+                    area.x,
+                    y + metrics.height - 1.0,
+                    area.width,
+                    1.0,
+                    to_linear(theme.border, 1.0),
+                ));
+            }
+            DiffRowKind::Add => quads.push(Quad::new(
                 area.x,
-                area.y + index as f32 * metrics.height,
+                y,
                 area.width,
                 metrics.height,
-                to_linear(background, 1.0),
-            ));
+                to_linear(theme.diff_add_background, 1.0),
+            )),
+            DiffRowKind::Remove => quads.push(Quad::new(
+                area.x,
+                y,
+                area.width,
+                metrics.height,
+                to_linear(theme.diff_remove_background, 1.0),
+            )),
+            DiffRowKind::Separator => quads.push(Quad::new(
+                area.x,
+                y + metrics.height / 2.0,
+                area.width,
+                1.0,
+                to_linear(theme.border, 1.0),
+            )),
+            DiffRowKind::Hunk => quads.push(Quad::new(
+                area.x,
+                y,
+                area.width,
+                metrics.height,
+                to_linear(theme.sidebar_hover, 1.0),
+            )),
+            DiffRowKind::Context | DiffRowKind::Meta => {}
         }
     }
 }
@@ -12140,6 +12423,38 @@ mod tests {
     }
 
     #[test]
+    fn diff_rows_mark_the_boundary_between_files() {
+        let file = |path: &str| crate::review::FileDiff {
+            path: path.to_owned(),
+            old_path: None,
+            status: FileStatus::Modified,
+            additions: 0,
+            deletions: 0,
+            binary: false,
+            untracked: false,
+            lines: Vec::new(),
+        };
+        let detail = ReviewDetail {
+            summary: ReviewSummary {
+                title: "Local changes".to_owned(),
+                subtitle: String::new(),
+                kind: ReviewKind::Working,
+            },
+            files: vec![file("a.rs"), file("b.rs")],
+            additions: 0,
+            deletions: 0,
+        };
+
+        let rows = build_diff_rows(&detail);
+        assert_eq!(rows[0].kind, DiffRowKind::File);
+        assert_eq!(rows[0].file, Some(0));
+        assert_eq!(rows[1].kind, DiffRowKind::Separator);
+        assert_eq!(rows[2].kind, DiffRowKind::File);
+        assert_eq!(rows[2].file, Some(1));
+        assert_eq!(rows[3].kind, DiffRowKind::Separator);
+    }
+
+    #[test]
     fn diff_rows_format_files_and_line_numbers() {
         let detail = ReviewDetail {
             summary: ReviewSummary {
@@ -12154,6 +12469,7 @@ mod tests {
                 additions: 1,
                 deletions: 1,
                 binary: false,
+                untracked: false,
                 lines: vec![
                     crate::review::DiffLine {
                         kind: DiffLineKind::Context,
@@ -12182,17 +12498,20 @@ mod tests {
         let rows = build_diff_rows(&detail);
         assert_eq!(rows[0].kind, DiffRowKind::File);
         assert!(rows[0].text.contains("src/lib.rs"));
-        assert!(rows[0].text.contains("+1 -1"));
+        assert!(rows[0].text.contains("+1 −1"));
+        assert!(rows[0].text.contains("revert"));
         assert_eq!(rows[1].kind, DiffRowKind::Context);
         assert!(rows[1].text.contains("fn main()"));
         assert_eq!(rows[2].kind, DiffRowKind::Add);
         assert!(rows[2].text.contains("+ "));
         assert_eq!(rows[3].kind, DiffRowKind::Remove);
         assert!(rows[3].text.contains("- "));
+        assert_eq!(rows[4].kind, DiffRowKind::Separator);
 
         let diff = DiffView {
             pane: PaneId(1),
             cwd: PathBuf::new(),
+            repo: Some(PathBuf::new()),
             generation: 1,
             loading: false,
             error: None,
@@ -12201,6 +12520,9 @@ mod tests {
             max_cols: 80,
             scroll_row: 0,
             scroll_col: 0,
+            pending_revert: None,
+            reverting: false,
+            status: None,
         };
         let theme = Theme::tokyo_night();
         let metrics = CellMetrics {

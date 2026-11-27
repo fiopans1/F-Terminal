@@ -81,6 +81,7 @@ Claude Code and Codex use to insert a line break in the prompt. `Ctrl+J` and
 | Open review or PR | `Enter` |
 | Search PRs | `/` or `Cmd/Ctrl+F` |
 | Mark file as reviewed | `Space` or `M` |
+| Revert file (Local changes only) | `Del`/`Backspace` or the **Revert** button |
 | Switch panel | `Tab` |
 | Refresh | `R` |
 | Leave the search box | `Esc` |

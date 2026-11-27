@@ -39,6 +39,9 @@ Remote support:
 - Per-file status: `M/A/D/R/B`.
 - `+additions −deletions` per file.
 - `Space` or `M` marks a file as reviewed.
+- In **Local changes**, the **Revert** button (or `Del`/`Backspace`) reverts
+  the selected file; the first click/press asks for confirmation and `Esc`
+  cancels. Untracked files are deleted.
 - Marks live only in memory for the session.
 - `Tab` switches panels; `Esc` or `×` closes.
 - The diff loads in the background and is discarded if it arrives late

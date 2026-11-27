@@ -78,7 +78,23 @@ pub struct FileDiff {
     pub additions: usize,
     pub deletions: usize,
     pub binary: bool,
+    /// The file is present in the working tree but not tracked by Git.
+    pub untracked: bool,
     pub lines: Vec<DiffLine>,
+}
+
+impl FileDiff {
+    /// Paths to pass to `git restore`/`git clean`. A rename needs both sides
+    /// so the old name comes back and the new one disappears.
+    pub fn revert_paths(&self) -> Vec<String> {
+        let mut paths = vec![self.path.clone()];
+        if let Some(old) = &self.old_path
+            && old != &self.path
+        {
+            paths.push(old.clone());
+        }
+        paths
+    }
 }
 
 #[derive(Clone, Debug)]
@@ -236,12 +252,15 @@ pub fn load_detail(
     summary: &ReviewSummary,
     tokens: &ForgeTokens,
 ) -> Result<ReviewDetail> {
+    let mut untracked_paths_found = Vec::new();
     let mut diff = match &summary.kind {
         ReviewKind::Working => {
             let tracked =
                 git(repo, &["diff", "--no-color", "--no-ext-diff", "HEAD"]).unwrap_or_default();
+            let (untracked, untracked_paths) = untracked_diff(repo)?;
+            untracked_paths_found = untracked_paths;
             let mut combined = tracked;
-            combined.push_str(&untracked_diff(repo)?);
+            combined.push_str(&untracked);
             combined
         }
         ReviewKind::Branch { base } => {
@@ -282,7 +301,10 @@ pub fn load_detail(
         diff.push_str("... diff truncated ...\n");
     }
 
-    let detail = parse_diff(&diff, summary.clone());
+    let mut detail = parse_diff(&diff, summary.clone());
+    for file in &mut detail.files {
+        file.untracked = untracked_paths_found.iter().any(|path| path == &file.path);
+    }
     Ok(detail)
 }
 
@@ -405,14 +427,16 @@ fn default_base(repo: &Path) -> Option<String> {
     None
 }
 
-fn untracked_diff(repo: &Path) -> Result<String> {
+fn untracked_diff(repo: &Path) -> Result<(String, Vec<String>)> {
     let status = git(repo, &["status", "--porcelain=v1", "--untracked-files=all"])?;
     let mut diff = String::new();
+    let mut paths = Vec::new();
 
     for line in status.lines() {
         let Some(path) = line.strip_prefix("?? ") else {
             continue;
         };
+        paths.push(path.to_owned());
         let file = repo.join(path);
         let Ok(file) = fs::File::open(&file) else {
             continue;
@@ -450,7 +474,7 @@ fn untracked_diff(repo: &Path) -> Result<String> {
         }
     }
 
-    Ok(diff)
+    Ok((diff, paths))
 }
 
 fn parse_diff(diff: &str, summary: ReviewSummary) -> ReviewDetail {
@@ -486,6 +510,7 @@ fn parse_diff(diff: &str, summary: ReviewSummary) -> ReviewDetail {
                 additions: 0,
                 deletions: 0,
                 binary: false,
+                untracked: false,
                 lines: Vec::new(),
             });
             continue;
@@ -723,5 +748,61 @@ index 123..456 100644
             .find(|line| line.kind == DiffLineKind::Remove)
             .unwrap();
         assert_eq!(remove.old, Some(2));
+    }
+
+    #[test]
+    fn rename_revert_paths_include_both_names() {
+        let file = FileDiff {
+            path: "new.rs".to_owned(),
+            old_path: Some("old.rs".to_owned()),
+            status: FileStatus::Renamed,
+            additions: 0,
+            deletions: 0,
+            binary: false,
+            untracked: false,
+            lines: Vec::new(),
+        };
+        assert_eq!(file.revert_paths(), vec!["new.rs", "old.rs"]);
+    }
+
+    #[test]
+    fn marks_untracked_files_in_working_diffs() {
+        let unique = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_nanos();
+        let dir =
+            std::env::temp_dir().join(format!("f-terminal-review-{}-{unique}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        git(&dir, &["init", "-q"]).unwrap();
+        git(&dir, &["config", "user.name", "Test"]).unwrap();
+        git(&dir, &["config", "user.email", "test@example.com"]).unwrap();
+        std::fs::write(dir.join("tracked.txt"), "base\n").unwrap();
+        git(&dir, &["add", "."]).unwrap();
+        git(&dir, &["commit", "-qm", "base"]).unwrap();
+        std::fs::write(dir.join("untracked.txt"), "new\n").unwrap();
+
+        let summary = ReviewSummary {
+            title: "Local changes".to_owned(),
+            subtitle: String::new(),
+            kind: ReviewKind::Working,
+        };
+        let detail = load_detail(&dir, &summary, &Default::default()).unwrap();
+        let untracked = detail
+            .files
+            .iter()
+            .find(|file| file.path == "untracked.txt")
+            .expect("untracked file in diff");
+        assert!(untracked.untracked);
+        assert_eq!(untracked.status, FileStatus::Added);
+        assert!(
+            detail
+                .files
+                .iter()
+                .filter(|file| file.path != "untracked.txt")
+                .all(|file| !file.untracked)
+        );
+
+        let _ = std::fs::remove_dir_all(dir);
     }
 }

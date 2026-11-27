@@ -39,6 +39,9 @@ Soporte de remotos:
 - Estado por archivo: `M/A/D/R/B`.
 - `+adiciones −eliminaciones` por archivo.
 - `Espacio` o `M` marca un archivo como revisado.
+- En **Cambios locales**, el botón **Revert** (o `Supr`/`Backspace`) revierte
+  el archivo seleccionado; el primer clic/pulsación pide confirmación y `Esc`
+  cancela. Los untracked se eliminan.
 - Las marcas viven solo en memoria durante la sesión.
 - `Tab` cambia de panel; `Esc` o `×` cierran.
 - El diff se carga en background y se descarta si llega tarde

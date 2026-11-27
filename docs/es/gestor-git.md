@@ -84,7 +84,9 @@ En la pestaña **REFS**:
 
 ## Limitaciones del gestor Git
 
-- Sin rebase, cherry-pick, revert, gestión de tags ni force push.
+- Sin `git revert` (commits de reversión), rebase, cherry-pick, gestión de tags
+  ni force push. El botón/tecla de descartar del gestor solo revierte cambios
+  del working tree.
 - Borrar rama usa `-d`; si no está mergeada, Git devuelve error.
 - Pull solo fast-forward.
 - Conflictos: se muestran y se pueden abortar, pero no hay editor de

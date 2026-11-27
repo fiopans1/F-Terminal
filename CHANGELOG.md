@@ -8,6 +8,11 @@ usa [Versionado Semántico](https://semver.org/lang/es/).
 
 ### Added
 
+- Diff del working tree embebido rediseñado: cada archivo es un bloque con
+  cabecera destacada, regla separadora y acción `⟲ revert` por archivo. El
+  segundo clic (o `Enter`) confirma, `Esc` cancela, los untracked se eliminan y
+  el resto vuelve a `HEAD`. Code Review añade el mismo revert en **Cambios
+  locales** con botón, `Supr` o `Backspace`.
 - `Ctrl+Shift+X` / `Cmd+Shift+X` cierra la sesión completa (todos sus panes),
   incluso con el editor enfocado y sin diálogo de confirmación; `Ctrl+Shift+W`
   cierra el pane enfocado y, si es el último, la sesión. En macOS

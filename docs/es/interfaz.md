@@ -163,10 +163,12 @@ Detalles:
   usar `↑↓`, `Home`/`End` y `Enter`, o hacer clic en una rama para hacer
   checkout. `Esc` o un clic fuera lo cierran.
 - Clic en la burbuja de cambios: abre una vista dividida a la derecha con el
-  diff completo del working tree, con cabeceras por archivo, números de línea y
-  los colores de adición/eliminación que usa Code Review. `R` recarga, `Esc` o
-  `×` la cierran, la rueda/`↑↓`/`PgUp`/`PgDn` hacen scroll y `Shift`+rueda o
-  `←`/`→` desplazan horizontalmente.
+  diff completo del working tree. Cada archivo es un bloque con una cabecera
+  propia, una regla separadora y una acción `⟲ revert` (o `⟲ delete` si es
+  untracked); el primer clic arma la acción, el segundo la confirma y `Esc` la
+  cancela. Los untracked se eliminan y el resto vuelve a `HEAD`. `R` recarga,
+  `Esc` o `×` la cierran, la rueda/`↑↓`/`PgUp`/`PgDn` hacen scroll y `Shift`+
+  rueda o `←`/`→` desplazan horizontalmente.
 - El panel de la terminal se pinta con el fondo real del TUI (incluidos los
   colores SGR de opencode), así que el footer y el espacio sobrante no muestran
   una franja del color de la app.

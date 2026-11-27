@@ -20,6 +20,8 @@ pub(crate) enum DiffRowKind {
 pub(crate) struct DiffRow {
     pub kind: DiffRowKind,
     pub text: String,
+    /// Index into `ReviewDetail::files` for rows that belong to a file.
+    pub file: Option<usize>,
 }
 
 /// Flatten a review detail into display rows. This is pure and can run on a
@@ -32,6 +34,7 @@ pub(crate) fn build_diff_rows(detail: &ReviewDetail) -> Vec<DiffRow> {
             rows.push(DiffRow {
                 kind: DiffRowKind::Separator,
                 text: String::new(),
+                file: None,
             });
         }
 
@@ -49,17 +52,25 @@ pub(crate) fn build_diff_rows(detail: &ReviewDetail) -> Vec<DiffRow> {
         let stats = if file.binary {
             "binary".to_owned()
         } else {
-            format!("+{} -{}", file.additions, file.deletions)
+            format!("+{} −{}", file.additions, file.deletions)
+        };
+        let untracked = if file.untracked { "   untracked" } else { "" };
+        let action = if file.untracked {
+            "⟲ delete"
+        } else {
+            "⟲ revert"
         };
         rows.push(DiffRow {
             kind: DiffRowKind::File,
-            text: format!("{status}  {path}   {stats}"),
+            text: format!(" ▾ {status}  {path}   {stats}{untracked}   {action}"),
+            file: Some(index),
         });
 
         if file.binary {
             rows.push(DiffRow {
                 kind: DiffRowKind::Meta,
                 text: "Binary file".to_owned(),
+                file: Some(index),
             });
             continue;
         }
@@ -95,8 +106,20 @@ pub(crate) fn build_diff_rows(detail: &ReviewDetail) -> Vec<DiffRow> {
                 DiffLineKind::Hunk => DiffRowKind::Hunk,
                 DiffLineKind::Meta => DiffRowKind::Meta,
             };
-            rows.push(DiffRow { kind, text });
+            rows.push(DiffRow {
+                kind,
+                text,
+                file: Some(index),
+            });
         }
+    }
+
+    if !detail.files.is_empty() {
+        rows.push(DiffRow {
+            kind: DiffRowKind::Separator,
+            text: String::new(),
+            file: None,
+        });
     }
 
     rows
@@ -142,11 +165,15 @@ pub fn build_file_frame(
                 .take(cols)
                 .collect();
 
-            if matches!(line.kind, DiffLineKind::Add | DiffLineKind::Remove) {
-                let color = if line.kind == DiffLineKind::Add {
-                    theme.diff_add_background
-                } else {
-                    theme.diff_remove_background
+            if matches!(
+                line.kind,
+                DiffLineKind::Add | DiffLineKind::Remove | DiffLineKind::Hunk
+            ) {
+                let color = match line.kind {
+                    DiffLineKind::Add => theme.diff_add_background,
+                    DiffLineKind::Remove => theme.diff_remove_background,
+                    DiffLineKind::Hunk => theme.sidebar_hover,
+                    _ => theme.background,
                 };
                 quads.push(Quad::new(
                     area.x,

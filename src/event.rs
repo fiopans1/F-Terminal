@@ -18,6 +18,7 @@ use crate::workspace::PaneId;
 
 #[derive(Debug)]
 pub struct WorkingDiffPayload {
+    pub repo: PathBuf,
     pub detail: ReviewDetail,
     pub rows: Vec<DiffRow>,
     pub max_cols: usize,
@@ -112,6 +113,13 @@ pub enum UserEvent {
         request_id: u64,
         result: Result<ReviewDetail, String>,
     },
+    /// A per-file revert from the Code Review window finished.
+    ReviewFileReverted {
+        window_id: WindowId,
+        request_id: u64,
+        path: String,
+        result: Result<String, String>,
+    },
     /// Open pull requests / merge requests loaded from the forge.
     PullRequestsLoaded {
         window_id: WindowId,
@@ -143,6 +151,13 @@ pub enum UserEvent {
         cwd: PathBuf,
         generation: u64,
         result: Result<WorkingDiffPayload, String>,
+    },
+    /// A per-file revert from the embedded working diff finished.
+    WorkingDiffReverted {
+        pane: PaneId,
+        cwd: PathBuf,
+        path: String,
+        result: Result<String, String>,
     },
     /// Full repository snapshot for the Git manager window.
     GitSnapshotLoaded {
